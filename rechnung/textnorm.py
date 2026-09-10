@@ -118,11 +118,49 @@ def find_domains(s: str) -> set[str]:
     return {d.lower() for d in _EMAIL_RE.findall(s) if d.lower() not in _FREEMAIL}
 
 
+_RATE_RE = re.compile(r"(\d{1,2}(?:[.,]\d{1,2})?)\s*%")
+_AMOUNT_TOKEN_RE = re.compile(r"-?\d{1,3}(?:[.\s]\d{3})*,\d{2}|-?\d+,\d{2}|-?\d{1,3}(?:,\d{3})*\.\d{2}")
+
+
+def _amounts(s: str) -> list[float]:
+    out = []
+    for m in _AMOUNT_TOKEN_RE.finditer(s or ""):
+        v = parse_amount(m.group(0))
+        if v is not None:
+            out.append(v)
+    return out
+
+
+def parse_tax_summary(raw: str) -> list[dict]:
+    """USt-Aufstellungs-Block -> Liste {satz, netto, ust}.
+
+    Sucht je Prozent-Token die Betraege im Abschnitt bis zum naechsten
+    Prozent-Token. Bei >=2 Betraegen gilt der erste als Netto-Basis, der
+    zweite als Steuerbetrag; bei genau einem als Steuerbetrag.
+    """
+    if not raw:
+        return []
+    matches = list(_RATE_RE.finditer(raw))
+    merged: dict[float, dict] = {}
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+        amts = _amounts(raw[m.end():end])
+        if not amts:
+            continue
+        rate = round(float(m.group(1).replace(",", ".")), 2)
+        base, tax = (amts[0], amts[1]) if len(amts) >= 2 else (None, amts[0])
+        merged.setdefault(rate, {"satz": rate, "netto": base, "ust": tax})
+    return [merged[k] for k in sorted(merged)]
+
+
 def coerce(raw: str, value_type: str):
     """Rohtext -> (Wert, ok?) je nach Feldtyp."""
     raw = (raw or "").strip()
     if not raw:
         return None, False
+    if value_type == "taxblock":
+        rows = parse_tax_summary(raw)
+        return rows, bool(rows)
     if value_type == "amount":
         v = parse_amount(raw)
         return v, v is not None

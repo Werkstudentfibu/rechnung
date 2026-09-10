@@ -2,65 +2,142 @@
 <html lang="de">
 <head>
 <meta charset="utf-8">
-<title>Rechnung – Training</title>
+<title>Rechnung – Training & Bibliothek</title>
 <style>
   * { box-sizing: border-box; }
   body { margin: 0; font: 14px/1.45 system-ui, sans-serif; color: #1a1a1a; }
-  header { padding: 10px 16px; background: #1c7550; color: #fff; display: flex; gap: 16px; align-items: center; }
-  header b { font-size: 15px; }
-  main { display: grid; grid-template-columns: 340px 1fr; height: calc(100vh - 44px); }
+  header { padding: 8px 16px; background: #1c7550; color: #fff; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  header b { font-size: 15px; margin-right: 12px; }
+  header button { background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.4); color: #fff; }
+  header button.active { background: #fff; color: #1c7550; }
+  main { padding: 0; }
+  .view { display: none; }
+  .view.active { display: block; }
+
+  #v-scan { display: none; grid-template-columns: 340px 1fr; height: calc(100vh - 42px); }
+  #v-scan.active { display: grid; }
   #list { border-right: 1px solid #ddd; overflow: auto; }
   #list .row { padding: 8px 12px; border-bottom: 1px solid #eee; cursor: pointer; }
   #list .row:hover { background: #f3f7f5; }
   #list .row.active { background: #e3efe9; }
-  .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #ddd; }
-  .badge.auto { background: #c9ecd6; } .badge.review { background: #ffe5b4; }
-  .badge.unknown_supplier, .badge.no_template { background: #f7d3d3; }
   #work { overflow: auto; padding: 12px; }
-  #fields { position: sticky; top: 0; background: #fff; padding-bottom: 8px; z-index: 5; }
-  table { border-collapse: collapse; width: 100%; }
-  td, th { border: 1px solid #e0e0e0; padding: 4px 6px; text-align: left; font-size: 13px; }
-  th { background: #f5f5f5; }
-  tr.sel { outline: 2px solid #1c7550; }
+  #fields { position: sticky; top: 0; background: #fff; padding-bottom: 8px; z-index: 5; border-bottom: 2px solid #1c7550; }
   .pdfwrap { position: relative; margin-top: 10px; display: inline-block; }
   .pdfwrap img { display: block; }
-  .w { position: absolute; border: 1px solid rgba(28,117,80,.35); cursor: pointer; }
+  .w { position: absolute; border: 1px solid rgba(28,117,80,.3); cursor: pointer; }
   .w:hover { background: rgba(28,117,80,.18); }
   .w.anchor { background: rgba(255,165,0,.4); border-color: orange; }
   .w.value { background: rgba(28,117,80,.35); }
+  .w.licol { background: rgba(70,130,220,.35); border-color: #2f6fd0; }
+  .w.listop { background: rgba(200,40,40,.30); border-color: #b22; }
+
+  .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #ddd; }
+  .badge.auto { background: #c9ecd6; } .badge.review { background: #ffe5b4; }
+  .badge.unknown_supplier, .badge.no_template { background: #f7d3d3; }
+  .badge.scan_no_textlayer { background: #e0d3f7; }
+  .badge.library { background: #d3e4f7; }
+
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid #e0e0e0; padding: 4px 6px; text-align: left; font-size: 13px; vertical-align: top; }
+  th { background: #f5f5f5; }
+  tr.sel { outline: 2px solid #1c7550; }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover td { background: #f3f7f5; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .pane { padding: 14px 18px; }
+  .pane h2 { margin: 0 0 10px; }
   button { font: inherit; padding: 5px 10px; border: 1px solid #1c7550; background: #1c7550; color: #fff; border-radius: 4px; cursor: pointer; }
   button.ghost { background: #fff; color: #1c7550; }
-  input { font: inherit; padding: 3px 5px; border: 1px solid #bbb; border-radius: 3px; }
+  button.danger { background: #fff; color: #b22; border-color: #b22; }
+  button.blue { background: #2f6fd0; border-color: #2f6fd0; }
+  input, select, textarea { font: inherit; padding: 3px 5px; border: 1px solid #bbb; border-radius: 3px; }
+  textarea { width: 100%; min-height: 54px; }
   .hint { color: #666; font-size: 12px; }
+  .form-grid { display: grid; grid-template-columns: 180px 1fr; gap: 6px 10px; max-width: 680px; margin: 8px 0; }
+  .form-grid label { padding-top: 4px; }
+  .box { border: 1px solid #ddd; border-radius: 6px; padding: 10px 12px; margin: 10px 0; }
+  .box h4 { margin: 0 0 6px; }
+  .li-col { display: inline-block; background: #eef4fb; border: 1px solid #cfe0f4; border-radius: 4px; padding: 2px 6px; margin: 2px; }
 </style>
 </head>
 <body>
 <header>
-  <b>Rechnung · Training</b>
-  <button class="ghost" onclick="loadList()">Neu scannen</button>
-  <span id="stats" class="hint"></span>
+  <b>Rechnung</b>
+  <button id="nav-scan" class="active" onclick="show('scan')">Rechnungen</button>
+  <button id="nav-suppliers" onclick="show('suppliers')">Lieferanten</button>
+  <button id="nav-addresses" onclick="show('addresses')">Rechnungsadressen</button>
+  <button id="nav-journal" onclick="show('journal')">Journal</button>
+  <span id="stats" class="hint" style="color:#eaf5ef"></span>
 </header>
+
 <main>
-  <div id="list"></div>
-  <div id="work"><p class="hint">Links eine Rechnung wählen.</p></div>
+  <div id="v-scan" class="view active">
+    <div id="list"></div>
+    <div id="work"><p class="hint">Links eine Rechnung wählen.</p></div>
+  </div>
+
+  <div id="v-suppliers" class="view pane">
+    <h2>Lieferanten</h2>
+    <p class="hint">Pro Lieferant: Wiedererkennungs-Merkmale, Stammdaten (Anschrift, Bank …) und
+      <b>feste Werte</b> – Felder, die das Programm nicht aus jeder Rechnung liest, sondern
+      hier einträgt und auf der Rechnung nur gegenprüft.</p>
+    <button class="ghost" onclick="editSupplier(null)">+ Neuer Lieferant</button>
+    <div id="sup-table"></div>
+    <div id="sup-form"></div>
+  </div>
+
+  <div id="v-addresses" class="view pane">
+    <h2>Rechnungsadressen</h2>
+    <p class="hint">Die eigenen Firmen-/Standort-Anschriften, an die Lieferanten fakturieren.
+      Erkennung über die „Erkennungstexte“ → passende Layout-Variante.</p>
+    <button class="ghost" onclick="editAddress(null)">+ Neue Rechnungsadresse</button>
+    <div id="addr-table"></div>
+    <div id="addr-form"></div>
+  </div>
+
+  <div id="v-journal" class="view pane">
+    <h2>Buchungsjournal</h2>
+    <p class="hint">Alle bestätigten Rechnungen, Netto/USt je Steuersatz.
+      <a href="/api/journal.csv">CSV herunterladen</a></p>
+    <div id="journal-table"></div>
+  </div>
 </main>
 
 <script>
 const $ = (s, r=document) => r.querySelector(s);
-let STATE = { file:null, pages:[], fieldDefs:{}, selField:null, assign:{}, match:null, ident:null, tid:null };
+const api = (u, opt) => fetch(u, opt).then(r => r.json());
+const FIXED_FIELDS = ['iban', 'ustid', 'bestellnummer', 'zahlungsziel', 'ust_satz'];
+const LI_TYPES = ['text', 'amount', 'number', 'date'];
+let STATE = null;
 
+function show(v) {
+  document.querySelectorAll('.view').forEach(e => e.classList.remove('active'));
+  $('#v-'+v).classList.add('active');
+  document.querySelectorAll('header button').forEach(e => e.classList.remove('active'));
+  $('#nav-'+v).classList.add('active');
+  if (v === 'suppliers') loadSuppliers();
+  if (v === 'addresses') loadAddresses();
+  if (v === 'journal') loadJournal();
+  if (v === 'scan') loadList();
+}
+const esc = s => (s == null ? '' : String(s)).replace(/[&<>"]/g, c =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const nz = v => (v === null || v === undefined || v === '') ? '' : v;
+
+/* ================= Rechnungen / Training ================= */
 async function loadList() {
-  const d = await (await fetch('/api/scan')).json();
-  STATE.fieldDefs = d.fields;
-  const auto = d.results.filter(r=>r.status==='auto').length;
+  const d = await api('/api/scan');
+  const auto = d.results.filter(r => r.status === 'auto').length;
   $('#stats').textContent = `${d.results.length} PDF · ${auto} auto`;
   const list = $('#list'); list.innerHTML = '';
   for (const r of d.results) {
     const div = document.createElement('div');
-    div.className = 'row'; div.dataset.file = r.file;
-    div.innerHTML = `<div>${r.file.split('/').pop()}</div>
+    div.className = 'row';
+    div.innerHTML = `<div>${esc(r.file.split('/').pop())}</div>
       <span class="badge ${r.status}">${r.status}</span>
-      ${r.supplier_name ? ' '+r.supplier_name : ''}
+      ${r.supplier_name ? ' ' + esc(r.supplier_name) : ''}
+      ${r.billing_address_name ? ' → ' + esc(r.billing_address_name) : ''}
       ${r.overall_confidence ? ` · conf ${r.overall_confidence}` : ''}`;
     div.onclick = () => openInvoice(r.file, div);
     list.appendChild(div);
@@ -68,91 +145,235 @@ async function loadList() {
 }
 
 async function openInvoice(file, row) {
-  document.querySelectorAll('#list .row').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('#list .row').forEach(x => x.classList.remove('active'));
   row && row.classList.add('active');
-  const d = await (await fetch('/api/invoice?file='+encodeURIComponent(file))).json();
-  STATE = { ...STATE, file:d.file, pages:d.pages, match:d.match, ident:d.identifiers,
-            tid:d.template_id, selField:null, assign:{} };
-  render(d);
+  const d = await api('/api/invoice?file=' + encodeURIComponent(file));
+
+  // Feldliste = Standardfelder + bereits gelernte Template-Felder (dedupe)
+  const defs = {};
+  for (const [n, v] of Object.entries(d.standard_fields || {}))
+    defs[n] = { value_type: v.value_type, required: v.required };
+  for (const f of d.template_fields || [])
+    defs[f.name] = { value_type: f.value_type, required: f.required };
+
+  STATE = {
+    file: d.file, pages: d.pages, tid: d.template_id, variant: d.variant,
+    addresses: d.addresses || [], defs, selField: null, assign: {},
+    current: d.current || {}, supplier: d.supplier,
+    lineItems: d.line_items || [], taxRows: null,
+    li: { active: false, page: 0, columns: [], stop_words: [], selCol: null },
+  };
+  // vorhandene Positionsspalten übernehmen
+  if (d.template_line_items) {
+    STATE.li.active = true;
+    STATE.li.columns = (d.template_line_items.columns || []).map(c =>
+      ({ name: c.name, value_type: c.value_type, header_word: null }));
+  }
+  renderInvoice(d);
 }
 
-function render(d) {
+function renderInvoice(d) {
   const w = $('#work'); w.innerHTML = '';
   const sup = d.match || {};
+  const addrOpts = ['<option value="standard">standard (alle Adressen)</option>']
+    .concat((d.addresses || []).map(a =>
+      `<option value="${esc(a.id)}" ${d.variant === a.id ? 'selected' : ''}>${esc(a.name || a.id)}</option>`))
+    .join('');
+
   const fbox = document.createElement('div'); fbox.id = 'fields';
   fbox.innerHTML = `
     <div>
-      Lieferant-ID <input id="sid" value="${sup.id||''}" placeholder="z.B. muster-gmbh">
-      Name <input id="sname" value="${sup.name||''}" size="24">
-      Variante <input id="variant" value="standard" size="10">
-      ${d.match ? `<span class="hint">erkannt: ${d.match.name} (${d.match.score})</span>`
-                : `<span class="hint">neuer Lieferant – USt-IdNr ${(d.identifiers.ustids||[]).join(',')||'?'}</span>`}
+      Lieferant-ID <input id="sid" value="${esc(sup.id || '')}" placeholder="z.B. muster-gmbh">
+      Name <input id="sname" value="${esc(sup.name || '')}" size="20">
+      Rechnungsadresse <select id="variant">${addrOpts}</select>
+    </div>
+    <div class="hint">
+      ${d.match ? `erkannt: ${esc(d.match.name)} (${d.match.score})` :
+        `neuer Lieferant – USt-IdNr ${(d.identifiers.ustids || []).join(',') || '?'}`}
+      ${d.detected_address ? ` · Adresse: ${esc(d.detected_address.name)} (${d.detected_address.score})` : ''}
+      ${d.supplier && d.supplier.fixed_fields && Object.keys(d.supplier.fixed_fields).length
+        ? ` · feste Werte: ${Object.keys(d.supplier.fixed_fields).join(', ')}` : ''}
     </div>`;
+
   const tbl = document.createElement('table');
   tbl.innerHTML = '<tr><th>Feld</th><th>Typ</th><th>aktuell</th><th>Anker / Wert</th></tr>';
-  for (const [name, def] of Object.entries(STATE.fieldDefs)) {
-    const cur = (d.current && d.current[name]) || {};
+  for (const [name, def] of Object.entries(STATE.defs)) {
+    const cur = STATE.current[name] || {};
     const tr = document.createElement('tr'); tr.dataset.field = name;
-    tr.innerHTML = `<td>${name}${def.required?' *':''}</td><td>${def.value_type}</td>
-      <td>${cur.value!==undefined?cur.value:''}${cur.confidence?` <span class="hint">(${cur.confidence})</span>`:''}</td>
+    const src = cur.source && cur.source !== 'missing'
+      ? ` <span class="badge ${cur.source === 'library' ? 'library' : ''}">${cur.source}</span>` : '';
+    tr.innerHTML = `<td>${esc(name)}${def.required ? ' *' : ''}</td><td>${esc(def.value_type)}</td>
+      <td>${cur.value !== undefined && cur.value !== null ? esc(JSON.stringify(cur.value).slice(0,80)) : ''}
+          ${cur.confidence ? ` <span class="hint">(${cur.confidence})</span>` : ''}${src}</td>
       <td class="ass"></td>`;
     tr.onclick = () => selectField(name, tr);
     tbl.appendChild(tr);
   }
   fbox.appendChild(tbl);
+
   const bar = document.createElement('div'); bar.style.marginTop = '8px';
-  bar.innerHTML = `<button onclick="saveTemplate()">Template speichern</button>
-    ${STATE.tid?`<button class="ghost" onclick="confirmTpl()">Extraktion bestätigen</button>`:''}
-    <span class="hint">Zeile wählen · Wort = Wert · Shift+Wort = Anker</span>
+  bar.innerHTML = `
+    <button onclick="saveTemplate()">Template speichern</button>
+    ${STATE.tid ? `<button class="ghost" onclick="confirmTpl()">Extraktion bestätigen</button>` : ''}
+    <button class="ghost" onclick="addCustomField()">+ eigenes Feld</button>
+    <button class="ghost" onclick="toggleLi()">Positionstabelle ${STATE.li.active ? 'ausblenden' : 'anlernen'}</button>
+    <span class="hint">Feld-Zeile wählen · Klick = Wert · Shift+Klick = Anker (Label)</span>
     <span id="msg" class="hint"></span>`;
   fbox.appendChild(bar);
+
+  if (STATE.li.active) fbox.appendChild(renderLiPanel());
   w.appendChild(fbox);
+
+  if (STATE.lineItems && STATE.lineItems.length) w.appendChild(renderLiPreview(STATE.lineItems));
+  w.appendChild(renderTaxPreview(d));
 
   for (const pg of d.pages) {
     const wrap = document.createElement('div'); wrap.className = 'pdfwrap';
     const img = new Image(); img.src = pg.image;
-    img.onload = () => { wrap.style.width = img.width+'px'; };
     wrap.appendChild(img);
     for (const wd of pg.words) {
       const el = document.createElement('div');
       el.className = 'w';
-      el.style.left = (wd.x0*pg.scale)+'px';
-      el.style.top = (wd.top*pg.scale)+'px';
-      el.style.width = ((wd.x1-wd.x0)*pg.scale)+'px';
-      el.style.height = ((wd.bottom-wd.top)*pg.scale)+'px';
+      el.style.left = (wd.x0 * pg.scale) + 'px';
+      el.style.top = (wd.top * pg.scale) + 'px';
+      el.style.width = ((wd.x1 - wd.x0) * pg.scale) + 'px';
+      el.style.height = ((wd.bottom - wd.top) * pg.scale) + 'px';
       el.title = wd.text;
-      el.onclick = (ev) => clickWord(pg.index, wd.i, ev.shiftKey, el);
+      el.onclick = (ev) => clickWord(pg.index, wd.i, ev);
       wrap.appendChild(el);
     }
     w.appendChild(wrap);
   }
+  paint();
 }
 
 function selectField(name, tr) {
+  STATE.li.selCol = null;
   STATE.selField = name;
-  document.querySelectorAll('#fields tr').forEach(x=>x.classList.remove('sel'));
+  document.querySelectorAll('#fields tr').forEach(x => x.classList.remove('sel'));
   tr.classList.add('sel');
 }
 
-function clickWord(page, i, isAnchor, el) {
-  if (!STATE.selField) { $('#msg').textContent = 'erst Feld-Zeile wählen'; return; }
-  const a = STATE.assign[STATE.selField] || { page, anchor:null, values:[] };
+function addCustomField() {
+  const name = (prompt('Name des Feldes (z.B. leistungszeitraum, projektnummer):') || '').trim()
+    .toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+  if (!name) return;
+  const type = (prompt('Typ: text / amount / date / number / iban / ustid / taxblock', 'text') || 'text').trim();
+  STATE.defs[name] = { value_type: type, required: false };
+  renderCurrent();
+}
+function renderCurrent() {
+  // Feldtabelle neu aufbauen ohne PDF-Neuladen
+  const d = { match: { id: $('#sid')?.value, name: $('#sname')?.value },
+              addresses: STATE.addresses, variant: $('#variant')?.value || STATE.variant,
+              identifiers: { ustids: [] }, pages: STATE.pages, supplier: STATE.supplier,
+              current: STATE.current, line_items: STATE.lineItems };
+  renderInvoice(d);
+}
+
+/* -------- Positionstabelle -------- */
+function toggleLi() { STATE.li.active = !STATE.li.active; renderCurrent(); }
+function renderLiPanel() {
+  const box = document.createElement('div'); box.className = 'box';
+  box.innerHTML = `<h4>Positionstabelle anlernen</h4>
+    <div class="hint">1. Spalte anlegen → 2. in der Tabelle auf die <b>Kopfzelle</b> klicken.
+      Alt+Klick markiert ein <b>Stopp-Wort</b> (z.B. „Zwischensumme“), an dem die Tabelle endet.</div>
+    <div style="margin:6px 0">
+      <input id="li-name" placeholder="Spaltenname z.B. bezeichnung" size="18">
+      <select id="li-type">${LI_TYPES.map(t => `<option>${t}</option>`).join('')}</select>
+      <button class="blue" onclick="addLiCol()">+ Spalte</button>
+    </div>
+    <div id="li-cols"></div>
+    <div class="hint" id="li-stop"></div>`;
+  setTimeout(() => paintLiCols(), 0);
+  return box;
+}
+function paintLiCols() {
+  const host = $('#li-cols'); if (!host) return;
+  host.innerHTML = STATE.li.columns.map((c, i) =>
+    `<span class="li-col ${STATE.li.selCol === i ? 'sel' : ''}" onclick="selLiCol(${i})">
+      ${esc(c.name)} <span class="hint">(${c.value_type}${c.header_word == null ? ', Kopf?' : ''})</span>
+      <button class="danger" style="padding:0 4px" onclick="event.stopPropagation();delLiCol(${i})">×</button>
+    </span>`).join('');
+  $('#li-stop').textContent = 'Stopp-Wörter: ' +
+    (STATE.li.stop_words.length ? STATE.li.stop_words.map(i => wordText(STATE.li.page, i)).join(', ') : '—');
+}
+function addLiCol() {
+  const name = ($('#li-name').value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  if (!name) return;
+  STATE.li.columns.push({ name, value_type: $('#li-type').value, header_word: null });
+  STATE.li.selCol = STATE.li.columns.length - 1;
+  $('#li-name').value = '';
+  paintLiCols();
+}
+function selLiCol(i) { STATE.selField = null; STATE.li.selCol = i; paintLiCols();
+  document.querySelectorAll('#fields tr').forEach(x => x.classList.remove('sel')); }
+function delLiCol(i) { STATE.li.columns.splice(i, 1); STATE.li.selCol = null; paintLiCols(); paint(); }
+function wordText(page, i) {
+  const pg = STATE.pages[page]; const wd = pg && pg.words[i]; return wd ? wd.text : '?';
+}
+
+function renderLiPreview(items) {
+  const box = document.createElement('div'); box.className = 'box';
+  const cols = Object.keys(items[0]);
+  box.innerHTML = `<h4>Positionen (${items.length})</h4>
+    <table><tr>${cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr>
+    ${items.map(it => `<tr>${cols.map(c =>
+      `<td class="${typeof it[c] === 'number' ? 'num' : ''}">${esc(nz(it[c]))}</td>`).join('')}</tr>`).join('')}
+    </table>`;
+  return box;
+}
+function renderTaxPreview(d) {
+  const box = document.createElement('div'); box.className = 'box';
+  const rows = (STATE.current.ust_aufstellung && STATE.current.ust_aufstellung.value) || null;
+  box.innerHTML = `<h4>USt-Aufstellung</h4>
+    <div class="hint">Feld <b>ust_aufstellung</b> (Typ taxblock) auf den Steuerblock der Rechnung
+      markieren – dann werden hier Netto/USt je Satz gezogen und gegen die Kopfsummen geprüft.</div>`;
+  if (rows && rows.length) {
+    box.innerHTML += `<table><tr><th>Satz</th><th class="num">Netto</th><th class="num">USt</th></tr>
+      ${rows.map(r => `<tr><td>${esc(nz(r.satz))}%</td>
+        <td class="num">${esc(nz(r.netto))}</td><td class="num">${esc(nz(r.ust))}</td></tr>`).join('')}</table>`;
+  }
+  return box;
+}
+
+function clickWord(page, i, ev) {
+  // Positions-Modus?
+  if (STATE.li.active && (STATE.li.selCol !== null || ev.altKey)) {
+    STATE.li.page = page;
+    if (ev.altKey) {
+      const s = STATE.li.stop_words;
+      s.includes(i) ? s.splice(s.indexOf(i), 1) : s.push(i);
+    } else {
+      STATE.li.columns[STATE.li.selCol].header_word = i;
+    }
+    paintLiCols(); paint();
+    return;
+  }
+  if (!STATE.selField) { $('#msg').textContent = 'erst Feld-Zeile oder Spalte wählen'; return; }
+  const a = STATE.assign[STATE.selField] || { page, anchor: null, values: [] };
   a.page = page;
-  if (isAnchor) { a.anchor = i; }
-  else { a.values.includes(i) ? a.values = a.values.filter(x=>x!==i) : a.values.push(i); }
+  if (ev.shiftKey) a.anchor = i;
+  else a.values.includes(i) ? a.values = a.values.filter(x => x !== i) : a.values.push(i);
   STATE.assign[STATE.selField] = a;
   paint();
 }
 
 function paint() {
-  document.querySelectorAll('.w').forEach(e=>e.classList.remove('anchor','value'));
+  document.querySelectorAll('.w').forEach(e => e.classList.remove('anchor', 'value', 'licol', 'listop'));
   const wraps = document.querySelectorAll('.pdfwrap');
+  if (!wraps.length) return;
   for (const [f, a] of Object.entries(STATE.assign)) {
     const wds = wraps[a.page].querySelectorAll('.w');
-    if (a.anchor!=null) wds[a.anchor].classList.add('anchor');
-    a.values.forEach(i => wds[i].classList.add('value'));
+    if (a.anchor != null && wds[a.anchor]) wds[a.anchor].classList.add('anchor');
+    a.values.forEach(i => wds[i] && wds[i].classList.add('value'));
     const cell = document.querySelector(`#fields tr[data-field="${f}"] .ass`);
-    if (cell) cell.textContent = (a.anchor!=null?'⚓ ':'') + a.values.map(i=>wds[i].title).join(' ');
+    if (cell) cell.textContent = (a.anchor != null ? '⚓ ' : '') + a.values.map(i => wds[i] && wds[i].title).join(' ');
+  }
+  if (STATE.li.active) {
+    const wds = wraps[STATE.li.page].querySelectorAll('.w');
+    STATE.li.columns.forEach(c => { if (c.header_word != null && wds[c.header_word]) wds[c.header_word].classList.add('licol'); });
+    STATE.li.stop_words.forEach(i => wds[i] && wds[i].classList.add('listop'));
   }
 }
 
@@ -160,32 +381,203 @@ async function saveTemplate() {
   const sid = $('#sid').value.trim();
   if (!sid) { $('#msg').textContent = 'Lieferant-ID fehlt'; return; }
   const fields = Object.entries(STATE.assign)
-    .filter(([,a]) => a.values.length)
+    .filter(([, a]) => a.values.length)
     .map(([name, a]) => ({
-      name, value_type: STATE.fieldDefs[name].value_type,
-      required: STATE.fieldDefs[name].required,
+      name, value_type: (STATE.defs[name] || { value_type: 'text' }).value_type,
+      required: !!(STATE.defs[name] && STATE.defs[name].required),
       anchor_word: a.anchor, value_words: a.values, page: a.page,
     }));
-  const body = { file: STATE.file, supplier_id: sid, supplier_name: $('#sname').value.trim(),
-                 variant: $('#variant').value.trim() || 'standard', fields };
-  const r = await (await fetch('/api/template', {method:'POST', headers:{'content-type':'application/json'},
-    body: JSON.stringify(body)})).json();
+  let line_items = null;
+  const cols = STATE.li.columns.filter(c => c.header_word != null);
+  if (STATE.li.active && cols.length) {
+    line_items = {
+      page: STATE.li.page,
+      columns: cols.map(c => ({ header_word: c.header_word, name: c.name, value_type: c.value_type })),
+      stop_words: STATE.li.stop_words,
+    };
+  } else if (STATE.li.active) {
+    line_items = { page: STATE.li.page, columns: [], stop_words: [] };
+  }
+  const r = await api('/api/template', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      file: STATE.file, supplier_id: sid, supplier_name: $('#sname').value.trim(),
+      variant: $('#variant').value, fields, line_items,
+    }),
+  });
   STATE.tid = r.template_id;
-  $('#msg').textContent = `gespeichert: ${r.fields} Felder → ` +
-    Object.entries(r.extraction).map(([k,v])=>`${k}=${v.value}`).join(', ');
-  openInvoiceRefresh();
+  STATE.lineItems = r.line_items || [];
+  $('#msg').textContent = `gespeichert: ${r.fields} Felder, ${(r.line_items || []).length} Positionen → ` +
+    Object.entries(r.extraction).map(([k, v]) => `${k}=${JSON.stringify(v.value).slice(0,30)}`).join(', ');
+  renderCurrent();
 }
 
 async function confirmTpl() {
-  const r = await (await fetch('/api/confirm', {method:'POST', headers:{'content-type':'application/json'},
-    body: JSON.stringify({ file: STATE.file, template_id: STATE.tid })})).json();
-  $('#msg').textContent = `bestätigt ${r.confirmations}× ${r.secured?'· GESICHERT':''}`;
+  const r = await api('/api/confirm', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, template_id: STATE.tid }),
+  });
+  $('#msg').textContent = `bestätigt ${r.confirmations}× ${r.secured ? '· GESICHERT' : ''}`;
   loadList();
 }
 
-function openInvoiceRefresh() {
-  const row = [...document.querySelectorAll('#list .row')].find(x=>x.dataset.file===STATE.file);
-  openInvoice(STATE.file, row);
+/* ================= Lieferanten ================= */
+async function loadSuppliers() {
+  const rows = await api('/api/suppliers');
+  const t = document.createElement('table');
+  t.innerHTML = '<tr><th>ID</th><th>Name</th><th>USt-IdNr</th><th>IBAN</th><th>feste Werte</th><th>Templates</th><th></th></tr>';
+  for (const s of rows) {
+    const tr = document.createElement('tr'); tr.className = 'clickable';
+    tr.innerHTML = `<td>${esc(s.id)}</td><td>${esc(s.name || '')}</td>
+      <td>${(s.ustids || []).map(esc).join('<br>')}</td>
+      <td>${(s.ibans || []).map(esc).join('<br>')}</td>
+      <td>${Object.entries(s.fixed_fields || {}).map(([k, v]) => `${esc(k)}=${esc(v)}`).join('<br>')}</td>
+      <td>${(s.templates || []).map(x =>
+        `${esc(x.variant)} <span class="hint">(${x.confirmations}×${x.secured ? ', gesichert' : ''})</span>
+         <button class="danger" onclick="event.stopPropagation();delTemplate('${esc(x.id)}')">×</button>`).join('<br>')}</td>
+      <td><button class="danger" onclick="event.stopPropagation();delSupplier('${esc(s.id)}')">Löschen</button></td>`;
+    tr.onclick = () => editSupplier(s);
+    t.appendChild(tr);
+  }
+  $('#sup-table').innerHTML = ''; $('#sup-table').appendChild(t);
+  $('#sup-form').innerHTML = '';
+}
+
+function editSupplier(s) {
+  s = s || { id: '', name: '', ustids: [], ibans: [], domains: [], address_lines: [], fixed_fields: {} };
+  const ff = s.fixed_fields || {};
+  $('#sup-form').innerHTML = `
+    <h3>${s.id ? 'Lieferant bearbeiten' : 'Neuer Lieferant'}</h3>
+    <div class="form-grid">
+      <label>ID</label><input id="f-id" value="${esc(s.id)}" ${s.id ? 'readonly' : ''}>
+      <label>Name</label><input id="f-name" value="${esc(s.name || '')}">
+      <label>USt-IdNr (je Zeile)</label><textarea id="f-ustids">${(s.ustids || []).join('\n')}</textarea>
+      <label>IBAN (je Zeile)</label><textarea id="f-ibans">${(s.ibans || []).join('\n')}</textarea>
+      <label>E-Mail-Domains (je Zeile)</label><textarea id="f-domains">${(s.domains || []).join('\n')}</textarea>
+      <label>Anschrift (je Zeile)</label><textarea id="f-address">${(s.address_lines || []).join('\n')}</textarea>
+      <label>Bank</label><input id="f-bank" value="${esc(s.bank_name || '')}">
+      <label>BIC</label><input id="f-bic" value="${esc(s.bic || '')}">
+      <label>Gläubiger-ID / StNr</label><input id="f-creditor" value="${esc(s.creditor_id || '')}">
+      <label>Ansprechpartner</label><input id="f-contact" value="${esc(s.contact || '')}">
+      <label>Zahlungsziel (Standard)</label><input id="f-terms" value="${esc(s.default_payment_terms || '')}">
+      <label>Steuersatz (Standard)</label><input id="f-taxrate" value="${esc(s.default_tax_rate || '')}">
+      <label>Notiz</label><textarea id="f-notes">${esc(s.notes || '')}</textarea>
+    </div>
+    <div class="box">
+      <h4>Feste Werte</h4>
+      <div class="hint">Wird auf jeder Rechnung dieses Lieferanten eingesetzt (leer = wird aus der Rechnung gelesen).</div>
+      <div class="form-grid">
+        ${FIXED_FIELDS.map(k => `<label>${k}</label><input id="ff-${k}" value="${esc(ff[k] || '')}">`).join('')}
+      </div>
+    </div>
+    <button onclick="submitSupplier()">Speichern</button>`;
+}
+
+const lines = id => ($('#' + id).value || '').split('\n').map(x => x.trim()).filter(Boolean);
+async function submitSupplier() {
+  const id = $('#f-id').value.trim();
+  if (!id) return;
+  const fixed_fields = {};
+  FIXED_FIELDS.forEach(k => { const v = ($('#ff-' + k).value || '').trim(); if (v) fixed_fields[k] = v; });
+  await api('/api/suppliers', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      id, name: $('#f-name').value.trim(),
+      ustids: lines('f-ustids'), ibans: lines('f-ibans'), domains: lines('f-domains'),
+      address_lines: lines('f-address'), bank_name: $('#f-bank').value.trim(),
+      bic: $('#f-bic').value.trim(), creditor_id: $('#f-creditor').value.trim(),
+      contact: $('#f-contact').value.trim(),
+      default_payment_terms: $('#f-terms').value.trim(),
+      default_tax_rate: $('#f-taxrate').value.trim(),
+      notes: $('#f-notes').value.trim(), fixed_fields,
+    }),
+  });
+  loadSuppliers();
+}
+async function delSupplier(id) {
+  if (!confirm(`Lieferant "${id}" samt Templates löschen?`)) return;
+  await fetch('/api/suppliers/' + encodeURIComponent(id), { method: 'DELETE' });
+  loadSuppliers();
+}
+async function delTemplate(id) {
+  if (!confirm(`Template "${id}" löschen?`)) return;
+  await fetch('/api/templates/' + encodeURIComponent(id), { method: 'DELETE' });
+  loadSuppliers();
+}
+
+/* ================= Rechnungsadressen ================= */
+async function loadAddresses() {
+  const rows = await api('/api/addresses');
+  const t = document.createElement('table');
+  t.innerHTML = '<tr><th>ID</th><th>Name</th><th>Anschrift</th><th>Erkennungstexte</th><th>Kostenstelle</th><th></th></tr>';
+  for (const a of rows) {
+    const tr = document.createElement('tr'); tr.className = 'clickable';
+    tr.innerHTML = `<td>${esc(a.id)}</td><td>${esc(a.name || '')}</td>
+      <td>${(a.lines || []).map(esc).join('<br>')}</td>
+      <td>${(a.match_terms || []).map(esc).join('<br>')}</td>
+      <td>${esc(a.cost_center || '')}</td>
+      <td><button class="danger" onclick="event.stopPropagation();delAddress('${esc(a.id)}')">Löschen</button></td>`;
+    tr.onclick = () => editAddress(a);
+    t.appendChild(tr);
+  }
+  $('#addr-table').innerHTML = ''; $('#addr-table').appendChild(t);
+  $('#addr-form').innerHTML = '';
+}
+
+function editAddress(a) {
+  a = a || { id: '', name: '', lines: [], match_terms: [] };
+  $('#addr-form').innerHTML = `
+    <h3>${a.id ? 'Rechnungsadresse bearbeiten' : 'Neue Rechnungsadresse'}</h3>
+    <div class="form-grid">
+      <label>ID</label><input id="a-id" value="${esc(a.id)}" ${a.id ? 'readonly' : ''}>
+      <label>Name</label><input id="a-name" value="${esc(a.name || '')}" placeholder="z.B. Werk Süd">
+      <label>Anschrift (je Zeile)</label><textarea id="a-lines">${(a.lines || []).join('\n')}</textarea>
+      <label>Erkennungstexte (je Zeile)</label><textarea id="a-terms">${(a.match_terms || []).join('\n')}</textarea>
+      <label>Kostenstelle</label><input id="a-cc" value="${esc(a.cost_center || '')}">
+      <label>Mandant / Firmennr.</label><input id="a-code" value="${esc(a.company_code || '')}">
+      <label>Notiz</label><textarea id="a-notes">${esc(a.notes || '')}</textarea>
+    </div>
+    <button onclick="submitAddress()">Speichern</button>
+    <span class="hint">Erkennungstexte: eindeutige Zeilen aus dem Empfängerblock (Firmenname, Straße, Kostenstelle …).</span>`;
+}
+
+async function submitAddress() {
+  const id = $('#a-id').value.trim();
+  if (!id) return;
+  await api('/api/addresses', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      id, name: $('#a-name').value.trim(),
+      lines: lines('a-lines'), match_terms: lines('a-terms'),
+      cost_center: $('#a-cc').value.trim(), company_code: $('#a-code').value.trim(),
+      notes: $('#a-notes').value.trim(),
+    }),
+  });
+  loadAddresses();
+}
+async function delAddress(id) {
+  if (!confirm(`Rechnungsadresse "${id}" löschen?`)) return;
+  await fetch('/api/addresses/' + encodeURIComponent(id), { method: 'DELETE' });
+  loadAddresses();
+}
+
+/* ================= Journal ================= */
+async function loadJournal() {
+  const d = await api('/api/journal');
+  const cols = ['datei', 'lieferant', 'rechnungsadresse', 'rechnungsnummer', 'rechnungsdatum',
+    'netto_gesamt', 'ust_gesamt', 'brutto_gesamt',
+    'netto_19', 'ust_19', 'netto_7', 'ust_7', 'netto_0', 'weitere_saetze'];
+  const num = new Set(cols.filter(c => c.startsWith('netto') || c.startsWith('ust') || c.startsWith('brutto')));
+  const t = document.createElement('table');
+  t.innerHTML = `<tr>${cols.map(c => `<th class="${num.has(c) ? 'num' : ''}">${esc(c)}</th>`).join('')}</tr>` +
+    d.rows.map(r => `<tr>${cols.map(c =>
+      `<td class="${num.has(c) ? 'num' : ''}">${esc(nz(r[c]))}</td>`).join('')}</tr>`).join('') +
+    `<tr><td><b>Σ ${d.totals.rechnungen}</b></td><td></td><td></td><td></td><td></td>` +
+      ['netto_gesamt', 'ust_gesamt', 'brutto_gesamt', 'netto_19', 'ust_19', 'netto_7', 'ust_7', 'netto_0']
+        .map(c => `<td class="num"><b>${esc(nz(d.totals[c]))}</b></td>`).join('') + `<td></td></tr>`;
+  $('#journal-table').innerHTML = '';
+  $('#journal-table').appendChild(t);
+  if (!d.rows.length) $('#journal-table').innerHTML = '<p class="hint">Noch keine bestätigten Rechnungen.</p>';
 }
 
 loadList();

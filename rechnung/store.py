@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 
+from .billing import BillingAddress
 from .identify import Supplier
 from .template import Template
 
@@ -19,6 +20,7 @@ class Store:
         (self.root / "templates").mkdir(parents=True, exist_ok=True)
         (self.root / "out").mkdir(parents=True, exist_ok=True)
         self._suppliers = self.root / "suppliers.json"
+        self._addresses = self.root / "addresses.json"
         self._processed = self.root / "processed.jsonl"
 
     # ---- Lieferanten --------------------------------------------------
@@ -38,6 +40,38 @@ class Store:
     def supplier(self, supplier_id: str) -> Supplier | None:
         return next((s for s in self.suppliers() if s.id == supplier_id), None)
 
+    def delete_supplier(self, supplier_id: str) -> None:
+        rows = [x for x in self.suppliers() if x.id != supplier_id]
+        self._suppliers.write_text(
+            json.dumps([x.to_dict() for x in rows], indent=2, ensure_ascii=False), "utf-8"
+        )
+        for t in self.templates_for(supplier_id):
+            self.delete_template(t.id)
+
+    # ---- Rechnungsadressen ------------------------------------------
+    def addresses(self) -> list[BillingAddress]:
+        if not self._addresses.exists():
+            return []
+        return [BillingAddress.from_dict(d)
+                for d in json.loads(self._addresses.read_text("utf-8"))]
+
+    def address(self, address_id: str) -> BillingAddress | None:
+        return next((a for a in self.addresses() if a.id == address_id), None)
+
+    def save_address(self, a: BillingAddress) -> None:
+        rows = {x.id: x for x in self.addresses()}
+        rows[a.id] = a
+        self._addresses.write_text(
+            json.dumps([x.to_dict() for x in rows.values()], indent=2, ensure_ascii=False),
+            "utf-8",
+        )
+
+    def delete_address(self, address_id: str) -> None:
+        rows = [x for x in self.addresses() if x.id != address_id]
+        self._addresses.write_text(
+            json.dumps([x.to_dict() for x in rows], indent=2, ensure_ascii=False), "utf-8"
+        )
+
     # ---- Templates --------------------------------------------------
     def _tpl_path(self, tid: str) -> Path:
         return self.root / "templates" / f"{tid}.json"
@@ -52,6 +86,9 @@ class Store:
         self._tpl_path(t.id).write_text(
             json.dumps(t.to_dict(), indent=2, ensure_ascii=False), "utf-8"
         )
+
+    def delete_template(self, tid: str) -> None:
+        self._tpl_path(tid).unlink(missing_ok=True)
 
     def templates_for(self, supplier_id: str) -> list[Template]:
         out = []

@@ -1,4 +1,4 @@
-"""Lieferanten-Erkennung anhand stabiler Merkmale."""
+"""Lieferanten-Erkennung anhand stabiler Merkmale + gepflegte Stammdaten."""
 
 from __future__ import annotations
 
@@ -6,6 +6,17 @@ from dataclasses import dataclass, field
 
 from .pdf import Document
 from .textnorm import find_domains, find_iban, find_ustids, norm
+
+# Stammdaten-Felder, die als "fester Wert" pro Lieferant hinterlegt werden koennen
+# (Name -> value_type). Werden von der Pipeline in die Extraktion gemischt, statt
+# sie aus jeder Rechnung zu lesen.
+FIXED_FIELD_TYPES: dict[str, str] = {
+    "iban": "iban",
+    "ustid": "ustid",
+    "bestellnummer": "number",
+    "zahlungsziel": "text",
+    "ust_satz": "amount",
+}
 
 
 @dataclass
@@ -16,12 +27,29 @@ class Supplier:
     ibans: list[str] = field(default_factory=list)
     domains: list[str] = field(default_factory=list)
     fingerprint: list[str] = field(default_factory=list)
+    # --- gepflegte Stammdaten -------------------------------------------
+    address_lines: list[str] = field(default_factory=list)
+    bank_name: str = ""
+    bic: str = ""
+    creditor_id: str = ""          # Glaeubiger-ID / Steuernummer
+    contact: str = ""              # Ansprechpartner / Telefon / Mail
+    default_payment_terms: str = ""
+    default_tax_rate: str = ""
+    notes: str = ""
+    # Feld -> fester Wert, gilt fuer alle Rechnungen dieses Lieferanten
+    fixed_fields: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
             "id": self.id, "name": self.name, "ustids": self.ustids,
             "ibans": self.ibans, "domains": self.domains,
             "fingerprint": self.fingerprint,
+            "address_lines": self.address_lines, "bank_name": self.bank_name,
+            "bic": self.bic, "creditor_id": self.creditor_id,
+            "contact": self.contact,
+            "default_payment_terms": self.default_payment_terms,
+            "default_tax_rate": self.default_tax_rate, "notes": self.notes,
+            "fixed_fields": self.fixed_fields,
         }
 
     @classmethod
@@ -30,6 +58,13 @@ class Supplier:
             id=d["id"], name=d.get("name", ""), ustids=d.get("ustids", []),
             ibans=d.get("ibans", []), domains=d.get("domains", []),
             fingerprint=d.get("fingerprint", []),
+            address_lines=d.get("address_lines", []),
+            bank_name=d.get("bank_name", ""), bic=d.get("bic", ""),
+            creditor_id=d.get("creditor_id", ""), contact=d.get("contact", ""),
+            default_payment_terms=d.get("default_payment_terms", ""),
+            default_tax_rate=d.get("default_tax_rate", ""),
+            notes=d.get("notes", ""),
+            fixed_fields=d.get("fixed_fields", {}) or {},
         )
 
 
@@ -87,6 +122,24 @@ def identify(doc: Document, suppliers: list[Supplier], threshold: float = 0.5):
     if best and best[1] >= threshold:
         return best
     return None
+
+
+def cross_check(doc: Document, supplier: Supplier) -> list[dict]:
+    """Auf der Rechnung gefundene IBAN/USt-IdNr gegen die Stammdaten pruefen.
+    -> Liste {kind, ok, detail}."""
+    ids = extract_identifiers(doc)
+    out = []
+    if supplier.ibans:
+        found = ids["ibans"]
+        ok = (not found) or bool(found & set(supplier.ibans))
+        out.append({"kind": "iban-stammdaten", "ok": ok,
+                    "detail": ",".join(sorted(found - set(supplier.ibans))) or "ok"})
+    if supplier.ustids:
+        found = ids["ustids"]
+        ok = (not found) or bool(found & set(supplier.ustids))
+        out.append({"kind": "ustid-stammdaten", "ok": ok,
+                    "detail": ",".join(sorted(found - set(supplier.ustids))) or "ok"})
+    return out
 
 
 def supplier_from_doc(doc: Document, supplier_id: str, name: str) -> Supplier:

@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import billing
 from . import pdf as pdfmod
-from .identify import identify
+from .identify import FIXED_FIELD_TYPES, cross_check, identify
 from .store import Store
-from .template import FieldResult, Template, apply_template
+from .template import (FieldResult, Template, apply_line_items, apply_template)
+from .textnorm import coerce
 from .validate import Check, run_all
 
 # Status
@@ -30,7 +32,11 @@ class Result:
     match_score: float = 0.0
     template_id: str | None = None
     template_secured: bool = False
+    billing_address_id: str | None = None
+    billing_address_name: str | None = None
     fields: dict[str, FieldResult] = field(default_factory=dict)
+    line_items: list[dict] = field(default_factory=list)
+    tax_breakdown: list[dict] = field(default_factory=list)
     checks: list[Check] = field(default_factory=list)
     status: str = UNKNOWN
     overall_confidence: float = 0.0
@@ -44,8 +50,12 @@ class Result:
             "match_score": self.match_score,
             "template_id": self.template_id,
             "template_secured": self.template_secured,
+            "billing_address_id": self.billing_address_id,
+            "billing_address_name": self.billing_address_name,
             "status": self.status,
             "overall_confidence": self.overall_confidence,
+            "line_items": self.line_items,
+            "tax_breakdown": self.tax_breakdown,
             "fields": {
                 k: {"value": v.value, "raw": v.raw, "confidence": v.confidence,
                     "source": v.source}
@@ -55,10 +65,16 @@ class Result:
         }
 
 
-def _pick_template(doc, templates: list[Template]) -> Template | None:
-    """Bei mehreren Varianten: die mit den meisten auffindbaren Ankern."""
+def _pick_template(doc, templates: list[Template],
+                   address_id: str | None = None) -> Template | None:
+    """Erst die zur erkannten Rechnungsadresse passende Variante, sonst die mit
+    den meisten auffindbaren Ankern."""
     if not templates:
         return None
+    if address_id:
+        exact = [t for t in templates if t.variant == address_id]
+        if exact:
+            return exact[0]
     if len(templates) == 1:
         return templates[0]
     scored = []
@@ -68,6 +84,53 @@ def _pick_template(doc, templates: list[Template]) -> Template | None:
         scored.append((found, t.secured, t))
     scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
     return scored[0][2]
+
+
+def _to_amount(v) -> float | None:
+    if isinstance(v, (int, float)):
+        return float(v)
+    return coerce(str(v or ""), "amount")[0]
+
+
+def _tax_breakdown(fields: dict, line_items: list[dict]) -> list[dict]:
+    """USt-Aufstellung je Steuersatz. Prioritaet:
+    1. explizit markierter ``ust_aufstellung``-Block
+    2. aus den Positionen aufsummiert (Spalten ``ust_satz``/``netto``)
+    3. Einzelsatz aus den Kopf-Feldern netto/ust_betrag/ust_satz
+    """
+    fr = fields.get("ust_aufstellung")
+    if fr is not None and isinstance(fr.value, list) and fr.value:
+        rows = []
+        for r in fr.value:
+            netto = _to_amount(r.get("netto"))
+            ust = _to_amount(r.get("ust"))
+            rows.append({"satz": r.get("satz"), "netto": netto, "ust": ust,
+                         "brutto": round((netto or 0) + (ust or 0), 2)})
+        return rows
+
+    if line_items:
+        agg: dict[float, dict] = {}
+        for it in line_items:
+            rate = _to_amount(it.get("ust_satz") or it.get("mwst") or it.get("ust"))
+            base = _to_amount(it.get("netto") or it.get("summe") or it.get("betrag")
+                              or it.get("gesamt"))
+            if rate is None or base is None:
+                continue
+            slot = agg.setdefault(rate, {"satz": rate, "netto": 0.0, "ust": 0.0})
+            slot["netto"] = round(slot["netto"] + base, 2)
+            slot["ust"] = round(slot["ust"] + base * rate / 100, 2)
+        rows = [dict(v, brutto=round(v["netto"] + v["ust"], 2))
+                for v in agg.values()]
+        if rows:
+            return sorted(rows, key=lambda r: r["satz"])
+
+    netto = _to_amount(fields["netto"].value) if "netto" in fields else None
+    ust = _to_amount(fields["ust_betrag"].value) if "ust_betrag" in fields else None
+    satz = _to_amount(fields["ust_satz"].value) if "ust_satz" in fields else None
+    if netto is not None or ust is not None:
+        return [{"satz": satz, "netto": netto, "ust": ust,
+                 "brutto": round((netto or 0) + (ust or 0), 2)}]
+    return []
 
 
 def process(path: str | Path, store: Store) -> Result:
@@ -88,7 +151,12 @@ def process(path: str | Path, store: Store) -> Result:
     res.supplier_name = supplier.name
     res.match_score = score
 
-    tpl = _pick_template(doc, store.templates_for(supplier.id))
+    addr = billing.detect(doc, store.addresses())
+    if addr:
+        res.billing_address_id = addr[0].id
+        res.billing_address_name = addr[0].name
+
+    tpl = _pick_template(doc, store.templates_for(supplier.id), res.billing_address_id)
     if tpl is None:
         res.status = NO_TEMPLATE
         return res
@@ -96,7 +164,34 @@ def process(path: str | Path, store: Store) -> Result:
     res.template_id = tpl.id
     res.template_secured = tpl.secured
     res.fields = apply_template(doc, tpl)
-    res.checks = run_all(res.fields, supplier.id, store.seen_invoice)
+
+    # Feste Werte aus den Stammdaten einmischen: nur wo das Template nichts
+    # (Sicheres) liefert. Quelle wird als "library" markiert.
+    for fname, fval in (supplier.fixed_fields or {}).items():
+        if not str(fval).strip():
+            continue
+        cur = res.fields.get(fname)
+        if cur is not None and cur.source != "missing" and cur.raw:
+            continue
+        vtype = FIXED_FIELD_TYPES.get(fname, "text")
+        value, ok = coerce(str(fval), vtype)
+        res.fields[fname] = FieldResult(fname, value, str(fval),
+                                        0.99 if ok else 0.6, "library")
+
+    if tpl.line_items:
+        res.line_items = apply_line_items(doc, tpl.line_items)
+
+    res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
+
+    res.checks = run_all(res.fields, supplier, store.seen_invoice)
+    # cross_check liest IBAN/USt-IdNr direkt aus dem PDF-Text (nicht nur aus dem
+    # extrahierten Feld). Pro Namen genau einen Check behalten: die entschiedene
+    # Aussage schlaegt das "nicht pruefbar" von run_all.
+    for cc in cross_check(doc, supplier):
+        res.checks = [c for c in res.checks
+                      if not (c.name == cc["kind"] and c.ok is None)]
+        if not any(c.name == cc["kind"] for c in res.checks):
+            res.checks.append(Check(cc["kind"], cc["ok"], cc["detail"]))
 
     required = [f for f in tpl.fields if f.required]
     req_conf = [res.fields[f.name].confidence for f in required if f.name in res.fields]
@@ -113,3 +208,60 @@ def process(path: str | Path, store: Store) -> Result:
 def scan_folder(folder: str | Path, store: Store) -> list[Result]:
     folder = Path(folder)
     return [process(p, store) for p in sorted(folder.glob("*.pdf"))]
+
+
+# Steuersaetze, die als eigene Spalten im Journal auftauchen
+JOURNAL_RATES = [19.0, 7.0, 0.0]
+
+
+def _round_rate(r) -> float | None:
+    v = _to_amount(r)
+    return round(v) * 1.0 if v is not None else None
+
+
+def journal_rows(store: Store) -> list[dict]:
+    """Buchungsjournal: eine Zeile je bestaetigter Rechnung, Netto/USt je Satz
+    in eigenen Spalten."""
+    rows = []
+    for r in store.processed():
+        if not r.get("rechnungsnummer"):
+            continue
+        row = {
+            "datei": r.get("file"),
+            "lieferant": r.get("supplier_name") or r.get("supplier_id"),
+            "rechnungsadresse": r.get("billing_address_name") or "",
+            "rechnungsnummer": r.get("rechnungsnummer"),
+            "rechnungsdatum": r.get("rechnungsdatum"),
+            "netto_gesamt": _to_amount(r.get("netto")),
+            "ust_gesamt": _to_amount(r.get("ust_betrag")),
+            "brutto_gesamt": _to_amount(r.get("brutto")),
+        }
+        by_rate: dict[float, dict] = {}
+        for tb in r.get("tax_breakdown") or []:
+            rate = _round_rate(tb.get("satz"))
+            if rate is None:
+                rate = 0.0
+            slot = by_rate.setdefault(rate, {"netto": 0.0, "ust": 0.0})
+            slot["netto"] = round(slot["netto"] + (_to_amount(tb.get("netto")) or 0), 2)
+            slot["ust"] = round(slot["ust"] + (_to_amount(tb.get("ust")) or 0), 2)
+        for rate in JOURNAL_RATES:
+            s = by_rate.get(rate, {})
+            row[f"netto_{int(rate)}"] = s.get("netto")
+            row[f"ust_{int(rate)}"] = s.get("ust")
+        extra = sorted(k for k in by_rate if k not in JOURNAL_RATES)
+        row["weitere_saetze"] = ", ".join(
+            f"{int(k)}%: {by_rate[k]['netto']:.2f}/{by_rate[k]['ust']:.2f}"
+            for k in extra
+        )
+        rows.append(row)
+    return rows
+
+
+def journal_totals(rows: list[dict]) -> dict:
+    tot: dict = {"rechnungen": len(rows)}
+    keys = ["netto_gesamt", "ust_gesamt", "brutto_gesamt"]
+    keys += [f"netto_{int(r)}" for r in JOURNAL_RATES]
+    keys += [f"ust_{int(r)}" for r in JOURNAL_RATES]
+    for k in keys:
+        tot[k] = round(sum(x[k] for x in rows if x.get(k) is not None), 2)
+    return tot
