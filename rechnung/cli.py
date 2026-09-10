@@ -57,6 +57,31 @@ def _cmd_templates(args) -> int:
     return 0
 
 
+def _cmd_journal(args) -> int:
+    from .pipeline import journal_rows, journal_totals
+
+    store = Store(args.data)
+    rows = journal_rows(store)
+    if args.json:
+        print(json.dumps({"rows": rows, "totals": journal_totals(rows)},
+                         indent=2, ensure_ascii=False))
+        return 0
+    if not rows:
+        print("Noch keine bestaetigten Rechnungen.")
+        return 0
+    cols = ["rechnungsnummer", "lieferant", "rechnungsdatum",
+            "netto_gesamt", "ust_gesamt", "netto_19", "ust_19", "netto_7", "ust_7"]
+    print(" | ".join(f"{c:>13.13s}" for c in cols))
+    for r in rows:
+        print(" | ".join(f"{str(r.get(c, '') if r.get(c) is not None else ''):>13.13s}"
+                         for c in cols))
+    tot = journal_totals(rows)
+    print("-" * 100)
+    print(" | ".join(f"{str(tot.get(c, '') if tot.get(c) is not None else ''):>13.13s}"
+                     for c in cols))
+    return 0
+
+
 def _cmd_web(args) -> int:
     import uvicorn
 
@@ -129,6 +154,10 @@ def main(argv=None) -> int:
 
     sub.add_parser("suppliers", help="Bekannte Lieferanten").set_defaults(func=_cmd_suppliers)
     sub.add_parser("templates", help="Gespeicherte Templates").set_defaults(func=_cmd_templates)
+
+    j = sub.add_parser("journal", help="Buchungsjournal (Netto/USt je Steuersatz)")
+    j.add_argument("--json", action="store_true")
+    j.set_defaults(func=_cmd_journal)
 
     w = sub.add_parser("web", help="Lokale Training-UI starten")
     w.add_argument("--port", type=int, default=8000)

@@ -6,10 +6,11 @@ ohne Netzwerkzugriff läuft und von der IT abgenommen werden kann.
 
 ## 1. Zweck
 
-Aus PDF-Rechnungen mit **Textlayer** die Kopf-Felder auslesen (keine
-Positionszeilen). Pro Lieferant wird das Layout **einmalig manuell angelernt**
-(1–3 Rechnungen), danach laufen weitere Rechnungen desselben Lieferanten
-automatisch. Kein OCR, kein ML-Modell in v1.
+Aus PDF-Rechnungen mit **Textlayer** die Kopf-Felder, optional die
+Positionszeilen und die USt-Aufstellung je Steuersatz auslesen. Pro Lieferant
+wird das Layout **einmalig manuell angelernt** (1–3 Rechnungen), danach laufen
+weitere Rechnungen desselben Lieferanten automatisch. Kein OCR, kein ML-Modell
+in v1.
 
 Ziel ist die schrittweise Ablösung von FlexiCapture 12 für den Anteil der
 Lieferanten mit stabilem Layout (Pareto: wenige Lieferanten = Großteil des
