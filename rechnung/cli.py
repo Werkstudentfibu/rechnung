@@ -1,0 +1,144 @@
+"""Kommandozeile: scan / suppliers / templates / web / demo."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+from .store import Store
+
+
+def _cmd_scan(args) -> int:
+    from .pipeline import scan_folder
+
+    store = Store(args.data)
+    results = scan_folder(args.samples, store)
+    if args.json:
+        print(json.dumps([r.to_dict() for r in results], indent=2, ensure_ascii=False))
+        return 0
+    if not results:
+        print(f"Keine PDFs in {args.samples}")
+        return 0
+    for r in results:
+        name = Path(r.file).name
+        head = f"{name:40.40s} {r.status:18s}"
+        if r.supplier_name:
+            head += f" {r.supplier_name} (score {r.match_score})"
+        print(head)
+        for k, fr in r.fields.items():
+            flag = "!" if fr.source == "missing" or fr.confidence < 0.7 else " "
+            print(f"   {flag} {k:16s} {str(fr.value):24.24s} conf={fr.confidence}")
+        for c in r.checks:
+            mark = {True: "ok", False: "FAIL", None: "-"}[c.ok]
+            print(f"   [{mark:4s}] {c.name} {c.detail}")
+    return 0
+
+
+def _cmd_suppliers(args) -> int:
+    store = Store(args.data)
+    for s in store.suppliers():
+        tpls = store.templates_for(s.id)
+        print(f"{s.id:20s} {s.name:30s} templates={len(tpls)} "
+              f"ustid={s.ustids} iban={s.ibans}")
+    return 0
+
+
+def _cmd_templates(args) -> int:
+    store = Store(args.data)
+    for t in store.all_templates():
+        print(f"{t.id:24s} supplier={t.supplier_id:16s} variant={t.variant:10s} "
+              f"confirmations={t.confirmations} secured={t.secured}")
+        for f in t.fields:
+            kind = "anchor" if f.anchor else ("abs" if f.abs_frac else "-")
+            print(f"   {f.name:16s} {f.value_type:8s} {kind}")
+    return 0
+
+
+def _cmd_web(args) -> int:
+    import uvicorn
+
+    from .web.server import create_app
+
+    app = create_app(Store(args.data), Path(args.samples))
+    print(f"Training-UI:  http://127.0.0.1:{args.port}")
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+    return 0
+
+
+def _cmd_demo(args) -> int:
+    """Erzeugt 3 synthetische Rechnungen, lernt ein Template, laeuft die Pipeline."""
+    from .identify import supplier_from_doc
+    from . import pdf as pdfmod
+    from .pipeline import process
+    from .synth import make_invoice
+    from .template import FieldSpec, Template, Anchor
+
+    tmp = Path(tempfile.mkdtemp(prefix="rechnung-demo-"))
+    store = Store(tmp / "data")
+    samples = tmp / "samples"
+    samples.mkdir()
+
+    make_invoice(samples / "re1.pdf", rechnungsnr="RE-2026-00042", netto=1000.0)
+    make_invoice(samples / "re2.pdf", rechnungsnr="RE-2026-00043", netto=2500.0)
+    make_invoice(samples / "re3.pdf", rechnungsnr="RE-2026-00044", netto=99.9)
+
+    doc = pdfmod.load(samples / "re1.pdf")
+    sup = supplier_from_doc(doc, "muster", "Muster Handels GmbH")
+    store.save_supplier(sup)
+
+    tpl = Template(id="muster__standard", supplier_id="muster", secured_at=1, confirmations=1)
+    tpl.fields = [
+        FieldSpec("rechnungsnummer", "number", True,
+                  anchor=Anchor("rechnungsnummer", 0), rel=(60, -4, 240, 12)),
+        FieldSpec("rechnungsdatum", "date", True,
+                  anchor=Anchor("rechnungsdatum", 0), rel=(50, -4, 240, 12)),
+        FieldSpec("netto", "amount", True,
+                  anchor=Anchor("nettobetrag", 0), rel=(120, -4, 320, 12)),
+        FieldSpec("ust_betrag", "amount", True,
+                  anchor=Anchor("umsatzsteuer", 0), rel=(120, -4, 320, 12)),
+        FieldSpec("brutto", "amount", True,
+                  anchor=Anchor("gesamtbetrag", 0), rel=(120, -4, 320, 12)),
+        FieldSpec("iban", "iban", False,
+                  anchor=Anchor("iban", 0), rel=(20, -4, 360, 12)),
+    ]
+    store.save_template(tpl)
+
+    for p in sorted(samples.glob("*.pdf")):
+        r = process(p, store)
+        print(f"\n{p.name}: status={r.status} conf={r.overall_confidence}")
+        for k, fr in r.fields.items():
+            print(f"  {k:16s} = {fr.value}  (conf {fr.confidence}, {fr.source})")
+        for c in r.checks:
+            print(f"  check {c.name}: {c.ok} {c.detail}")
+    print(f"\nDemo-Daten: {tmp}")
+    return 0
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(prog="rechnung", description=__doc__)
+    p.add_argument("--data", default="./data", help="Datenverzeichnis (Templates/Lieferanten)")
+    p.add_argument("--samples", default="./samples", help="Ordner mit Eingangs-PDFs")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("scan", help="Alle PDFs im Sample-Ordner verarbeiten")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=_cmd_scan)
+
+    sub.add_parser("suppliers", help="Bekannte Lieferanten").set_defaults(func=_cmd_suppliers)
+    sub.add_parser("templates", help="Gespeicherte Templates").set_defaults(func=_cmd_templates)
+
+    w = sub.add_parser("web", help="Lokale Training-UI starten")
+    w.add_argument("--port", type=int, default=8000)
+    w.set_defaults(func=_cmd_web)
+
+    sub.add_parser("demo", help="Selbsttest mit synthetischen Rechnungen").set_defaults(func=_cmd_demo)
+
+    args = p.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

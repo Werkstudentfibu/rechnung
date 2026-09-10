@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rechnung"
+version = "0.1.0"
+description = "Template-basierte Rechnungsextraktion (v1, ohne OCR/ML)"
+requires-python = ">=3.11"
+dependencies = [
+    "pdfplumber>=0.11",
+    "pypdfium2>=4.30",
+    "pillow>=10.4",
+    "python-dateutil>=2.9",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "reportlab>=4.2",
+    "pytest>=8.3",
+]
+
+[project.scripts]
+rechnung = "rechnung.cli:main"
+
+[tool.hatchling.build.targets.wheel]
+packages = ["rechnung"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

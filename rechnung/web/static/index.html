@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>Rechnung – Training</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, sans-serif; color: #1a1a1a; }
+  header { padding: 10px 16px; background: #1c7550; color: #fff; display: flex; gap: 16px; align-items: center; }
+  header b { font-size: 15px; }
+  main { display: grid; grid-template-columns: 340px 1fr; height: calc(100vh - 44px); }
+  #list { border-right: 1px solid #ddd; overflow: auto; }
+  #list .row { padding: 8px 12px; border-bottom: 1px solid #eee; cursor: pointer; }
+  #list .row:hover { background: #f3f7f5; }
+  #list .row.active { background: #e3efe9; }
+  .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #ddd; }
+  .badge.auto { background: #c9ecd6; } .badge.review { background: #ffe5b4; }
+  .badge.unknown_supplier, .badge.no_template { background: #f7d3d3; }
+  #work { overflow: auto; padding: 12px; }
+  #fields { position: sticky; top: 0; background: #fff; padding-bottom: 8px; z-index: 5; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid #e0e0e0; padding: 4px 6px; text-align: left; font-size: 13px; }
+  th { background: #f5f5f5; }
+  tr.sel { outline: 2px solid #1c7550; }
+  .pdfwrap { position: relative; margin-top: 10px; display: inline-block; }
+  .pdfwrap img { display: block; }
+  .w { position: absolute; border: 1px solid rgba(28,117,80,.35); cursor: pointer; }
+  .w:hover { background: rgba(28,117,80,.18); }
+  .w.anchor { background: rgba(255,165,0,.4); border-color: orange; }
+  .w.value { background: rgba(28,117,80,.35); }
+  button { font: inherit; padding: 5px 10px; border: 1px solid #1c7550; background: #1c7550; color: #fff; border-radius: 4px; cursor: pointer; }
+  button.ghost { background: #fff; color: #1c7550; }
+  input { font: inherit; padding: 3px 5px; border: 1px solid #bbb; border-radius: 3px; }
+  .hint { color: #666; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <b>Rechnung · Training</b>
+  <button class="ghost" onclick="loadList()">Neu scannen</button>
+  <span id="stats" class="hint"></span>
+</header>
+<main>
+  <div id="list"></div>
+  <div id="work"><p class="hint">Links eine Rechnung wählen.</p></div>
+</main>
+
+<script>
+const $ = (s, r=document) => r.querySelector(s);
+let STATE = { file:null, pages:[], fieldDefs:{}, selField:null, assign:{}, match:null, ident:null, tid:null };
+
+async function loadList() {
+  const d = await (await fetch('/api/scan')).json();
+  STATE.fieldDefs = d.fields;
+  const auto = d.results.filter(r=>r.status==='auto').length;
+  $('#stats').textContent = `${d.results.length} PDF · ${auto} auto`;
+  const list = $('#list'); list.innerHTML = '';
+  for (const r of d.results) {
+    const div = document.createElement('div');
+    div.className = 'row'; div.dataset.file = r.file;
+    div.innerHTML = `<div>${r.file.split('/').pop()}</div>
+      <span class="badge ${r.status}">${r.status}</span>
+      ${r.supplier_name ? ' '+r.supplier_name : ''}
+      ${r.overall_confidence ? ` · conf ${r.overall_confidence}` : ''}`;
+    div.onclick = () => openInvoice(r.file, div);
+    list.appendChild(div);
+  }
+}
+
+async function openInvoice(file, row) {
+  document.querySelectorAll('#list .row').forEach(x=>x.classList.remove('active'));
+  row && row.classList.add('active');
+  const d = await (await fetch('/api/invoice?file='+encodeURIComponent(file))).json();
+  STATE = { ...STATE, file:d.file, pages:d.pages, match:d.match, ident:d.identifiers,
+            tid:d.template_id, selField:null, assign:{} };
+  render(d);
+}
+
+function render(d) {
+  const w = $('#work'); w.innerHTML = '';
+  const sup = d.match || {};
+  const fbox = document.createElement('div'); fbox.id = 'fields';
+  fbox.innerHTML = `
+    <div>
+      Lieferant-ID <input id="sid" value="${sup.id||''}" placeholder="z.B. muster-gmbh">
+      Name <input id="sname" value="${sup.name||''}" size="24">
+      Variante <input id="variant" value="standard" size="10">
+      ${d.match ? `<span class="hint">erkannt: ${d.match.name} (${d.match.score})</span>`
+                : `<span class="hint">neuer Lieferant – USt-IdNr ${(d.identifiers.ustids||[]).join(',')||'?'}</span>`}
+    </div>`;
+  const tbl = document.createElement('table');
+  tbl.innerHTML = '<tr><th>Feld</th><th>Typ</th><th>aktuell</th><th>Anker / Wert</th></tr>';
+  for (const [name, def] of Object.entries(STATE.fieldDefs)) {
+    const cur = (d.current && d.current[name]) || {};
+    const tr = document.createElement('tr'); tr.dataset.field = name;
+    tr.innerHTML = `<td>${name}${def.required?' *':''}</td><td>${def.value_type}</td>
+      <td>${cur.value!==undefined?cur.value:''}${cur.confidence?` <span class="hint">(${cur.confidence})</span>`:''}</td>
+      <td class="ass"></td>`;
+    tr.onclick = () => selectField(name, tr);
+    tbl.appendChild(tr);
+  }
+  fbox.appendChild(tbl);
+  const bar = document.createElement('div'); bar.style.marginTop = '8px';
+  bar.innerHTML = `<button onclick="saveTemplate()">Template speichern</button>
+    ${STATE.tid?`<button class="ghost" onclick="confirmTpl()">Extraktion bestätigen</button>`:''}
+    <span class="hint">Zeile wählen · Wort = Wert · Shift+Wort = Anker</span>
+    <span id="msg" class="hint"></span>`;
+  fbox.appendChild(bar);
+  w.appendChild(fbox);
+
+  for (const pg of d.pages) {
+    const wrap = document.createElement('div'); wrap.className = 'pdfwrap';
+    const img = new Image(); img.src = pg.image;
+    img.onload = () => { wrap.style.width = img.width+'px'; };
+    wrap.appendChild(img);
+    for (const wd of pg.words) {
+      const el = document.createElement('div');
+      el.className = 'w';
+      el.style.left = (wd.x0*pg.scale)+'px';
+      el.style.top = (wd.top*pg.scale)+'px';
+      el.style.width = ((wd.x1-wd.x0)*pg.scale)+'px';
+      el.style.height = ((wd.bottom-wd.top)*pg.scale)+'px';
+      el.title = wd.text;
+      el.onclick = (ev) => clickWord(pg.index, wd.i, ev.shiftKey, el);
+      wrap.appendChild(el);
+    }
+    w.appendChild(wrap);
+  }
+}
+
+function selectField(name, tr) {
+  STATE.selField = name;
+  document.querySelectorAll('#fields tr').forEach(x=>x.classList.remove('sel'));
+  tr.classList.add('sel');
+}
+
+function clickWord(page, i, isAnchor, el) {
+  if (!STATE.selField) { $('#msg').textContent = 'erst Feld-Zeile wählen'; return; }
+  const a = STATE.assign[STATE.selField] || { page, anchor:null, values:[] };
+  a.page = page;
+  if (isAnchor) { a.anchor = i; }
+  else { a.values.includes(i) ? a.values = a.values.filter(x=>x!==i) : a.values.push(i); }
+  STATE.assign[STATE.selField] = a;
+  paint();
+}
+
+function paint() {
+  document.querySelectorAll('.w').forEach(e=>e.classList.remove('anchor','value'));
+  const wraps = document.querySelectorAll('.pdfwrap');
+  for (const [f, a] of Object.entries(STATE.assign)) {
+    const wds = wraps[a.page].querySelectorAll('.w');
+    if (a.anchor!=null) wds[a.anchor].classList.add('anchor');
+    a.values.forEach(i => wds[i].classList.add('value'));
+    const cell = document.querySelector(`#fields tr[data-field="${f}"] .ass`);
+    if (cell) cell.textContent = (a.anchor!=null?'⚓ ':'') + a.values.map(i=>wds[i].title).join(' ');
+  }
+}
+
+async function saveTemplate() {
+  const sid = $('#sid').value.trim();
+  if (!sid) { $('#msg').textContent = 'Lieferant-ID fehlt'; return; }
+  const fields = Object.entries(STATE.assign)
+    .filter(([,a]) => a.values.length)
+    .map(([name, a]) => ({
+      name, value_type: STATE.fieldDefs[name].value_type,
+      required: STATE.fieldDefs[name].required,
+      anchor_word: a.anchor, value_words: a.values, page: a.page,
+    }));
+  const body = { file: STATE.file, supplier_id: sid, supplier_name: $('#sname').value.trim(),
+                 variant: $('#variant').value.trim() || 'standard', fields };
+  const r = await (await fetch('/api/template', {method:'POST', headers:{'content-type':'application/json'},
+    body: JSON.stringify(body)})).json();
+  STATE.tid = r.template_id;
+  $('#msg').textContent = `gespeichert: ${r.fields} Felder → ` +
+    Object.entries(r.extraction).map(([k,v])=>`${k}=${v.value}`).join(', ');
+  openInvoiceRefresh();
+}
+
+async function confirmTpl() {
+  const r = await (await fetch('/api/confirm', {method:'POST', headers:{'content-type':'application/json'},
+    body: JSON.stringify({ file: STATE.file, template_id: STATE.tid })})).json();
+  $('#msg').textContent = `bestätigt ${r.confirmations}× ${r.secured?'· GESICHERT':''}`;
+  loadList();
+}
+
+function openInvoiceRefresh() {
+  const row = [...document.querySelectorAll('#list .row')].find(x=>x.dataset.file===STATE.file);
+  openInvoice(STATE.file, row);
+}
+
+loadList();
+</script>
+</body>
+</html>
