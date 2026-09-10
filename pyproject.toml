@@ -22,6 +22,7 @@ dependencies = [
 dev = [
     "reportlab>=4.2",
     "pytest>=8.3",
+    "httpx>=0.27",
 ]
 
 [project.scripts]

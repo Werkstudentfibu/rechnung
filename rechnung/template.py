@@ -126,6 +126,7 @@ def _find_anchor(words: list[Word], anchor: Anchor) -> Optional[Word]:
 
 
 def _words_in_region(words, x0, y0, x1, y1, page) -> list[Word]:
+    """Wortmitte innerhalb der Region."""
     hit = [w for w in words if w.page == page and x0 <= w.cx <= x1 and y0 <= w.cy <= y1]
     hit.sort(key=lambda w: (round(w.top, 1), w.x0))
     return hit
@@ -174,12 +175,18 @@ def build_field_spec(name: str, value_type: str, required: bool,
     vy0 = min(w.top for w in value_words)
     vx1 = max(w.x1 for w in value_words)
     vy1 = max(w.bottom for w in value_words)
+    # Wert kann bei anderen Rechnungen laenger/kuerzer sein als beim Anlernen:
+    # Region horizontal grosszuegig aufweiten (rechts stark, links leicht fuer
+    # rechtsbuendige Betraege), vertikal eng lassen.
+    width = max(vx1 - vx0, 1.0)
+    grow_r = max(pad, width * 2.0, 60.0)
+    grow_l = max(pad, width * 0.5, 18.0)
     if anchor_word is not None:
         return FieldSpec(
             name=name, value_type=value_type, required=required,
             anchor=Anchor(norm(anchor_word.text), anchor_word.page),
-            rel=(vx0 - anchor_word.x0 - pad, vy0 - anchor_word.top - pad,
-                 vx1 - anchor_word.x0 + pad, vy1 - anchor_word.top + pad),
+            rel=(vx0 - anchor_word.x0 - grow_l, vy0 - anchor_word.top - pad,
+                 vx1 - anchor_word.x0 + grow_r, vy1 - anchor_word.top + pad),
         )
     page = value_words[0].page
     return FieldSpec(
