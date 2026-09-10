@@ -36,6 +36,7 @@
   .badge.unknown_supplier, .badge.no_template { background: #f7d3d3; }
   .badge.scan_no_textlayer { background: #e0d3f7; }
   .badge.library { background: #d3e4f7; }
+  .badge.manual { background: #e8d3f7; border: 1px solid #b37feb; color: #531dab; }
 
   table { border-collapse: collapse; width: 100%; }
   td, th { border: 1px solid #e0e0e0; padding: 4px 6px; text-align: left; font-size: 13px; vertical-align: top; }
@@ -196,15 +197,24 @@ function renderInvoice(d) {
     </div>`;
 
   const tbl = document.createElement('table');
-  tbl.innerHTML = '<tr><th>Feld</th><th>Typ</th><th>aktuell</th><th>Anker / Wert</th></tr>';
+  tbl.innerHTML = '<tr><th>Feld</th><th>Typ</th><th>aktuell (Klick zum Editieren)</th><th>Anker / Wert</th></tr>';
   for (const [name, def] of Object.entries(STATE.defs)) {
     const cur = STATE.current[name] || {};
     const tr = document.createElement('tr'); tr.dataset.field = name;
     const src = cur.source && cur.source !== 'missing'
-      ? ` <span class="badge ${cur.source === 'library' ? 'library' : ''}">${cur.source}</span>` : '';
-    tr.innerHTML = `<td>${esc(name)}${def.required ? ' *' : ''}</td><td>${esc(def.value_type)}</td>
-      <td>${cur.value !== undefined && cur.value !== null ? esc(JSON.stringify(cur.value).slice(0,80)) : ''}
-          ${cur.confidence ? ` <span class="hint">(${cur.confidence})</span>` : ''}${src}</td>
+      ? ` <span class="badge ${cur.source}">${cur.source}</span>` : '';
+    const valStr = cur.value !== undefined && cur.value !== null ? (typeof cur.value === 'object' ? JSON.stringify(cur.value) : cur.value) : '';
+    tr.innerHTML = `<td>${esc(name)}${def.required ? ' *' : ''}</td>
+      <td>${esc(def.value_type)}</td>
+      <td>
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
+          <input class="val-input" data-field="${esc(name)}" value="${esc(valStr)}" 
+                 style="flex:1; border:none; background:transparent; font:inherit; outline:none; padding:2px;" 
+                 onchange="saveCorrection('${esc(name)}', this.value)" 
+                 onclick="event.stopPropagation()">
+          <span style="white-space:nowrap; flex-shrink:0;">${cur.confidence ? `<span class="hint">(${cur.confidence})</span>` : ''}${src}</span>
+        </div>
+      </td>
       <td class="ass"></td>`;
     tr.onclick = () => selectField(name, tr);
     tbl.appendChild(tr);
@@ -410,6 +420,26 @@ async function saveTemplate() {
   $('#msg').textContent = `gespeichert: ${r.fields} Felder, ${(r.line_items || []).length} Positionen → ` +
     Object.entries(r.extraction).map(([k, v]) => `${k}=${JSON.stringify(v.value).slice(0,30)}`).join(', ');
   renderCurrent();
+}
+
+async function saveCorrection(field, value) {
+  $('#msg').textContent = 'Speichere Korrektur...';
+  const r = await api('/api/correction', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, field: field, value: value }),
+  });
+  if (r.ok) {
+    $('#msg').textContent = `Korrektur für ${field} gespeichert: ${value}`;
+    if (!STATE.current[field]) STATE.current[field] = {};
+    STATE.current[field].value = value;
+    STATE.current[field].raw = value;
+    STATE.current[field].source = 'manual';
+    STATE.current[field].confidence = 1.0;
+    // renderCurrent will update table with new source 'manual' and badge
+    renderCurrent();
+  } else {
+    $('#msg').textContent = 'Fehler beim Speichern der Korrektur';
+  }
 }
 
 async function confirmTpl() {

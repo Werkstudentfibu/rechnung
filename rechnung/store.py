@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import json
 import os
+import shutil
+import time
 from pathlib import Path
 
 from .billing import BillingAddress
@@ -22,6 +24,9 @@ class Store:
         self._suppliers = self.root / "suppliers.json"
         self._addresses = self.root / "addresses.json"
         self._processed = self.root / "processed.jsonl"
+        self._audit = self.root / "audit.jsonl"
+        self._archive = self.root / "archive"
+        self._corrections = self.root / "corrections"
 
     # ---- Lieferanten --------------------------------------------------
     def suppliers(self) -> list[Supplier]:
@@ -120,13 +125,94 @@ class Store:
                 return True
         return False
 
+    def seen_sha(self, sha: str) -> bool:
+        return any(r.get("sha256") == sha for r in self.processed())
+
+    def seen_sha_template(self, sha: str, template_id: str | None) -> bool:
+        """Wurde genau diese Rechnung (sha) schon mit genau diesem Template
+        übernommen? Basis für idempotentes finalize()/confirm."""
+        if not sha:
+            return False
+        return any(r.get("sha256") == sha and r.get("template_id") == template_id
+                   for r in self.processed())
+
+    def distinct_confirmations(self, template_id: str) -> int:
+        """Anzahl *verschiedener* Rechnungen (sha256), mit denen ein Template
+        bestaetigt wurde – nicht manipulierbar durch Mehrfach-Klick."""
+        shas = {r.get("sha256") for r in self.processed()
+                if r.get("template_id") == template_id and r.get("sha256")}
+        return len(shas)
+
+    # ---- Audit-Trail (GoBD: append-only, wer/wann/was) --------------
+    def audit(self, action: str, detail: dict | None = None, operator: str = "") -> None:
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "operator": operator or "?",
+               "action": action, "detail": detail or {}}
+        with self._audit.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    def audit_log(self) -> list[dict]:
+        if not self._audit.exists():
+            return []
+        return [json.loads(l) for l in self._audit.read_text("utf-8").splitlines() if l.strip()]
+
+    # ---- Original-PDF unveraendert aufbewahren ---------------------
+    def archive_pdf(self, src: str | Path, sha: str) -> Path | None:
+        if not sha:
+            return None
+        self._archive.mkdir(parents=True, exist_ok=True)
+        target = self._archive / f"{sha}.pdf"
+        if not target.exists():
+            shutil.copy2(src, target)
+        return target
+
+    # ---- Manuelle Korrekturen je Rechnung ------------------------
+    def corrections(self, sha: str) -> dict:
+        p = self._corrections / f"{sha}.json"
+        if not p.exists():
+            return {}
+        return json.loads(p.read_text("utf-8")).get("fields", {})
+
+    def save_correction(self, sha: str, field: str, value, operator: str = "") -> None:
+        self._corrections.mkdir(parents=True, exist_ok=True)
+        p = self._corrections / f"{sha}.json"
+        cur = json.loads(p.read_text("utf-8")) if p.exists() else {"sha256": sha, "fields": {}}
+        cur["fields"][field] = value
+        cur["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        p.write_text(json.dumps(cur, indent=2, ensure_ascii=False), "utf-8")
+        self.audit("correct", {"sha256": sha, "field": field, "value": value}, operator)
+
     def write_output(self, name: str, data: dict) -> Path:
         p = self.root / "out" / f"{name}.json"
         p.write_text(json.dumps(data, indent=2, ensure_ascii=False), "utf-8")
+
+        # Kopf-CSV: nur skalare Felder (Listen kommen in eigene Dateien)
         csv_path = p.with_suffix(".csv")
         with csv_path.open("w", encoding="utf-8", newline="") as fh:
             writer = csv.writer(fh, delimiter=";")
             writer.writerow(["feld", "wert"])
             for k, v in data.items():
+                if isinstance(v, (list, dict)):
+                    continue
                 writer.writerow([k, "" if v is None else v])
+
+        # Positionen als eigene Tabelle
+        items = data.get("_positionen") or []
+        if items:
+            cols = list({k for it in items for k in it})
+            with p.with_name(f"{name}.positionen.csv").open(
+                    "w", encoding="utf-8", newline="") as fh:
+                w = csv.writer(fh, delimiter=";")
+                w.writerow(cols)
+                for it in items:
+                    w.writerow(["" if it.get(c) is None else it.get(c) for c in cols])
+
+        # USt-Aufstellung je Satz
+        tax = data.get("_ust_aufstellung") or []
+        if tax:
+            with p.with_name(f"{name}.ust.csv").open(
+                    "w", encoding="utf-8", newline="") as fh:
+                w = csv.writer(fh, delimiter=";")
+                w.writerow(["satz", "netto", "ust", "brutto"])
+                for r in tax:
+                    w.writerow([r.get("satz"), r.get("netto"), r.get("ust"), r.get("brutto")])
         return p

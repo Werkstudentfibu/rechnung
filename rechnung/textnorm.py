@@ -85,11 +85,22 @@ def find_iban(s: str) -> str | None:
     return fallback
 
 
+# Laenderspezifische IBAN-Gesamtlaenge (Auswahl gaengiger DACH/EU-Laender)
+_IBAN_LEN = {
+    "DE": 22, "AT": 20, "CH": 21, "LI": 21, "NL": 18, "BE": 16, "FR": 27,
+    "IT": 27, "ES": 24, "LU": 20, "PL": 28, "CZ": 24, "SK": 24, "DK": 18,
+    "SE": 24, "FI": 18, "NO": 15, "PT": 25, "GB": 22, "IE": 22, "HU": 28,
+}
+
+
 def iban_valid(iban: str | None) -> bool:
     if not iban:
         return False
     iban = re.sub(r"\s+", "", iban).upper()
     if not re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}", iban):
+        return False
+    exp = _IBAN_LEN.get(iban[:2])
+    if exp is not None and len(iban) != exp:
         return False
     rearranged = iban[4:] + iban[:4]
     digits = "".join(str(int(c, 36)) for c in rearranged)

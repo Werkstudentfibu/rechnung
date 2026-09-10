@@ -102,15 +102,55 @@ def check_tax_summary(fields: dict, tol: float = 0.05) -> Check:
     return Check("ust-aufstellung-summe", ok, ", ".join(parts))
 
 
-def run_all(fields: dict, supplier, seen) -> list[Check]:
+def check_amount_sanity(fields: dict) -> Check:
+    netto, ust, brutto = _amt(fields, "netto"), _amt(fields, "ust_betrag"), _amt(fields, "brutto")
+    have = [x for x in (netto, ust, brutto) if x is not None]
+    if not have:
+        return Check("betraege-plausibel", None, "keine Betraege")
+    problems = []
+    if any(x < 0 for x in have):
+        problems.append("negativ")
+    if netto is not None and brutto is not None and brutto + 0.02 < netto:
+        problems.append("brutto < netto")
+    if ust is not None and ust < 0:
+        problems.append("ust negativ")
+    return Check("betraege-plausibel", not problems, ", ".join(problems) or "ok")
+
+
+def check_line_items_total(fields: dict, line_items: list[dict] | None,
+                           tol: float = 0.05) -> Check:
+    if not line_items:
+        return Check("positionen-summe", None, "keine Positionen")
+    total = 0.0
+    seen = False
+    for it in line_items:
+        for key in ("gesamt", "summe", "betrag", "netto", "total", "zeilensumme"):
+            if key in it and isinstance(it[key], (int, float)):
+                total += it[key]
+                seen = True
+                break
+    if not seen:
+        return Check("positionen-summe", None, "keine Summenspalte erkannt")
+    netto, brutto = _amt(fields, "netto"), _amt(fields, "brutto")
+    for ref, label in ((netto, "netto"), (brutto, "brutto")):
+        if ref is not None and abs(total - ref) <= max(tol, ref * 0.01):
+            return Check("positionen-summe", True, f"Σ {total:.2f} ≈ {label}")
+    ref = netto if netto is not None else brutto
+    return Check("positionen-summe", False,
+                 f"Σ {total:.2f} vs {ref:.2f}" if ref is not None else f"Σ {total:.2f}")
+
+
+def run_all(fields: dict, supplier, seen, line_items: list[dict] | None = None) -> list[Check]:
     supplier_id = getattr(supplier, "id", supplier) if supplier is not None else None
     sup_obj = supplier if not isinstance(supplier, str) else None
     return [
         check_totals(fields),
+        check_amount_sanity(fields),
         check_iban(fields),
         check_date(fields),
         check_duplicate(fields, supplier_id, seen),
         check_iban_known(fields, sup_obj),
         check_ustid_known(fields, sup_obj),
         check_tax_summary(fields),
+        check_line_items_total(fields, line_items),
     ]

@@ -6,10 +6,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import billing
+from . import jobrouter
 from . import pdf as pdfmod
+from .config import jobrouter as _jr_cfg
+from .config import operator as _operator
 from .identify import FIXED_FIELD_TYPES, cross_check, identify
 from .store import Store
-from .template import (FieldResult, Template, apply_line_items, apply_template)
+from .template import (STANDARD_FIELDS, FieldResult, Template, apply_line_items,
+                       apply_template)
 from .textnorm import coerce
 from .validate import Check, run_all
 
@@ -31,6 +35,7 @@ class Result:
     supplier_name: str | None = None
     match_score: float = 0.0
     template_id: str | None = None
+    template_variant: str | None = None
     template_secured: bool = False
     billing_address_id: str | None = None
     billing_address_name: str | None = None
@@ -49,6 +54,7 @@ class Result:
             "supplier_name": self.supplier_name,
             "match_score": self.match_score,
             "template_id": self.template_id,
+            "template_variant": self.template_variant,
             "template_secured": self.template_secured,
             "billing_address_id": self.billing_address_id,
             "billing_address_name": self.billing_address_name,
@@ -162,6 +168,8 @@ def process(path: str | Path, store: Store) -> Result:
         return res
 
     res.template_id = tpl.id
+    res.template_variant = tpl.variant
+    tpl.confirmations = max(tpl.confirmations, store.distinct_confirmations(tpl.id))
     res.template_secured = tpl.secured
     res.fields = apply_template(doc, tpl)
 
@@ -178,12 +186,20 @@ def process(path: str | Path, store: Store) -> Result:
         res.fields[fname] = FieldResult(fname, value, str(fval),
                                         0.99 if ok else 0.6, "library")
 
+    # Manuelle Korrekturen fuer genau diese Rechnung (sha256) gewinnen immer.
+    _type_map = {f.name: f.value_type for f in tpl.fields}
+    for fname, fval in store.corrections(doc.sha256).items():
+        vtype = _type_map.get(fname) or (STANDARD_FIELDS.get(fname, ("text",))[0])
+        value, ok = coerce(str(fval), vtype)
+        res.fields[fname] = FieldResult(fname, value if ok else fval, str(fval),
+                                        1.0, "manual")
+
     if tpl.line_items:
         res.line_items = apply_line_items(doc, tpl.line_items)
 
     res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
 
-    res.checks = run_all(res.fields, supplier, store.seen_invoice)
+    res.checks = run_all(res.fields, supplier, store.seen_invoice, res.line_items)
     # cross_check liest IBAN/USt-IdNr direkt aus dem PDF-Text (nicht nur aus dem
     # extrahierten Feld). Pro Namen genau einen Check behalten: die entschiedene
     # Aussage schlaegt das "nicht pruefbar" von run_all.
@@ -210,6 +226,70 @@ def scan_folder(folder: str | Path, store: Store) -> list[Result]:
     return [process(p, store) for p in sorted(folder.glob("*.pdf"))]
 
 
+def _fv(fields: dict, key: str):
+    fr = fields.get(key)
+    return fr.value if fr is not None else None
+
+
+def finalize(res: Result, store: Store, *, operator: str | None = None,
+             to_jobrouter: bool = True) -> dict:
+    """Eine geprüfte Rechnung in die Bücher übernehmen.
+
+    1. Original-PDF unverändert archivieren (``data/archive/<sha>.pdf`` – GoBD).
+    2. Audit-Eintrag (wer / wann / was) in ``data/audit.jsonl``.
+    3. Journal-Datensatz in ``data/processed.jsonl`` (append-only).
+    4. Ergebnis als JSON/CSV nach ``data/out/``.
+    5. Für die JobRouter-Übergabe in ``data/queue/`` einreihen, sofern der
+       Status in ``RECHNUNG_JOBROUTER_ALLOW_STATUS`` liegt.
+
+    Idempotent über ``sha256`` + Template: mehrfacher Aufruf zählt weder im
+    Journal doppelt noch schickt er zweimal an JobRouter.
+    """
+    op = operator or _operator()
+    payload = res.to_dict()
+    already = store.seen_sha_template(res.sha256, res.template_id)
+
+    store.archive_pdf(res.file, res.sha256)
+
+    if not already:
+        store.mark_processed({
+            "file": Path(res.file).name, "sha256": res.sha256,
+            "supplier_id": res.supplier_id, "supplier_name": res.supplier_name,
+            "template_id": res.template_id, "variant": res.template_variant,
+            "billing_address_id": res.billing_address_id,
+            "billing_address_name": res.billing_address_name,
+            "status": res.status,
+            "rechnungsnummer": _fv(res.fields, "rechnungsnummer"),
+            "rechnungsdatum": _fv(res.fields, "rechnungsdatum"),
+            "netto": _fv(res.fields, "netto"),
+            "ust_betrag": _fv(res.fields, "ust_betrag"),
+            "brutto": _fv(res.fields, "brutto"),
+            "tax_breakdown": res.tax_breakdown,
+            "line_items": res.line_items,
+        })
+        store.audit("finalize", {
+            "sha256": res.sha256, "status": res.status,
+            "template_id": res.template_id,
+            "rechnungsnummer": _fv(res.fields, "rechnungsnummer"),
+        }, op)
+
+    out = {k: v.value for k, v in res.fields.items()}
+    out["_positionen"] = res.line_items
+    out["_ust_aufstellung"] = res.tax_breakdown
+    if res.billing_address_name:
+        out["rechnungsadresse"] = res.billing_address_name
+    store.write_output(Path(res.file).stem, out)
+
+    queued = None
+    if to_jobrouter:
+        cfg = _jr_cfg()
+        if (not cfg.allow_status) or res.status in cfg.allow_status:
+            q = jobrouter.enqueue(store.root, payload)
+            queued = str(q) if q else None
+    return {"finalized": True, "already": already, "queued": queued,
+            "status": res.status}
+
+
 # Steuersaetze, die als eigene Spalten im Journal auftauchen
 JOURNAL_RATES = [19.0, 7.0, 0.0]
 
@@ -222,8 +302,11 @@ def _round_rate(r) -> float | None:
 def journal_rows(store: Store) -> list[dict]:
     """Buchungsjournal: eine Zeile je bestaetigter Rechnung, Netto/USt je Satz
     in eigenen Spalten."""
-    rows = []
-    for r in store.processed():
+    # Nach sha256 deduplizieren (append-only Log kann eine Rechnung mehrfach
+    # enthalten, wenn sie nachträglich korrigiert/erneut übernommen wurde –
+    # der jüngste Eintrag gewinnt, Position bleibt).
+    dedup: dict[str, dict] = {}
+    for i, r in enumerate(store.processed()):
         if not r.get("rechnungsnummer"):
             continue
         row = {
@@ -253,8 +336,8 @@ def journal_rows(store: Store) -> list[dict]:
             f"{int(k)}%: {by_rate[k]['netto']:.2f}/{by_rate[k]['ust']:.2f}"
             for k in extra
         )
-        rows.append(row)
-    return rows
+        dedup[r.get("sha256") or f"__{i}"] = row
+    return list(dedup.values())
 
 
 def journal_totals(rows: list[dict]) -> dict:

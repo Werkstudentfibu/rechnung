@@ -1,52 +1,124 @@
-"""JobRouter-Uebergabe. Eigener, per Konfiguration abschaltbarer Schritt.
+"""JobRouter-Uebergabe – eigener, per Konfiguration abschaltbarer Schritt.
 
-Standardmaessig AUS. Ohne konfigurierte URL schreibt `submit` die Nutzlast nur
-als JSON in den out-Ordner (Trockenlauf), damit v1 komplett offline testbar ist.
+Standardmaessig **Trockenlauf**: ``submit`` schreibt die Nutzlast nur als JSON in
+den out-Ordner. Erst mit ``RECHNUNG_JOBROUTER_ENABLED=1`` und gesetzter URL geht
+ein echter POST raus (mit Retry + exponentiellem Backoff).
+
+Warteschlange: bestaetigte Rechnungen landen als ``<sha>.json`` unter
+``data/queue/``. ``push_queue`` arbeitet sie ab; Erfolge wandern nach
+``data/queue/done/``, Fehlschlaege bleiben liegen (mit Zaehler ``_attempts``).
 """
 
 from __future__ import annotations
 
 import json
-import os
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
-ENABLED = os.environ.get("JOBROUTER_ENABLED", "0") == "1"
-BASE_URL = os.environ.get("JOBROUTER_URL", "").rstrip("/")
-TOKEN = os.environ.get("JOBROUTER_TOKEN", "")
+from .config import JobRouterConfig, jobrouter as _jr_cfg
 
 
-def payload_from_result(res: dict) -> dict:
-    """Flache Feld->Wert-Struktur, wie JobRouter sie typ. erwartet."""
+def payload_from_result(res: dict, cfg: JobRouterConfig | None = None) -> dict:
+    """Result.to_dict() -> flache Struktur fuer JobRouter."""
+    fields = res.get("fields", {})
     return {
-        "sourceFile": Path(res["path"]).name,
-        "sha256": res["sha256"],
+        "sourceFile": Path(res.get("file", "")).name,
+        "sha256": res.get("sha256"),
+        "status": res.get("status"),
         "supplier": res.get("supplier_name") or res.get("supplier_id"),
         "supplierId": res.get("supplier_id"),
-        "fields": {k: v["value"] for k, v in res.get("fields", {}).items()},
-        "confidence": res.get("min_confidence"),
+        "billingAddress": res.get("billing_address_name"),
+        "billingAddressId": res.get("billing_address_id"),
+        "confidence": res.get("overall_confidence"),
+        "fields": {k: (v.get("value") if isinstance(v, dict) else v)
+                   for k, v in fields.items()},
+        "taxBreakdown": res.get("tax_breakdown", []),
+        "lineItems": res.get("line_items", []),
         "checks": {c["name"]: c["ok"] for c in res.get("checks", [])},
     }
 
 
-def submit(res: dict, out_dir: str | Path) -> dict:
-    body = payload_from_result(res)
+def _post(cfg: JobRouterConfig, body: dict) -> dict:
+    url = f"{cfg.base_url}{cfg.endpoint}"
+    data = json.dumps(body).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if cfg.token:
+        headers["Authorization"] = f"Bearer {cfg.token}"
+    last = ""
+    for attempt in range(1, cfg.max_retries + 1):
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=cfg.timeout) as r:  # noqa: S310
+                return {"sent": True, "status": r.status,
+                        "body": r.read(1024).decode("utf-8", "replace"), "attempts": attempt}
+        except urllib.error.HTTPError as e:
+            last = f"HTTP {e.code}: {e.read(512).decode('utf-8', 'replace')}"
+            if e.code < 500 and e.code != 429:
+                return {"sent": False, "error": last, "attempts": attempt}
+        except (urllib.error.URLError, OSError) as e:
+            last = f"{type(e).__name__}: {e}"
+        time.sleep(min(2 ** attempt, 30))
+    return {"sent": False, "error": last, "attempts": cfg.max_retries}
+
+
+def submit(res: dict, out_dir: str | Path, cfg: JobRouterConfig | None = None) -> dict:
+    """Einzelne Rechnung uebergeben (bzw. Trockenlauf schreiben)."""
+    cfg = cfg or _jr_cfg()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    dry = out_dir / (Path(res["path"]).stem + ".jobrouter.json")
+    body = payload_from_result(res, cfg)
+    dry = out_dir / (Path(res.get("file", "rechnung")).stem + ".jobrouter.json")
     dry.write_text(json.dumps(body, indent=2, ensure_ascii=False), "utf-8")
 
-    if not (ENABLED and BASE_URL):
+    if not cfg.live:
         return {"sent": False, "dry_run": str(dry)}
+    if cfg.allow_status and res.get("status") not in cfg.allow_status:
+        return {"sent": False, "skipped": f"status {res.get('status')} nicht in allow_status"}
+    return _post(cfg, body)
 
-    req = urllib.request.Request(
-        f"{BASE_URL}/rest/v2/incidents",
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {TOKEN}" if TOKEN else "",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310 - interne URL
-        return {"sent": True, "status": r.status, "body": r.read(512).decode("utf-8", "replace")}
+
+# ---- Warteschlange -------------------------------------------------------
+
+def queue_dir(data_root: str | Path) -> Path:
+    p = Path(data_root) / "queue"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def enqueue(data_root: str | Path, res: dict) -> Path | None:
+    """Rechnung fuer die Uebergabe einreihen. Gibt ``None`` zurueck, wenn die
+    Rechnung bereits erfolgreich uebergeben wurde (liegt unter ``queue/done/``)."""
+    q = queue_dir(data_root)
+    key = (res.get("sha256") or Path(res.get("file", "x")).stem)[:32]
+    if (q / "done" / f"{key}.json").exists():
+        return None
+    target = q / f"{key}.json"
+    target.write_text(json.dumps(res, indent=2, ensure_ascii=False), "utf-8")
+    return target
+
+
+def push_queue(data_root: str | Path, cfg: JobRouterConfig | None = None,
+               out_dir: str | Path | None = None) -> dict:
+    cfg = cfg or _jr_cfg()
+    root = Path(data_root)
+    q = queue_dir(root)
+    done = q / "done"
+    done.mkdir(exist_ok=True)
+    out_dir = Path(out_dir) if out_dir else root / "out"
+    results = []
+    for f in sorted(q.glob("*.json")):
+        res = json.loads(f.read_text("utf-8"))
+        r = submit(res, out_dir, cfg)
+        r["file"] = res.get("file")
+        results.append(r)
+        if r.get("sent") or r.get("dry_run") or r.get("skipped"):
+            f.rename(done / f.name)
+        else:
+            res["_attempts"] = res.get("_attempts", 0) + 1
+            res["_last_error"] = r.get("error")
+            f.write_text(json.dumps(res, indent=2, ensure_ascii=False), "utf-8")
+    sent = sum(1 for r in results if r.get("sent"))
+    return {"processed": len(results), "sent": sent,
+            "dry_run": not cfg.live, "results": results}

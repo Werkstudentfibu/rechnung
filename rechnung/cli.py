@@ -1,4 +1,4 @@
-"""Kommandozeile: scan / suppliers / templates / web / demo."""
+"""Kommandozeile: fetch / scan / suppliers / templates / journal / push / web / demo."""
 
 from __future__ import annotations
 
@@ -11,11 +11,54 @@ from pathlib import Path
 from .store import Store
 
 
+def _cmd_fetch(args) -> int:
+    """PDF-Anhaenge aus dem IONOS-Postfach in den Inbox-Ordner holen."""
+    from .config import imap, inbox_dir
+    from .ingest import fetch
+
+    cfg = imap()
+    dest = Path(args.dest) if args.dest else inbox_dir()
+    res = fetch(cfg, dest, dry_run=args.dry_run, limit=args.limit)
+    if args.json:
+        print(json.dumps(res.to_dict(), indent=2, ensure_ascii=False))
+        return 0 if not res.error else 1
+    if res.error:
+        print(f"Fehler: {res.error}")
+        return 1
+    print(f"{res.mails} Mail(s), {len(res.saved)} Anhang/Anhaenge -> {dest}"
+          + ("  [Trockenlauf]" if res.dry_run else ""))
+    for s in res.saved:
+        print(f"  {s}")
+    return 0
+
+
+def _cmd_push(args) -> int:
+    """Bestaetigte Rechnungen aus der Warteschlange an JobRouter uebergeben."""
+    from .jobrouter import push_queue
+
+    store = Store(args.data)
+    res = push_queue(store.root)
+    if args.json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return 0
+    tag = " [Trockenlauf]" if res.get("dry_run") else ""
+    print(f"{res['processed']} in Warteschlange, {res['sent']} gesendet{tag}")
+    for r in res.get("results", []):
+        mark = "ok" if r.get("sent") else ("dry" if r.get("dry_run") else
+               ("skip" if r.get("skipped") else "FAIL"))
+        print(f"  [{mark:4s}] {Path(str(r.get('file') or '')).name} {r.get('error') or r.get('skipped') or ''}")
+    return 0
+
+
 def _cmd_scan(args) -> int:
-    from .pipeline import scan_folder
+    from .pipeline import finalize, scan_folder
 
     store = Store(args.data)
     results = scan_folder(args.samples, store)
+    if getattr(args, "finalize", False):
+        for r in results:
+            if r.status in ("auto", "review"):
+                finalize(r, store)
     if args.json:
         print(json.dumps([r.to_dict() for r in results], indent=2, ensure_ascii=False))
         return 0
@@ -150,7 +193,20 @@ def main(argv=None) -> int:
 
     s = sub.add_parser("scan", help="Alle PDFs im Sample-Ordner verarbeiten")
     s.add_argument("--json", action="store_true")
+    s.add_argument("--finalize", action="store_true",
+                   help="auto/review-Treffer in die Buecher uebernehmen + fuer JobRouter einreihen")
     s.set_defaults(func=_cmd_scan)
+
+    f = sub.add_parser("fetch", help="PDF-Anhaenge aus dem IONOS-Postfach holen")
+    f.add_argument("--dest", help="Zielordner (Standard: <data>/inbox)")
+    f.add_argument("--dry-run", action="store_true", help="nur anzeigen, nichts speichern/markieren")
+    f.add_argument("--limit", type=int, default=0, help="hoechstens N Mails")
+    f.add_argument("--json", action="store_true")
+    f.set_defaults(func=_cmd_fetch)
+
+    pu = sub.add_parser("push", help="Warteschlange an JobRouter uebergeben")
+    pu.add_argument("--json", action="store_true")
+    pu.set_defaults(func=_cmd_push)
 
     sub.add_parser("suppliers", help="Bekannte Lieferanten").set_defaults(func=_cmd_suppliers)
     sub.add_parser("templates", help="Gespeicherte Templates").set_defaults(func=_cmd_templates)

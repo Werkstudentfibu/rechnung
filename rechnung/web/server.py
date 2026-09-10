@@ -62,6 +62,12 @@ class ConfirmPost(BaseModel):
     template_id: str
 
 
+class CorrectionPost(BaseModel):
+    file: str
+    field: str
+    value: str
+
+
 class SupplierPost(BaseModel):
     id: str
     name: str = ""
@@ -173,6 +179,16 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                 current = {k: {"value": v.value, "raw": v.raw, "confidence": v.confidence,
                                "source": v.source}
                            for k, v in apply_template(doc, chosen).items()}
+                # Mix in fixed fields
+                for fname, fval in (supplier_obj.fixed_fields or {}).items():
+                    if not str(fval).strip():
+                        continue
+                    if fname in current and current[fname]["source"] != "missing" and current[fname]["raw"]:
+                        continue
+                    current[fname] = {"value": fval, "raw": str(fval), "confidence": 0.99, "source": "library"}
+                # Mix in corrections
+                for fname, fval in store.corrections(doc.sha256).items():
+                    current[fname] = {"value": fval, "raw": str(fval), "confidence": 1.0, "source": "manual"}
                 tpl_fields = [{"name": f.name, "value_type": f.value_type,
                                "required": f.required} for f in chosen.fields]
                 if chosen.line_items:
@@ -293,6 +309,14 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             out["rechnungsadresse"] = addr.name if addr else tpl.variant
         store.write_output(path.stem, out)
         return JSONResponse({"confirmations": tpl.confirmations, "secured": tpl.secured})
+
+    @app.post("/api/correction")
+    def save_correction_ep(body: CorrectionPost) -> JSONResponse:
+        from ..config import operator
+        path = _resolve(body.file)
+        doc = pdfmod.load(path)
+        store.save_correction(doc.sha256, body.field, body.value, operator())
+        return JSONResponse({"ok": True})
 
     # ---- Bibliothek: Lieferanten ------------------------------------
     @app.get("/api/suppliers")
