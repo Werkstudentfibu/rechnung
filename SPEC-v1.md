@@ -83,11 +83,26 @@ Es werden **keine** Rechnungs-PDFs kopiert, nur der SHA-256-Hash im Log.
 1. **OCR für Scans** (Tesseract) – kommt als Fallback, sobald v1 im Feld steht.
 2. **Generisches NER/ML-Modell** für Einmal-Lieferanten – der Teil, der „läuft
    auf jedem Laptop" gefährdet (Modellgröße, Laufzeit).
-3. **IONOS-IMAP-Abholung** – v1 arbeitet auf einem Ordner.
-4. **JobRouter-REST-Übergabe** – Stub liegt in `rechnung/jobrouter.py`, ist aber
-   nicht verdrahtet.
 5. **Rechnungspositionen (Line-Items)**.
 6. **Mehrbenutzer / Server-Betrieb / zentrale Template-Verwaltung**.
+
+## 7a. In v1.1 nachgezogen
+
+- **IONOS-IMAP-Abholung** – `rechnung fetch` holt PDF-Anhänge aus dem Postfach
+  in `<data>/inbox`. Standardmäßig aus; scharf nur mit `RECHNUNG_IMAP_*`
+  (siehe `rechnung.env`-Vorlage). Nur stdlib (`imaplib`/`email`), kein
+  ausgehender Traffic ohne gesetzte Zugangsdaten.
+- **JobRouter-REST-Übergabe** – `rechnung push` arbeitet die Warteschlange
+  (`data/queue/`) ab: echter POST mit Retry/Backoff, `allow_status`-Filter.
+  Ohne `RECHNUNG_JOBROUTER_ENABLED=1` reiner Trockenlauf (JSON in `out/`).
+- **`rechnung scan --finalize`** – geprüfte Rechnungen in die Bücher übernehmen:
+  Original-PDF unverändert nach `data/archive/<sha>.pdf` (GoBD), Audit-Trail
+  (`audit.jsonl`, wer/wann/was), append-only Journal, JSON/CSV nach `out/`,
+  Einreihung für JobRouter. Idempotent über `sha256` + Template.
+- **Manueller Korrektur-Workflow** – pro Rechnung (`sha256`) übersteuerbare
+  Feldwerte (`data/corrections/`), gewinnen in Pipeline und Web-UI.
+- **Härtung Validierung** – Betrags-Plausibilität, Positionssummen-Abgleich,
+  länderspezifische IBAN-Längenprüfung, Journal-Dedup über `sha256`.
 
 ## 8. Offene Punkte für v1.1
 
