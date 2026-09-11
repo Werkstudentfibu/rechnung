@@ -35,8 +35,9 @@ Volumens). Einmal-Lieferanten bleiben vorerst manuell.
 ## 3. Status-Logik
 
 - `auto` – Template gesichert **und** alle Pflichtfelder gefunden **und**
-  Mindestkonfidenz 0,7 **und** keine fehlgeschlagene Prüfung. Nur dieser Status
-  ist für automatische Weiterleitung freigegeben.
+  Mindestkonfidenz 0,7 **und** keine fehlgeschlagene Prüfung. Reines
+  Konfidenz-Signal ("sieht sehr sicher aus") -- **keine** Freigabe fürs
+  automatische Durchlaufen. Siehe §7b: Bestätigungspflicht.
 - `review` – Template vorhanden, aber Konfidenz/Prüfung schwach → Mensch schaut drauf.
 - `no_template` – Lieferant bekannt, noch kein Template → anlernen.
 - `unknown_supplier` – Lieferant nicht erkannt → anlernen.
@@ -103,6 +104,82 @@ Es werden **keine** Rechnungs-PDFs kopiert, nur der SHA-256-Hash im Log.
   Feldwerte (`data/corrections/`), gewinnen in Pipeline und Web-UI.
 - **Härtung Validierung** – Betrags-Plausibilität, Positionssummen-Abgleich,
   länderspezifische IBAN-Längenprüfung, Journal-Dedup über `sha256`.
+
+## 7b. In v1.2 nachgezogen — leichte Vorschlags-Hilfen (weiterhin kein ML-Modell)
+
+Zwei Assistenz-Bausteine, beide reine Textvergleiche (stdlib `difflib`,
+Mengen-Jaccard auf dem ohnehin vorhandenen Kopf-Fingerprint) statt Modell
+oder Gewichte — bleiben deterministisch, ohne neue Abhängigkeit, auditierbar:
+
+- **Kategorie-Vorschlag je Position** (`rechnung/suggest.py`,
+  `Store.category_examples`): aus bestätigten/korrigierten
+  Positionstexten gelernte Nachschlagetabelle (`data/categories.json`),
+  gilt lieferantenübergreifend. Reiner Vorschlag mit Konfidenz — der Mensch
+  bestätigt/korrigiert im Training-UI, nie automatische Buchung.
+- **Ähnliche-Lieferanten-Vorschlag beim Anlernen** (`similar_suppliers`
+  in `suggest.py`, Endpunkt `/api/template/copy`): bei neuem/unbekanntem
+  Lieferanten werden Layouts mit ähnlichem Kopf-Fingerprint vorgeschlagen;
+  ein Klick kopiert deren Template als Startpunkt. Das kopierte Template
+  startet mit `confirmations=0` und muss wie jedes andere erst an echten
+  Rechnungen bestätigt werden, bevor es auf `auto` springen kann — keine
+  Abkürzung bei der Vertrauens-Schwelle.
+
+## 7c. Bestätigungspflicht (v1.2) -- gilt für JEDE Rechnung, immer
+
+`finalize()` (Archivierung, Audit-Log, Journal, JobRouter-Einreihung) verweigert
+jede Rechnung, die nicht zuvor im Training-UI per "Extraktion bestätigen"
+explizit bestätigt wurde (`Store.mark_confirmed`/`is_confirmed`,
+`data/confirmations.jsonl`, append-only wie das Audit-Log). Das gilt unabhängig
+vom Status -- auch eine als `auto` erkannte Rechnung eines längst gesicherten
+Templates läuft nicht ohne diesen Klick durch.
+
+Damit ist `auto` vs. `review` nur noch ein Konfidenz-Signal für die Anzeige
+(grün/orange im UI), keine Automatisierungs-Freigabe: die Kategorisierung und
+Feld-Vorbefüllung passieren automatisch (ab der 2. Rechnung eines Lieferanten),
+aber jede einzelne Rechnung braucht weiterhin einen Menschen, der bestätigt
+(und dabei jederzeit korrigieren kann) -- egal wie oft dieser Lieferant schon
+bestätigt wurde. `rechnung scan --finalize` (CLI-Batchlauf) überspringt
+unbestätigte Treffer entsprechend und meldet das.
+
+## 7d. Härtung (v1.3) -- Reaktion auf eine Risiko-Durchsicht
+
+- **Mehrdeutige Lieferanten-Erkennung** (`identify.py`): Bei zu knappem
+  Abstand zwischen bestem und zweitbestem Fingerprint-Treffer (< 0,15) gibt
+  `identify()` jetzt `None` zurück statt zu raten -- verhindert eine stille
+  Verwechslung zwischen zwei Lieferanten mit ähnlichem Kopf-Layout (z.B.
+  gleiche Buchhaltungssoftware). Ein exakter USt-IdNr./IBAN-Treffer gilt als
+  eindeutig genug und überspringt diese Prüfung.
+- **Mehrdeutige Anker** (`template.py`): Kommt ein Ankertext mehrfach auf der
+  Seite vor, sinkt die Konfidenz von 0,92 auf 0,55 -- der beim Anlernen
+  gespeicherte `occurrence`-Index ist dann nicht mehr garantiert stabil.
+  Fällt damit unter `CONF_MIN` (0,7) und landet auf `review`, statt
+  selbstbewusst falsch als `auto` durchzulaufen.
+- **Kategorie-Verwaltung**: neuer Reiter "Kategorien" im Training-UI
+  (`/api/categories`, GET/DELETE) -- macht die gelernte Nachschlagetabelle
+  sichtbar und korrigierbar/löschbar, statt dass ein einzelner Tippfehler
+  unsichtbar in künftige Vorschläge einfließt.
+- **Datensicherheit** (`store.py`): alle Zustandsdateien (Lieferanten,
+  Templates, Kategorien, Adressen, Korrekturen) werden atomar geschrieben
+  (Temp-Datei + Rename) und heben vor jedem Überschreiben eine `.bak`-Kopie
+  auf. Eine beschädigte Datei (Stromausfall, volle Platte mitten im
+  Schreiben) lässt das Programm nicht mehr abstürzen: erst wird die `.bak`
+  versucht, sonst wird die kaputte Datei zur Seite gelegt (nicht gelöscht)
+  und mit leerem Stand weitergemacht. Append-only-Logs (`processed.jsonl`,
+  `audit.jsonl`, `confirmations.jsonl`) überspringen einzelne beschädigte
+  Zeilen statt komplett unlesbar zu werden.
+- **Kategorie-Vergleichstext**: nur die erste Text-Spalte der Positionstabelle
+  (typischerweise "Bezeichnung"), nicht mehr alle Text-Spalten zusammen --
+  eine zusätzliche Freitext-Spalte hätte den Fuzzy-Vergleich verwässert.
+- **Fuzzy-Schwelle konfigurierbar**: `RECHNUNG_CATEGORY_FUZZY_MIN`
+  (Standard 0,72) -- reine Schätzung bisher, da noch keine echten Rechnungen
+  zur Kalibrierung vorliegen; über ENV justierbar ohne Code-Änderung.
+- **JobRouter-Warnung**: `_post` warnt auf stderr, wenn ein Bearer-Token über
+  eine nicht-`https://`-URL geschickt würde.
+
+**Bewusst nicht angefasst:** mehrseitige Positionstabellen mit
+Seitenumbruch (§8) -- ohne echte Beispielrechnungen mit diesem Layout wäre
+jede "Reparatur" ungetestete Spekulation. Bleibt offen bis reale Fälle
+vorliegen.
 
 ## 8. Offene Punkte für v1.1
 

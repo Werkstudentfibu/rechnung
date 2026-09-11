@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 
 from rechnung import pdf as pdfmod
-from rechnung.identify import identify, supplier_from_doc
-from rechnung.pipeline import AUTO, NO_TEMPLATE, UNKNOWN, process
+from rechnung.identify import Supplier, identify, supplier_from_doc
+from rechnung.pipeline import AUTO, NO_TEMPLATE, UNKNOWN, finalize, process
 from rechnung.store import Store
 from rechnung.template import Anchor, FieldSpec, Template, apply_template
 from rechnung.textnorm import iban_valid, parse_amount, parse_date
@@ -83,6 +83,75 @@ def test_write_output_json_and_csv(tmp_path: Path):
     assert lines[0] == "feld;wert"
     assert "rechnungsnummer;RE-9" in lines
     assert "iban;" in lines
+
+
+def test_finalize_requires_confirmation_even_when_auto(tmp_path: Path):
+    store = Store(tmp_path / "data")
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    a = make_invoice(samples / "a.pdf", rechnungsnr="RE-CONFIRM", netto=500.0)
+    doc = pdfmod.load(a)
+    store.save_supplier(supplier_from_doc(doc, "muster", "Muster Handels GmbH"))
+    store.save_template(_template())
+
+    r = process(a, store)
+    assert r.status == AUTO  # Template ist gesichert, Konfidenz/Prüfungen ok ...
+
+    # ... trotzdem darf ohne expliziten Bestaetigungs-Klick nichts uebernommen werden.
+    out = finalize(r, store, to_jobrouter=False)
+    assert out == {"finalized": False, "error": "not_confirmed", "status": AUTO}
+    assert not store.processed()
+    assert not (store.root / "archive" / f"{r.sha256}.pdf").exists()
+
+    store.mark_confirmed(r.sha256, "aaron")
+    out2 = finalize(r, store, to_jobrouter=False)
+    assert out2["finalized"] is True
+    assert len(store.processed()) == 1
+    assert (store.root / "archive" / f"{r.sha256}.pdf").exists()
+
+
+def test_identify_rejects_ambiguous_fingerprint_match(tmp_path: Path):
+    a = make_invoice(tmp_path / "a.pdf", lieferant="Muster Handels GmbH",
+                     ustid="DE111111111", domain="muster-handel.de")
+    doc = pdfmod.load(a)
+    # Zwei Lieferanten mit identischem Fingerprint (z.B. gleiche Rechnungs-
+    # Software), aber keiner davon hat die tatsaechliche USt-IdNr/IBAN aus
+    # der Rechnung hinterlegt -> keine harten Identifikatoren, nur der
+    # unspezifische Kopf-Fingerprint entscheidet. Das darf nicht in eine
+    # stille falsche Zuordnung muenden.
+    fp = supplier_from_doc(doc, "", "").fingerprint
+    x = Supplier(id="x", name="X GmbH", fingerprint=fp)
+    y = Supplier(id="y", name="Y GmbH", fingerprint=fp)
+    assert identify(doc, [x, y]) is None
+
+
+def test_identify_trusts_hard_identifier_despite_close_fingerprint_scores(tmp_path: Path):
+    a = make_invoice(tmp_path / "a.pdf", lieferant="Muster Handels GmbH",
+                     ustid="DE111111111", domain="muster-handel.de")
+    doc = pdfmod.load(a)
+    fp = supplier_from_doc(doc, "", "").fingerprint
+    real = Supplier(id="real", name="Muster Handels GmbH",
+                    ustids=["DE111111111"], fingerprint=fp)
+    lookalike = Supplier(id="lookalike", name="Lookalike GmbH", fingerprint=fp)
+    match = identify(doc, [real, lookalike])
+    assert match is not None
+    assert match[0].id == "real"
+
+
+def test_ambiguous_anchor_lowers_confidence_below_auto_threshold(tmp_path: Path):
+    # Ankertext "rechnungsnummer" kommt zweimal vor: einmal als echtes Label,
+    # einmal versteckt in einer zweiten Textzeile -- der beim Anlernen
+    # gespeicherte occurrence-Index (0) kann dadurch auf das falsche
+    # Vorkommen zeigen. apply_template soll das an der Konfidenz erkennbar
+    # machen statt 0.92 zu vergeben.
+    a = make_invoice(tmp_path / "a.pdf", rechnungsnr="RE-1", netto=500.0)
+    doc = pdfmod.load(a)
+    from rechnung.pdf import Word
+    doc.pages[0].words.append(Word("Rechnungsnummer:", 20.0, 90.0, 400.0, 410.0, 0))
+
+    tpl = _template()
+    fields = apply_template(doc, tpl)
+    assert fields["rechnungsnummer"].confidence < 0.7
 
 
 def test_duplicate_detection(tmp_path: Path):

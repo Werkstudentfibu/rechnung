@@ -55,12 +55,21 @@ def _cmd_scan(args) -> int:
 
     store = Store(args.data)
     results = scan_folder(args.samples, store)
+    fin_results = []
     if getattr(args, "finalize", False):
-        for r in results:
-            if r.status in ("auto", "review"):
-                finalize(r, store)
+        fin_results = [finalize(r, store) for r in results if r.status in ("auto", "review")]
+        if not args.json:
+            skipped = sum(1 for f in fin_results if not f.get("finalized"))
+            done = len(fin_results) - skipped
+            print(f"finalize: {done} uebernommen, {skipped} uebersprungen "
+                  f"(noch nicht im Training-UI bestaetigt)\n")
     if args.json:
-        print(json.dumps([r.to_dict() for r in results], indent=2, ensure_ascii=False))
+        by_file = {r.file: r.to_dict() for r in results}
+        if getattr(args, "finalize", False):
+            finalized = [r for r in results if r.status in ("auto", "review")]
+            for r, fin in zip(finalized, fin_results):
+                by_file[r.file]["finalize"] = fin
+        print(json.dumps(list(by_file.values()), indent=2, ensure_ascii=False))
         return 0
     if not results:
         print(f"Keine PDFs in {args.samples}")

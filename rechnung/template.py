@@ -167,15 +167,22 @@ class FieldResult:
     source: str  # template-anchor | template-abs | library | missing
 
 
-def _find_anchor(words: list[Word], anchor: Anchor) -> Optional[Word]:
+def _find_anchor(words: list[Word], anchor: Anchor) -> tuple[Optional[Word], int]:
+    """-> (gefundenes Wort oder None, Anzahl aller Kandidaten auf der Seite).
+
+    Die Kandidatenzahl ist ein Mehrdeutigkeits-Signal: kommt der Ankertext
+    mehrfach vor, kann eine zusaetzliche Erwaehnung (z.B. in einer Fusszeile)
+    den beim Anlernen gewaehlten ``occurrence``-Index verschieben, ohne dass
+    das an der Extraktion selbst sichtbar waere -- der Aufrufer soll das in
+    die Konfidenz einpreisen statt blind zu vertrauen."""
     exact = [w for w in words if w.page == anchor.page and norm(w.text) == anchor.text]
     matches = exact or [
         w for w in words if w.page == anchor.page and anchor.text and anchor.text in norm(w.text)
     ]
     matches.sort(key=lambda w: (round(w.top, 1), w.x0))
     if not matches:
-        return None
-    return matches[min(anchor.occurrence, len(matches) - 1)]
+        return None, 0
+    return matches[min(anchor.occurrence, len(matches) - 1)], len(matches)
 
 
 def _words_in_region(words, x0, y0, x1, y1, page) -> list[Word]:
@@ -191,7 +198,7 @@ def apply_template(doc: Document, tpl: Template) -> dict[str, FieldResult]:
     for fs in tpl.fields:
         raw, conf, source = "", 0.0, "missing"
         if fs.anchor and fs.rel:
-            aw = _find_anchor(words, fs.anchor)
+            aw, n_candidates = _find_anchor(words, fs.anchor)
             if aw:
                 dx0, dy0, dx1, dy1 = fs.rel
                 region = _words_in_region(
@@ -199,7 +206,17 @@ def apply_template(doc: Document, tpl: Template) -> dict[str, FieldResult]:
                 )
                 raw = " ".join(w.text for w in region)
                 source = "template-anchor"
-                conf = 0.92 if region else 0.25
+                if not region:
+                    conf = 0.25
+                elif n_candidates > 1:
+                    # Ankertext kommt mehrfach vor -- der beim Anlernen
+                    # gewaehlte Index ist nicht garantiert stabil, der
+                    # gefundene Wert kann vom falschen Vorkommen stammen.
+                    # Lieber niedrigere Konfidenz (-> eher 'review') als
+                    # falsche Sicherheit.
+                    conf = 0.55
+                else:
+                    conf = 0.92
             else:
                 conf = 0.1
         elif fs.abs_frac:
@@ -226,7 +243,7 @@ def apply_line_items(doc: Document, spec: LineItemSpec) -> list[dict]:
     if spec is None or not spec.columns:
         return []
     words = doc.all_words()
-    hdr = _find_anchor(words, spec.header_anchor)
+    hdr, _n = _find_anchor(words, spec.header_anchor)
     if hdr is None:
         return []
     page = hdr.page

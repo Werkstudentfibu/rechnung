@@ -5,6 +5,7 @@ Laeuft nur auf 127.0.0.1. Keine Auth (Einzelplatz-Werkzeug).
 
 from __future__ import annotations
 
+import copy
 import io
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from ..billing import BillingAddress
 from ..identify import FIXED_FIELD_TYPES, Supplier, identify, supplier_from_doc
 from ..pipeline import journal_rows, journal_totals, process
 from ..store import Store
+from ..suggest import similar_suppliers
 from ..template import (STANDARD_FIELDS, Anchor, Column, LineItemSpec, Template,
                         apply_line_items, apply_template, build_field_spec,
                         build_line_item_spec)
@@ -66,6 +68,19 @@ class CorrectionPost(BaseModel):
     file: str
     field: str
     value: str
+
+
+class CategoryPost(BaseModel):
+    text: str
+    kategorie: str
+
+
+class CopyTemplatePost(BaseModel):
+    file: str
+    source_template_id: str
+    target_supplier_id: str
+    target_supplier_name: str = ""
+    variant: str = "standard"
 
 
 class SupplierPost(BaseModel):
@@ -194,6 +209,25 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                 if chosen.line_items:
                     tpl_line_items = chosen.line_items.to_dict()
                     line_items = apply_line_items(doc, chosen.line_items)
+
+        # Kein Template fuer diesen Lieferanten (oder Lieferant unbekannt):
+        # aehnliche bekannte Lieferanten mit Template als Anlern-Starthilfe
+        # vorschlagen ("sieht aus wie X, Vorlage uebernehmen?"). Nie eine
+        # automatische Zuordnung, nur ein Vorschlag im UI.
+        similar = []
+        if tid is None:
+            fp = set(suggestion.get("fingerprint") or [])
+            exclude_id = supplier_obj.id if supplier_obj else None
+            candidates = [s for s in store.suppliers() if s.id != exclude_id]
+            for s, sc in similar_suppliers(fp, candidates):
+                s_tpls = store.templates_for(s.id)
+                if not s_tpls:
+                    continue
+                similar.append({
+                    "id": s.id, "name": s.name, "score": sc,
+                    "templates": [{"id": t.id, "variant": t.variant, "secured": t.secured}
+                                  for t in s_tpls],
+                })
         return JSONResponse({
             "file": path.name,
             "pages": pages,
@@ -214,6 +248,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                                   "score": addr_match[1]} if addr_match else None),
             "suggested_terms": billing.suggest_terms(doc),
             "current": current,
+            "similar_suppliers": similar,
         })
 
     @app.get("/api/page.png")
@@ -273,6 +308,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
 
     @app.post("/api/confirm")
     def confirm(body: ConfirmPost) -> JSONResponse:
+        from ..config import operator as _operator
+
         tpl = store.template(body.template_id)
         if tpl is None:
             raise HTTPException(404, "Template nicht gefunden")
@@ -280,6 +317,11 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         doc = pdfmod.load(path)
         tpl.confirmations += 1
         store.save_template(tpl)
+        # Dieser Klick ist der einzige Weg, wie eine Rechnung "bestaetigt"
+        # gilt -- unabhaengig vom Status (auto/review). finalize() verweigert
+        # sonst Archivierung/JobRouter-Uebergabe, egal wie sicher die
+        # Extraktion aussieht.
+        store.mark_confirmed(doc.sha256, _operator())
 
         # Volle Pipeline -> feste Werte, Positionen, USt-Aufstellung, Pruefungen
         res = process(path, store)
@@ -317,6 +359,55 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         doc = pdfmod.load(path)
         store.save_correction(doc.sha256, body.field, body.value, operator())
         return JSONResponse({"ok": True})
+
+    @app.post("/api/category")
+    def save_category_ep(body: CategoryPost) -> JSONResponse:
+        """Positionstext -> Kategorie lernen. Gilt lieferantenuebergreifend
+        und wirkt sofort auf die naechste Vorschlags-Berechnung (process())."""
+        from ..config import operator
+        store.save_category_example(body.text, body.kategorie, operator())
+        return JSONResponse({"ok": True})
+
+    @app.get("/api/categories")
+    def list_categories() -> JSONResponse:
+        """Gelernte Kategorie-Zuordnungen einsehbar machen -- sonst poisont
+        ein einzelner Tippfehler die Vorschlaege unsichtbar fuer immer."""
+        rows = store.category_examples()
+        return JSONResponse([{"key": k, **v} for k, v in sorted(rows.items())])
+
+    @app.delete("/api/categories/{key}")
+    def delete_category_ep(key: str) -> JSONResponse:
+        from ..config import operator
+        store.delete_category_example(key, operator())
+        return JSONResponse({"ok": True})
+
+    @app.post("/api/template/copy")
+    def copy_template_ep(body: CopyTemplatePost) -> JSONResponse:
+        """Bestehendes Template als Startpunkt fuer einen neuen/aehnlichen
+        Lieferanten uebernehmen, statt Anker von Null anzulernen. Das neue
+        Template startet mit confirmations=0 -- es muss wie jedes andere erst
+        an echten Rechnungen bestaetigt werden, bevor es auf 'auto' springt."""
+        src = store.template(body.source_template_id)
+        if src is None:
+            raise HTTPException(404, "Quell-Template nicht gefunden")
+        path = _resolve(body.file)
+        doc = pdfmod.load(path)
+
+        sup = store.supplier(body.target_supplier_id)
+        if sup is None:
+            sup = supplier_from_doc(doc, body.target_supplier_id, body.target_supplier_name)
+            store.save_supplier(sup)
+
+        tid = f"{body.target_supplier_id}__{body.variant}"
+        tpl = Template(id=tid, supplier_id=body.target_supplier_id, variant=body.variant,
+                       fields=copy.deepcopy(src.fields),
+                       line_items=copy.deepcopy(src.line_items))
+        store.save_template(tpl)
+        return JSONResponse({
+            "template_id": tid, "fields": len(tpl.fields),
+            "extraction": {k: {"value": v.value, "confidence": v.confidence}
+                          for k, v in apply_template(doc, tpl).items()},
+        })
 
     # ---- Bibliothek: Lieferanten ------------------------------------
     @app.get("/api/suppliers")

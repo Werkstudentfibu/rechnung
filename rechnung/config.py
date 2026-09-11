@@ -78,6 +78,17 @@ def inbox_dir() -> Path:
     return Path(v) if v else data_dir() / "inbox"
 
 
+def category_fuzzy_min() -> float:
+    """Schwelle fuer den Fuzzy-Textvergleich der Kategorie-Vorschlaege
+    (suggest.py). Bewusst konfigurierbar statt hart codiert -- der Standard
+    ist eine Schaetzung, solange noch keine echten Rechnungen zur Kalibrierung
+    vorliegen (siehe SPEC-v1.md)."""
+    try:
+        return float(os.environ.get("RECHNUNG_CATEGORY_FUZZY_MIN", "0.72"))
+    except ValueError:
+        return 0.72
+
+
 def operator() -> str:
     """Wer bedient das Programm gerade – fuer den Audit-Trail."""
     return (os.environ.get("RECHNUNG_OPERATOR")

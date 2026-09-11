@@ -12,6 +12,7 @@ Warteschlange: bestaetigte Rechnungen landen als ``<sha>.json`` unter
 from __future__ import annotations
 
 import json
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -46,6 +47,9 @@ def _post(cfg: JobRouterConfig, body: dict) -> dict:
     headers = {"Content-Type": "application/json"}
     if cfg.token:
         headers["Authorization"] = f"Bearer {cfg.token}"
+        if not cfg.base_url.lower().startswith("https://"):
+            print("WARNUNG: RECHNUNG_JOBROUTER_URL ist kein https:// -- der Bearer-Token "
+                  "geht im Klartext ueber das Netzwerk.", file=sys.stderr)
     last = ""
     for attempt in range(1, cfg.max_retries + 1):
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")

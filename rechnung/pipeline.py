@@ -12,6 +12,7 @@ from .config import jobrouter as _jr_cfg
 from .config import operator as _operator
 from .identify import FIXED_FIELD_TYPES, cross_check, identify
 from .store import Store
+from .suggest import suggest_category
 from .template import (STANDARD_FIELDS, FieldResult, Template, apply_line_items,
                        apply_template)
 from .textnorm import coerce
@@ -139,6 +140,27 @@ def _tax_breakdown(fields: dict, line_items: list[dict]) -> list[dict]:
     return []
 
 
+def _suggest_categories(line_items: list[dict], tpl: Template, store: Store) -> None:
+    """Kategorie je Position vorschlagen, gelernt aus ``Store.category_examples``.
+    Vergleichstext ist die erste Text-Spalte (typischerweise "Bezeichnung") --
+    nicht alle Text-Spalten zusammen: eine zusaetzliche Freitext-/Kommentar-
+    Spalte wuerde den Fuzzy-Vergleich sonst verwaessern. ``_kategorie_text``
+    traegt den Vergleichstext fuer die spaetere Korrektur mit -- Unterstrich-
+    Feld, wird nicht in CSV/UI-Spalten aufgelistet."""
+    if not tpl.line_items:
+        return
+    text_cols = [c.name for c in tpl.line_items.columns if c.value_type == "text"]
+    if not text_cols:
+        return
+    first_text_col = text_cols[0]
+    examples = store.category_examples()
+    for item in line_items:
+        text = str(item.get(first_text_col) or "").strip()
+        item["_kategorie_text"] = text
+        sug = suggest_category(text, examples) if text else None
+        item["kategorie"], item["kategorie_konfidenz"] = sug if sug else (None, None)
+
+
 def process(path: str | Path, store: Store) -> Result:
     path = Path(path)
     if not pdfmod.has_text_layer(path):
@@ -196,6 +218,7 @@ def process(path: str | Path, store: Store) -> Result:
 
     if tpl.line_items:
         res.line_items = apply_line_items(doc, tpl.line_items)
+        _suggest_categories(res.line_items, tpl, store)
 
     res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
 
@@ -244,7 +267,16 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
 
     Idempotent über ``sha256`` + Template: mehrfacher Aufruf zählt weder im
     Journal doppelt noch schickt er zweimal an JobRouter.
+
+    Voraussetzung: die Rechnung wurde im Training-UI explizit bestätigt
+    (``Store.mark_confirmed``) -- unabhängig vom Status. ``auto``/``review``
+    sind nur noch Konfidenz-Signale, keine Freigabe fürs automatische
+    Durchlaufen; ohne Bestätigung wird nichts archiviert, geloggt oder an
+    JobRouter eingereiht.
     """
+    if not store.is_confirmed(res.sha256):
+        return {"finalized": False, "error": "not_confirmed", "status": res.status}
+
     op = operator or _operator()
     payload = res.to_dict()
     already = store.seen_sha_template(res.sha256, res.template_id)

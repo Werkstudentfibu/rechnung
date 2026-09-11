@@ -101,13 +101,23 @@ def _jaccard(a: set, b: set) -> float:
     return len(a & b) / len(a | b)
 
 
-def identify(doc: Document, suppliers: list[Supplier], threshold: float = 0.5):
-    """-> (Supplier, score) oder None."""
+def identify(doc: Document, suppliers: list[Supplier], threshold: float = 0.5,
+            min_margin: float = 0.15):
+    """-> (Supplier, score) oder None.
+
+    Bei zu knappem Abstand zum zweitbesten Treffer (< ``min_margin``) wird
+    lieber "kein sicherer Treffer" zurückgegeben statt eine mehrdeutige
+    Zuordnung zu raten -- verhindert eine stille Verwechslung zwischen zwei
+    Lieferanten mit ähnlichem Kopf-Layout (z.B. dieselbe Buchhaltungssoftware).
+    Ein exakter Treffer auf USt-IdNr./IBAN gilt als eindeutig genug und
+    überspringt die Margin-Prüfung.
+    """
     ids = extract_identifiers(doc)
     text_n = norm(doc.text)
-    best = None
+    scored: list[tuple[Supplier, float, bool]] = []
     for s in suppliers:
         score = 0.0
+        hard_hit = bool(ids["ustids"] & set(s.ustids) or ids["ibans"] & set(s.ibans))
         if ids["ustids"] & set(s.ustids):
             score += 0.6
         if ids["ibans"] & set(s.ibans):
@@ -117,11 +127,18 @@ def identify(doc: Document, suppliers: list[Supplier], threshold: float = 0.5):
         if s.name and norm(s.name) in text_n:
             score += 0.2
         score += 0.3 * _jaccard(ids["fingerprint"], set(s.fingerprint))
-        if best is None or score > best[1]:
-            best = (s, round(score, 3))
-    if best and best[1] >= threshold:
-        return best
-    return None
+        scored.append((s, round(score, 3), hard_hit))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: x[1], reverse=True)
+    best_s, best_score, best_hard = scored[0]
+    if best_score < threshold:
+        return None
+    if len(scored) > 1 and not best_hard:
+        second_score = scored[1][1]
+        if (best_score - second_score) < min_margin:
+            return None
+    return best_s, best_score
 
 
 def cross_check(doc: Document, supplier: Supplier) -> list[dict]:

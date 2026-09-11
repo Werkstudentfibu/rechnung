@@ -68,6 +68,7 @@
   <button id="nav-scan" class="active" onclick="show('scan')">Rechnungen</button>
   <button id="nav-suppliers" onclick="show('suppliers')">Lieferanten</button>
   <button id="nav-addresses" onclick="show('addresses')">Rechnungsadressen</button>
+  <button id="nav-categories" onclick="show('categories')">Kategorien</button>
   <button id="nav-journal" onclick="show('journal')">Journal</button>
   <span id="stats" class="hint" style="color:#eaf5ef"></span>
 </header>
@@ -97,6 +98,14 @@
     <div id="addr-form"></div>
   </div>
 
+  <div id="v-categories" class="view pane">
+    <h2>Kategorien</h2>
+    <p class="hint">Gelernte Zuordnungen Positionstext → Kategorie (lieferantenübergreifend,
+      aus Bestätigungen im Rechnungen-Reiter). Hier korrigierbar/löschbar – eine einzelne
+      falsche Zuordnung soll auffindbar sein statt sich unsichtbar weiter vorzuschlagen.</p>
+    <div id="cat-table"></div>
+  </div>
+
   <div id="v-journal" class="view pane">
     <h2>Buchungsjournal</h2>
     <p class="hint">Alle bestätigten Rechnungen, Netto/USt je Steuersatz.
@@ -119,6 +128,7 @@ function show(v) {
   $('#nav-'+v).classList.add('active');
   if (v === 'suppliers') loadSuppliers();
   if (v === 'addresses') loadAddresses();
+  if (v === 'categories') loadCategories();
   if (v === 'journal') loadJournal();
   if (v === 'scan') loadList();
 }
@@ -149,7 +159,10 @@ async function openInvoice(file, row) {
   document.querySelectorAll('#list .row').forEach(x => x.classList.remove('active'));
   row && row.classList.add('active');
   const d = await api('/api/invoice?file=' + encodeURIComponent(file));
+  applyInvoiceData(d);
+}
 
+function applyInvoiceData(d) {
   // Feldliste = Standardfelder + bereits gelernte Template-Felder (dedupe)
   const defs = {};
   for (const [n, v] of Object.entries(d.standard_fields || {}))
@@ -162,6 +175,7 @@ async function openInvoice(file, row) {
     addresses: d.addresses || [], defs, selField: null, assign: {},
     current: d.current || {}, supplier: d.supplier,
     lineItems: d.line_items || [], taxRows: null,
+    similar: d.similar_suppliers || [],
     li: { active: false, page: 0, columns: [], stop_words: [], selCol: null },
   };
   // vorhandene Positionsspalten übernehmen
@@ -171,6 +185,24 @@ async function openInvoice(file, row) {
       ({ name: c.name, value_type: c.value_type, header_word: null }));
   }
   renderInvoice(d);
+}
+
+async function copyTemplateFrom(templateId) {
+  const sid = $('#sid').value.trim();
+  if (!sid) { $('#msg').textContent = 'Erst Lieferant-ID eintragen'; return; }
+  if (!confirm('Vorlage wirklich übernehmen? Nur tun, wenn du die Rechnung geprüft und für '
+              + 'wirklich ähnlich befunden hast – Fehltreffer fallen sonst erst nach 3 '
+              + 'Bestätigungen auf.')) return;
+  const r = await api('/api/template/copy', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      file: STATE.file, source_template_id: templateId, target_supplier_id: sid,
+      target_supplier_name: $('#sname').value.trim(), variant: $('#variant').value,
+    }),
+  });
+  $('#msg').textContent = `Vorlage übernommen: ${r.fields} Felder – jetzt prüfen und anpassen`;
+  const d2 = await api('/api/invoice?file=' + encodeURIComponent(STATE.file));
+  applyInvoiceData(d2);
 }
 
 function renderInvoice(d) {
@@ -220,6 +252,23 @@ function renderInvoice(d) {
     tbl.appendChild(tr);
   }
   fbox.appendChild(tbl);
+
+  if ((STATE.similar || []).length) {
+    const simBox = document.createElement('div'); simBox.className = 'box';
+    simBox.innerHTML = `<h4>Ähnliche bekannte Lieferanten</h4>
+      <div class="hint">Kein sicherer Treffer, aber das Layout ähnelt einem bekannten
+        Lieferanten – Vorlage als Startpunkt übernehmen statt neu anzulernen
+        (Lieferant-ID oben zuerst eintragen).</div>` +
+      STATE.similar.map(s => `
+        <div style="margin:4px 0">
+          ${esc(s.name || s.id)} <span class="hint">(Ähnlichkeit ${s.score})</span>
+          ${(s.templates || []).map(t => `
+            <button class="ghost" onclick="copyTemplateFrom('${esc(t.id)}')">
+              Vorlage „${esc(t.variant)}“ übernehmen${t.secured ? ' ✓' : ''}
+            </button>`).join(' ')}
+        </div>`).join('');
+    fbox.appendChild(simBox);
+  }
 
   const bar = document.createElement('div'); bar.style.marginTop = '8px';
   bar.innerHTML = `
@@ -325,13 +374,32 @@ function wordText(page, i) {
 
 function renderLiPreview(items) {
   const box = document.createElement('div'); box.className = 'box';
-  const cols = Object.keys(items[0]);
+  // interne Felder (Unterstrich) und die Konfidenz-Begleitspalte separat behandeln
+  const cols = Object.keys(items[0]).filter(c => !c.startsWith('_') && c !== 'kategorie_konfidenz');
   box.innerHTML = `<h4>Positionen (${items.length})</h4>
     <table><tr>${cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr>
-    ${items.map(it => `<tr>${cols.map(c =>
-      `<td class="${typeof it[c] === 'number' ? 'num' : ''}">${esc(nz(it[c]))}</td>`).join('')}</tr>`).join('')}
+    ${items.map(it => `<tr>${cols.map(c => {
+        if (c === 'kategorie') {
+          const conf = it.kategorie_konfidenz;
+          return `<td>
+            <input value="${esc(nz(it.kategorie))}" size="14" placeholder="Kategorie …"
+                   onchange="saveCategoryCorrection('${esc((it._kategorie_text || '').replace(/'/g, "\\'"))}', this.value)">
+            ${conf != null ? `<span class="hint">(${conf})</span>` : ''}
+          </td>`;
+        }
+        return `<td class="${typeof it[c] === 'number' ? 'num' : ''}">${esc(nz(it[c]))}</td>`;
+      }).join('')}</tr>`).join('')}
     </table>`;
   return box;
+}
+
+async function saveCategoryCorrection(text, kategorie) {
+  if (!text) { $('#msg').textContent = 'Kein Positionstext zum Zuordnen'; return; }
+  await api('/api/category', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text, kategorie }),
+  });
+  $('#msg').textContent = `Kategorie „${kategorie}“ gelernt für: ${text.slice(0, 50)}`;
 }
 function renderTaxPreview(d) {
   const box = document.createElement('div'); box.className = 'box';
@@ -589,6 +657,39 @@ async function delAddress(id) {
   if (!confirm(`Rechnungsadresse "${id}" löschen?`)) return;
   await fetch('/api/addresses/' + encodeURIComponent(id), { method: 'DELETE' });
   loadAddresses();
+}
+
+/* ================= Kategorien ================= */
+async function loadCategories() {
+  const rows = await api('/api/categories');
+  const t = document.createElement('table');
+  t.innerHTML = '<tr><th>Positionstext</th><th>Kategorie</th><th></th></tr>';
+  if (!rows.length) {
+    $('#cat-table').innerHTML = '<p class="hint">Noch keine Kategorie gelernt.</p>';
+    return;
+  }
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${esc(r.text)}</td>
+      <td><input value="${esc(r.kategorie)}" size="18"
+                 onchange="editCategory('${esc(r.text.replace(/'/g, "\\'"))}', this.value)"></td>
+      <td><button class="danger" onclick="delCategory('${esc(r.key)}')">Löschen</button></td>`;
+    t.appendChild(tr);
+  }
+  $('#cat-table').innerHTML = '';
+  $('#cat-table').appendChild(t);
+}
+async function editCategory(text, kategorie) {
+  await api('/api/category', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text, kategorie }),
+  });
+  loadCategories();
+}
+async function delCategory(key) {
+  if (!confirm('Diese Kategorie-Zuordnung löschen?')) return;
+  await fetch('/api/categories/' + encodeURIComponent(key), { method: 'DELETE' });
+  loadCategories();
 }
 
 /* ================= Journal ================= */
