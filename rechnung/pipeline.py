@@ -8,9 +8,10 @@ from pathlib import Path
 from . import billing
 from . import jobrouter
 from . import pdf as pdfmod
+from . import semantic
 from .config import jobrouter as _jr_cfg
 from .config import operator as _operator
-from .identify import FIXED_FIELD_TYPES, cross_check, identify
+from .identify import DEFAULT_CURRENCY, EXPECTED_RATES, FIXED_FIELD_TYPES, cross_check, identify
 from .store import Store
 from .suggest import suggest_category
 from .template import (STANDARD_FIELDS, FieldResult, Template, apply_line_items,
@@ -120,7 +121,7 @@ def _tax_breakdown(fields: dict, line_items: list[dict]) -> list[dict]:
         for it in line_items:
             rate = _to_amount(it.get("ust_satz") or it.get("mwst") or it.get("ust"))
             base = _to_amount(it.get("netto") or it.get("summe") or it.get("betrag")
-                              or it.get("gesamt"))
+                              or it.get("gesamt") or it.get("gesamtpreis"))
             if rate is None or base is None:
                 continue
             slot = agg.setdefault(rate, {"satz": rate, "netto": 0.0, "ust": 0.0})
@@ -161,7 +162,45 @@ def _suggest_categories(line_items: list[dict], tpl: Template, store: Store) -> 
         item["kategorie"], item["kategorie_konfidenz"] = sug if sug else (None, None)
 
 
-def process(path: str | Path, store: Store) -> Result:
+def _inject_library_fields(fields: dict[str, FieldResult], supplier) -> None:
+    """Feste Werte + Stammdaten (IBAN/USt-IdNr/Steuernummer/Adresse) eines
+    Lieferanten einmischen -- unabhaengig davon, ob fuer ihn schon ein Layout-
+    Template trainiert wurde. Ein per Bulk-Import bekannter Lieferant (siehe
+    importers.py) soll diese Werte schon bei der allerersten Rechnung zeigen,
+    nicht erst ab der zweiten (nach dem ersten manuellen Anlernen) -- siehe
+    Konversation vom 2026-09-18. Mutiert ``fields`` in place, ueberschreibt nur
+    fehlende/leere Eintraege."""
+    for fname, fval in (supplier.fixed_fields or {}).items():
+        if not str(fval).strip():
+            continue
+        cur = fields.get(fname)
+        if cur is not None and cur.source != "missing" and cur.raw:
+            continue
+        vtype = FIXED_FIELD_TYPES.get(fname, "text")
+        value, ok = coerce(str(fval), vtype)
+        fields[fname] = FieldResult(fname, value, str(fval), 0.99 if ok else 0.6, "library")
+
+    # IBAN, USt-IdNr, Steuernummer und Adresse sind Lieferanten-Stammdaten
+    # (Lieferanten-Tab), keine Extraktionsfelder -- die bleiben von Rechnung
+    # zu Rechnung gleich, kommen also direkt aus dem einmal gepflegten
+    # Stammdatensatz statt aus einem Template-Anker und muessen nie pro
+    # Rechnung neu markiert werden.
+    master_fields = {
+        "iban": supplier.ibans[0] if supplier.ibans else "",
+        "ustid": supplier.ustids[0] if supplier.ustids else "",
+        "steuernummer": supplier.creditor_id,
+        "adresse": ", ".join(supplier.address_lines) if supplier.address_lines else "",
+    }
+    for fname, fval in master_fields.items():
+        if not fval:
+            continue
+        cur = fields.get(fname)
+        if cur is not None and cur.source != "missing" and cur.raw:
+            continue
+        fields[fname] = FieldResult(fname, fval, fval, 0.99, "library")
+
+
+def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     path = Path(path)
     if not pdfmod.has_text_layer(path):
         return Result(file=str(path), status=SCAN)
@@ -187,6 +226,7 @@ def process(path: str | Path, store: Store) -> Result:
     tpl = _pick_template(doc, store.templates_for(supplier.id), res.billing_address_id)
     if tpl is None:
         res.status = NO_TEMPLATE
+        _inject_library_fields(res.fields, supplier)
         return res
 
     res.template_id = tpl.id
@@ -194,19 +234,26 @@ def process(path: str | Path, store: Store) -> Result:
     tpl.confirmations = max(tpl.confirmations, store.distinct_confirmations(tpl.id))
     res.template_secured = tpl.secured
     res.fields = apply_template(doc, tpl)
+    _inject_library_fields(res.fields, supplier)
 
-    # Feste Werte aus den Stammdaten einmischen: nur wo das Template nichts
-    # (Sicheres) liefert. Quelle wird als "library" markiert.
-    for fname, fval in (supplier.fixed_fields or {}).items():
-        if not str(fval).strip():
-            continue
-        cur = res.fields.get(fname)
-        if cur is not None and cur.source != "missing" and cur.raw:
-            continue
-        vtype = FIXED_FIELD_TYPES.get(fname, "text")
-        value, ok = coerce(str(fval), vtype)
-        res.fields[fname] = FieldResult(fname, value, str(fval),
-                                        0.99 if ok else 0.6, "library")
+    # Semantischer Fallback (§7f, optional/aus per Default): fuer Felder, die
+    # das Template nicht oder nur schwach liefert, fragt ein lokales LLM den
+    # Volltext -- das Template wird dabei als Hinweis mitgegeben, nicht als
+    # Zwang. Konfidenz ist ueber config.llm().max_confidence gedeckelt, kann
+    # also nie allein auf 'auto' hochfahren (siehe CONF_MIN unten) -- deshalb
+    # kann ``use_llm=False`` (z.B. fuer eine reine Listenuebersicht ueber
+    # viele Dateien) den Fallback ueberspringen, ohne res.status zu aendern.
+    gaps = [
+        name for name in STANDARD_FIELDS
+        if res.fields.get(name) is None or res.fields[name].source == "missing"
+        or res.fields[name].confidence < CONF_MIN
+    ]
+    if gaps and use_llm:
+        hints = {n: r.raw for n, r in res.fields.items() if r.source != "missing"}
+        for name, fr in semantic.extract(doc.text, gaps, hints).items():
+            cur = res.fields.get(name)
+            if cur is None or cur.source == "missing" or fr.confidence > cur.confidence:
+                res.fields[name] = fr
 
     # Manuelle Korrekturen fuer genau diese Rechnung (sha256) gewinnen immer.
     _type_map = {f.name: f.value_type for f in tpl.fields}
@@ -322,13 +369,39 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
             "status": res.status}
 
 
-# Steuersaetze, die als eigene Spalten im Journal auftauchen
-JOURNAL_RATES = [19.0, 7.0, 0.0]
-
-
 def _round_rate(r) -> float | None:
     v = _to_amount(r)
-    return round(v) * 1.0 if v is not None else None
+    return round(v, 1) if v is not None else None
+
+
+def _rate_suffix(rate: float) -> str:
+    s = f"{rate:.1f}".rstrip("0").rstrip(".")
+    return (s or "0").replace(".", "_")
+
+
+def _journal_rate_columns(store: Store, rows_raw: list[dict]) -> list[float]:
+    """Welche Saetze im Journal eigene Spalten bekommen -- wird bei jedem
+    Aufruf frisch aus dem kompletten Bestand ermittelt, nie aus einer
+    hartkodierten Liste oder nur den ersten paar Rechnungen: neue Saetze
+    (weitere MwSt-Stufen, andere Laender) tauchen automatisch als neue Spalte
+    auf, sobald sie einmal vorkommen -- unabhaengig davon, ob ein Lieferant
+    bisher nur einen Satz hatte oder umgekehrt mal mehrere und spaeter
+    wieder nur einen. Zusaetzlich vorbelegt mit den fuer die beteiligten
+    Waehrungen typischen Saetzen (EUR: 19/7/0, CHF: 8,1/2,6/0), damit die
+    Spalten fuer einen bekannten Schweizer Lieferanten schon vor der ersten
+    Rechnung mit z.B. 8,1 % stabil stehen."""
+    rates: set[float] = set()
+    currencies: set[str] = set()
+    for r in rows_raw:
+        sup = store.supplier(r.get("supplier_id") or "")
+        currencies.add(sup.currency if sup and sup.currency else DEFAULT_CURRENCY)
+        for tb in r.get("tax_breakdown") or []:
+            rate = _round_rate(tb.get("satz"))
+            if rate is not None:
+                rates.add(rate)
+    for cur in currencies or {DEFAULT_CURRENCY}:
+        rates.update(EXPECTED_RATES.get(cur, EXPECTED_RATES[DEFAULT_CURRENCY]))
+    return sorted(rates)
 
 
 def journal_rows(store: Store) -> list[dict]:
@@ -337,10 +410,10 @@ def journal_rows(store: Store) -> list[dict]:
     # Nach sha256 deduplizieren (append-only Log kann eine Rechnung mehrfach
     # enthalten, wenn sie nachträglich korrigiert/erneut übernommen wurde –
     # der jüngste Eintrag gewinnt, Position bleibt).
+    raw_rows = [r for r in store.processed() if r.get("rechnungsnummer")]
+    rate_cols = _journal_rate_columns(store, raw_rows)
     dedup: dict[str, dict] = {}
-    for i, r in enumerate(store.processed()):
-        if not r.get("rechnungsnummer"):
-            continue
+    for i, r in enumerate(raw_rows):
         row = {
             "datei": r.get("file"),
             "lieferant": r.get("supplier_name") or r.get("supplier_id"),
@@ -359,13 +432,15 @@ def journal_rows(store: Store) -> list[dict]:
             slot = by_rate.setdefault(rate, {"netto": 0.0, "ust": 0.0})
             slot["netto"] = round(slot["netto"] + (_to_amount(tb.get("netto")) or 0), 2)
             slot["ust"] = round(slot["ust"] + (_to_amount(tb.get("ust")) or 0), 2)
-        for rate in JOURNAL_RATES:
+        for rate in rate_cols:
             s = by_rate.get(rate, {})
-            row[f"netto_{int(rate)}"] = s.get("netto")
-            row[f"ust_{int(rate)}"] = s.get("ust")
-        extra = sorted(k for k in by_rate if k not in JOURNAL_RATES)
+            row[f"netto_{_rate_suffix(rate)}"] = s.get("netto")
+            row[f"ust_{_rate_suffix(rate)}"] = s.get("ust")
+        # Sicherheitsnetz: sollte trotz obiger Vorbelegung ein Satz auftauchen,
+        # der in keiner Spalte landet, geht er hier nicht verloren.
+        extra = sorted(k for k in by_rate if k not in rate_cols)
         row["weitere_saetze"] = ", ".join(
-            f"{int(k)}%: {by_rate[k]['netto']:.2f}/{by_rate[k]['ust']:.2f}"
+            f"{_rate_suffix(k)}%: {by_rate[k]['netto']:.2f}/{by_rate[k]['ust']:.2f}"
             for k in extra
         )
         dedup[r.get("sha256") or f"__{i}"] = row
@@ -373,10 +448,12 @@ def journal_rows(store: Store) -> list[dict]:
 
 
 def journal_totals(rows: list[dict]) -> dict:
+    """Summenzeile -- Spalten werden aus den tatsaechlich vorhandenen Zeilen
+    abgeleitet, nicht aus einer festen Satz-Liste."""
     tot: dict = {"rechnungen": len(rows)}
-    keys = ["netto_gesamt", "ust_gesamt", "brutto_gesamt"]
-    keys += [f"netto_{int(r)}" for r in JOURNAL_RATES]
-    keys += [f"ust_{int(r)}" for r in JOURNAL_RATES]
-    for k in keys:
+    keys = {"netto_gesamt", "ust_gesamt", "brutto_gesamt"}
+    for row in rows:
+        keys.update(k for k in row if k.startswith("netto_") or k.startswith("ust_"))
+    for k in sorted(keys):
         tot[k] = round(sum(x[k] for x in rows if x.get(k) is not None), 2)
     return tot

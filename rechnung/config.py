@@ -95,9 +95,42 @@ def operator() -> str:
             or os.environ.get("USER") or os.environ.get("USERNAME") or "unbekannt")
 
 
+@dataclass(frozen=True)
+class LlmConfig:
+    """Optionaler semantischer Fallback (semantic.py), siehe SPEC-v1.md §7f.
+
+    Standardmaessig AUS: ohne ``RECHNUNG_LLM_ENABLED=1`` verhaelt sich das
+    Programm exakt wie ohne dieses Modul (kein Netzwerkzugriff, keine neue
+    Abhaengigkeit -- reines stdlib ``urllib`` gegen ein lokales Ollama).
+    ``model`` ist bewusst austauschbar ohne Code-Aenderung: kleineres Modell
+    auf einem Laptop, groesseres sobald Server-Hardware feststeht.
+    """
+    enabled: bool = _b("RECHNUNG_LLM_ENABLED", False)
+    base_url: str = os.environ.get("RECHNUNG_LLM_URL", "http://127.0.0.1:11434").rstrip("/")
+    model: str = os.environ.get("RECHNUNG_LLM_MODEL", "qwen2.5:3b-instruct")
+    num_ctx: int = int(os.environ.get("RECHNUNG_LLM_CTX", "4096"))
+    timeout: int = int(os.environ.get("RECHNUNG_LLM_TIMEOUT", "30"))
+    # Konfidenz-Deckel: ein LLM-Treffer soll nie allein auf 'auto' hochfahren
+    # koennen (pipeline.CONF_MIN = 0.7) -- neuer, unbewiesener Weg bleibt erst
+    # mal immer 'review', bis Praxisdaten etwas anderes rechtfertigen.
+    max_confidence: float = float(os.environ.get("RECHNUNG_LLM_MAX_CONFIDENCE", "0.6"))
+    # Ollamas eigener Default (5 Minuten) reicht in der Trainings-UI oft nicht:
+    # ein Mensch braucht zwischen zwei Rechnungen mit Luecken manchmal laenger
+    # zum Pruefen/Anlernen als 5 Minuten, das Modell wird dann entladen und
+    # der naechste Aufruf zahlt die Ladezeit erneut. 10 Minuten sind ein
+    # Kompromiss -- laenger blockiert unnoetig VRAM, das ein anderer lokaler
+    # Dienst (Ollama laedt bei Bedarf ohnehin nur ein Modell gleichzeitig)
+    # zwischenzeitlich brauchen koennte.
+    keep_alive: str = os.environ.get("RECHNUNG_LLM_KEEP_ALIVE", "10m")
+
+
 def imap() -> ImapConfig:
     return ImapConfig()
 
 
 def jobrouter() -> JobRouterConfig:
     return JobRouterConfig()
+
+
+def llm() -> LlmConfig:
+    return LlmConfig()

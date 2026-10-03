@@ -1,0 +1,39 @@
+name: build-windows
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" pyinstaller
+
+      - name: Build onefile
+        run: >
+          pyinstaller --onefile --name rechnung
+          --collect-all pdfplumber --collect-all pdfminer
+          --collect-binaries pypdfium2
+          --collect-all webview --collect-all clr_loader
+          --add-data "rechnung/web/static;rechnung/web/static"
+          -c run.py
+
+      - name: Smoke test
+        run: dist\rechnung.exe demo
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rechnung-exe
+          path: dist/rechnung.exe
+          if-no-files-found: error

@@ -27,7 +27,7 @@ Volumens). Einmal-Lieferanten bleiben vorerst manuell.
 | Feldmodell | Anker + relative Region (`rel`) – robuster gegen kleine Layout-Verschiebungen als absolute Koordinaten; Fallback absolute Seitenanteile (`abs_frac`) |
 | Anwenden | bekannter Lieferant + Template → Felder ziehen, Konfidenz je Feld |
 | Template „gesichert" | nach 3 bestätigten Rechnungen (`secured_at`) |
-| Felder | rechnungsnummer, rechnungsdatum, netto, ust_betrag, ust_satz, brutto, ustid, iban, bestellnummer, zahlungsziel |
+| Felder | rechnungsnummer, rechnungsdatum, netto, ust_betrag, ust_satz, brutto, bestellnummer -- plus automatisch aus dem Lieferanten: iban, ustid, steuernummer, adresse (§7e) |
 | Validierung | netto + ust = brutto (±0,02); IBAN-Prüfziffer (ISO 7064); Datum plausibel (−10 J … +14 T); Dublettenprüfung je Lieferant + Rechnungsnummer |
 | Status | `auto` / `review` / `no_template` / `unknown_supplier` / `scan_no_textlayer` |
 | Ausgabe | JSON + CSV je Rechnung unter `./data/out/` |
@@ -76,6 +76,10 @@ Es werden **keine** Rechnungs-PDFs kopiert, nur der SHA-256-Hash im Log.
 - Entwicklung: `python -m venv .venv && .venv/bin/pip install -e ".[dev]"`.
 - Weitergabe zwischen Büros: **ein PyInstaller-Onefile-Build** (`build.md`),
   Windows-`.exe` bzw. Linux-Binary, ~40–60 MB, keine Runtime-Vorinstallation.
+- Anzeige: `rechnung app` öffnet die Training-UI als eigenständiges Fenster
+  (`pywebview`, Windows-Backend Edge WebView2 – i.d.R. bereits über Edge
+  vorhanden), kein Browser-Tab nötig. `rechnung web` bleibt für Entwicklung/
+  Linux als Browser-Variante bestehen; identischer FastAPI-Code in beiden Fällen.
 - Kein Versand per E-Mail-Anhang (Mailfilter) – über Firmen-Git oder freigegebenes
   Laufwerk.
 
@@ -181,9 +185,123 @@ Seitenumbruch (§8) -- ohne echte Beispielrechnungen mit diesem Layout wäre
 jede "Reparatur" ungetestete Spekulation. Bleibt offen bis reale Fälle
 vorliegen.
 
+## 7e. Lieferanten-Stammdaten statt Pro-Rechnung-Extraktion (2026-09-12)
+
+`iban`, `ustid`, `steuernummer` (aus `creditor_id`) und `adresse` bleiben von
+Rechnung zu Rechnung desselben Lieferanten identisch -- sie stehen deshalb
+nicht mehr in `STANDARD_FIELDS` (nicht mehr als Anker-Feld anlernbar) und
+werden auch nicht ueber "feste Werte" dupliziert. Stattdessen mischt
+`pipeline.process()` sie automatisch aus dem Lieferanten-Stammdatensatz ein
+(Quelle `library`), sobald der Lieferant erkannt ist -- Anschrift, Bank/IBAN,
+USt-IdNr und Gläubiger-ID/Steuernummer pflegt man einmal im Reiter
+"Lieferanten", nie pro Rechnung. Die Training-UI zeigt das als eigenen,
+schreibgeschützten "Lieferant – Stammdaten"-Block statt als Extraktionszeile
+in der Feldtabelle.
+
+Das Feld "Zahlbar bis" (`zahlungsziel`) als Pro-Rechnung-Extraktionsfeld
+entfaellt ersatzlos -- nicht gebraucht. `Supplier.default_payment_terms`
+("Zahlungsziel (Standard)") bleibt bestehen; das ist eine freitextliche Notiz
+zum Lieferanten (z. B. "14 Tage netto"), kein extrahiertes Rechnungsdatum.
+
+## 7f. Semantischer Fallback (2026-09-18) -- Revision von §7.2
+
+§7.2 hatte ein generisches ML-Modell bewusst ausgeklammert, um die
+Zero-Install-Eigenschaft nicht zu gefaehrden. Nach Rueckmeldung der IT steht
+inzwischen mehr Hardware in Aussicht als urspruenglich angenommen (Server
+oder Laptop, noch nicht final entschieden) -- Grund genug, diesen Punkt neu
+zu bewerten, ohne die bestehenden Zusagen (§5) zu brechen.
+
+Umsetzung als **optionale Ergaenzung**, nicht als Ersatz:
+
+- `rechnung/semantic.py` fragt bei Feldern, die die Template-Extraktion nicht
+  oder nur schwach liefert, ein lokal laufendes **Ollama** (eigener Prozess,
+  nicht Teil dieses Programms) nach einer semantischen Interpretation des
+  Volltexts. Das gelernte Template (falls vorhanden) geht als *Hinweis* mit,
+  nicht als Zwang -- dadurch werden Anker zunehmend zur Leitlinie statt zur
+  starren Regel, ohne dass ein Lieferant bei Layout-Abweichungen neu
+  angelernt werden muss.
+- **Standardmaessig aus** (`RECHNUNG_LLM_ENABLED=0`). Ohne das verhaelt sich
+  das Programm exakt wie zuvor -- kein Netzwerkzugriff, keine neue
+  Pip-Abhaengigkeit (reines stdlib `urllib`, kein SDK).
+- **Kein Widerspruch zu §5, aber Praezisierung noetig:** "kein trainiertes
+  KI-Modell" gilt nicht mehr uneingeschraenkt, sobald dieser Schalter an
+  ist. `IT-FREIGABE.md` muss vor einer erneuten Vorlage entsprechend
+  aktualisiert werden -- siehe dortigen Hinweis.
+- **Konfidenz-Deckel:** ein LLM-Treffer bekommt hoechstens
+  `RECHNUNG_LLM_MAX_CONFIDENCE` (Standard 0,6) -- unter `CONF_MIN` (0,7).
+  Kann also nie allein `auto` ausloesen; landet immer auf `review`. Die
+  Bestaetigungspflicht (§7c) gilt unveraendert fuer jede Rechnung.
+- **Modell frei waehlbar** (`RECHNUNG_LLM_MODEL`) ohne Code-Aenderung --
+  kleines Modell auf einem Laptop, groesseres sobald die Hardware-Frage
+  (Server vs. Laptop) geklaert ist. Kein Vendor-Lock: jedes Ollama-kompatible
+  Modell funktioniert.
+- **Scans/OCR (§7.1) bleiben davon unberuehrt** -- dieser Fallback liest nur
+  bereits vorhandenen Text (Template-Textlayer oder spaeter OCR-Ausgabe),
+  er ersetzt keinen Bilderkennungsschritt.
+- Bewusst (noch) nicht Teil dieses Fallbacks: Positionstabelle und
+  USt-Aufstellung (`taxblock`) -- strukturierte Mehrfeld-Extraktion braucht
+  ein eigenes Prompt-/Validierungsdesign, erst nachziehen, wenn sich der
+  einfache Fallback in der Praxis bewaehrt hat.
+- `semantic.extract()` laeuft NICHT in `rechnung scan`/`/api/scan` (Batch-
+  Uebersicht ueber ggf. viele offene Rechnungen) -- nur in `/api/invoice`
+  (Review vor dem Bestaetigen) und `pipeline.process()` (beim Bestaetigen
+  selbst). Grund: die gedeckelte Konfidenz kann `auto`/`review` ohnehin nie
+  aendern (siehe oben), der Batch-Scan wuerde also nur 30-50s/Rechnung Zeit
+  kosten ohne den angezeigten Status zu beeinflussen.
+
+## 7g. Anker direkt aus der Korrektur heraus setzen (2026-09-18)
+
+Bisher war "einen Wert korrigieren" (Freitext-Eingabe, gilt nur fuer genau
+diese eine Rechnung) und "einen Anker anlernen" (Wort im PDF anklicken, gilt
+fuer alle kuenftigen Rechnungen des Lieferanten) getrennt und unterschiedlich
+sichtbar. Jetzt gibt es bei jedem Feld ohne verlaesslichen Anker (Quelle
+fehlt/`llm`/Konfidenz < 0,7) direkt einen Button „📍 im PDF markieren" neben
+dem Korrekturfeld -- ein Klick waehlt das Feld aus, der naechste Wortklick im
+PDF (optional Shift+Klick fuer einen Anker) plus „Template speichern" legt
+den Anker an. Dabei zwei Haertungen, die vorher fehlten:
+
+- `/api/template` mergt Felder jetzt **namentlich** statt die komplette
+  Feldliste zu ersetzen -- vorher hat das gezielte Nachtragen eines einzelnen
+  Feldes auf einer bereits trainierten Rechnung stillschweigend alle anderen,
+  laengst gesicherten Anker geloescht (`STATE.assign` startet beim Oeffnen
+  einer Rechnung immer leer).
+- Ein frisch gesetzter Anker loescht eine vorher gespeicherte manuelle
+  Korrektur fuer dasselbe Feld/dieselbe Rechnung -- sonst zeigt das Feld dort
+  fuer immer Quelle "manual", obwohl die Positions-Extraktion es jetzt selbst
+  zuverlaessig findet.
+
+## 7h. Neuer Lieferant: Vorschlag statt Automatik (2026-09-18)
+
+Aaron pflegt Lieferanten-/Rechnungsadress-Stammdaten (Name, Adresse, IBAN,
+BLZ, ggf. USt-IdNr/Steuernummer) aktuell in Abbyy FlexiCapture; ein sauberer
+Bulk-Export/Import steht noch aus (Abbyy-Liste muss dafuer erst exportiert
+werden) und kann erst nach der Platzierung des Programms im Unternehmen
+sinnvoll passieren. Bis dahin: wenn ein Lieferant nicht erkannt wird, zeigt
+`/api/invoice` trotzdem die aus dem PDF automatisch gelesenen Kennungen
+(USt-IdNr/IBAN/Domain, `identify.supplier_from_doc()`) in einem eigenen
+Kasten „Neuer Lieferant erkannt". Das legt **nichts von selbst an** -- erst
+ein expliziter Klick auf „✓ Als neuen Lieferanten anlegen" (POST
+`/api/suppliers`) erzeugt den Stammdatensatz, mit Lieferant-ID/Name, die der
+Mensch vorher eintraegt. Ab dann wird der Lieferant bei jeder weiteren
+Rechnung erkannt (USt-IdNr/IBAN-Treffer reicht, kein Template noetig) --
+Grundlage fuer den spaeteren Bulk-Import, der denselben Weg ueber
+`/api/suppliers` nehmen wird, nur mit vielen Datensaetzen auf einmal statt
+einem.
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).
 - CSV-Sammelexport über alle Rechnungen eines Laufs.
 - Konfigurierbare Konfidenz-Schwelle je Feld statt global 0,7.
 - Umgang mit mehrseitigen Rechnungen mit Seitenumbruch in der Betragstabelle.
+
+## 9. Langfristige Perspektive (nicht v1, nicht zugesagt)
+
+Ziel ist, schrittweise auf eine Automatisierung ohne manuellen Bestätigungs-
+klick hinzuarbeiten (§7c) – aber erst, wenn die Fehlerquote im laufenden
+Testbetrieb (echte Rechnungen, mehrere Lieferanten, längerer Zeitraum)
+nachweislich niedrig genug dafür ist. Es gibt aktuell keine Metrik/Schwelle,
+ab der das greifen würde – die müsste erst aus den gesammelten
+Bestätigungs-/Korrekturdaten hergeleitet werden. Bis dahin gilt §7c
+uneingeschränkt, und jede Änderung daran braucht eine eigene, spätere
+Rücksprache mit der IT (siehe `IT-FREIGABE.md`).

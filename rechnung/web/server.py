@@ -16,9 +16,10 @@ from pydantic import BaseModel
 
 from .. import billing
 from .. import pdf as pdfmod
+from .. import semantic
 from ..billing import BillingAddress
 from ..identify import FIXED_FIELD_TYPES, Supplier, identify, supplier_from_doc
-from ..pipeline import journal_rows, journal_totals, process
+from ..pipeline import CONF_MIN, journal_rows, journal_totals, process
 from ..store import Store
 from ..suggest import similar_suppliers
 from ..template import (STANDARD_FIELDS, Anchor, Column, LineItemSpec, Template,
@@ -59,6 +60,11 @@ class TemplatePost(BaseModel):
     line_items: LineItemAssign | None = None
 
 
+class LineItemPreviewPost(BaseModel):
+    file: str
+    line_items: LineItemAssign
+
+
 class ConfirmPost(BaseModel):
     file: str
     template_id: str
@@ -92,12 +98,15 @@ class SupplierPost(BaseModel):
     address_lines: list[str] = []
     bank_name: str = ""
     bic: str = ""
+    bank_code: str = ""
+    bank_account: str = ""
     creditor_id: str = ""
     contact: str = ""
     default_payment_terms: str = ""
     default_tax_rate: str = ""
     notes: str = ""
     fixed_fields: dict[str, str] = {}
+    currency: str = "EUR"
 
 
 class AddressPost(BaseModel):
@@ -141,9 +150,16 @@ def create_app(store: Store, samples: Path) -> FastAPI:
 
     @app.get("/api/scan")
     def scan() -> JSONResponse:
+        # use_llm=False: die Liste braucht nur Status/Konfidenz je Datei, und
+        # der LLM-Fallback ist konfidenz-gedeckelt (siehe pipeline.CONF_MIN) --
+        # er kann res.status hier nie veraendern, wuerde aber bei vielen
+        # offenen Rechnungen mit Luecken jede Aktualisierung der Liste um
+        # 30-50s pro betroffener Datei verzoegern. Der volle Fallback laeuft
+        # weiterhin beim Oeffnen einer einzelnen Rechnung (/api/invoice) und
+        # beim tatsaechlichen Bestaetigen (/api/confirm).
         out = []
         for p in sorted(samples.glob("*.pdf")):
-            r = process(p, store)
+            r = process(p, store, use_llm=False)
             out.append(r.to_dict())
         return JSONResponse({
             "results": out,
@@ -194,13 +210,55 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                 current = {k: {"value": v.value, "raw": v.raw, "confidence": v.confidence,
                                "source": v.source}
                            for k, v in apply_template(doc, chosen).items()}
-                # Mix in fixed fields
-                for fname, fval in (supplier_obj.fixed_fields or {}).items():
-                    if not str(fval).strip():
-                        continue
-                    if fname in current and current[fname]["source"] != "missing" and current[fname]["raw"]:
-                        continue
-                    current[fname] = {"value": fval, "raw": str(fval), "confidence": 0.99, "source": "library"}
+
+            # Feste Werte + Stammdaten (IBAN/USt-IdNr/Steuernummer/Adresse) gelten
+            # unabhaengig davon, ob fuer diesen Lieferanten schon ein Layout-
+            # Template trainiert wurde -- ein per Bulk-Import (importers.py)
+            # bekannter Lieferant soll das schon bei der allerersten Rechnung
+            # zeigen, nicht erst ab der zweiten (Konversation 2026-09-18).
+            for fname, fval in (supplier_obj.fixed_fields or {}).items():
+                if not str(fval).strip():
+                    continue
+                if fname in current and current[fname]["source"] != "missing" and current[fname]["raw"]:
+                    continue
+                current[fname] = {"value": fval, "raw": str(fval), "confidence": 0.99, "source": "library"}
+            # IBAN/USt-IdNr/Steuernummer/Adresse kommen direkt aus dem Lieferanten-
+            # Stammdatensatz (Lieferanten-Tab), nicht aus "Feste Werte" -- eigene
+            # strukturierte Felder statt Freitext-Duplikat, siehe pipeline.process().
+            master_fields = {
+                "iban": supplier_obj.ibans[0] if supplier_obj.ibans else "",
+                "ustid": supplier_obj.ustids[0] if supplier_obj.ustids else "",
+                "steuernummer": supplier_obj.creditor_id,
+                "adresse": ", ".join(supplier_obj.address_lines) if supplier_obj.address_lines else "",
+            }
+            for fname, fval in master_fields.items():
+                if not fval:
+                    continue
+                if fname in current and current[fname]["source"] != "missing" and current[fname]["raw"]:
+                    continue
+                current[fname] = {"value": fval, "raw": fval,
+                                  "confidence": 0.99, "source": "library"}
+
+            if tpls:
+                # Semantischer Fallback (§7f) -- muss hier dieselbe Luecken-
+                # Logik wie pipeline.process() durchlaufen, sonst sieht der
+                # Mensch beim Pruefen/Bestaetigen nie den Vorschlag, den er
+                # spaeter beim tatsaechlichen Bestaetigen (process() in
+                # /api/confirm) unbemerkt mitbekommen wuerde -- widerspraeche
+                # der Bestaetigungspflicht (§7c: erst sehen, dann bestaetigen).
+                gaps = [
+                    n for n in STANDARD_FIELDS
+                    if current.get(n) is None or current[n]["source"] == "missing"
+                    or current[n]["confidence"] < CONF_MIN
+                ]
+                if gaps:
+                    hints = {n: v["raw"] for n, v in current.items() if v["source"] != "missing"}
+                    for fname, fr in semantic.extract(doc.text, gaps, hints).items():
+                        cur = current.get(fname)
+                        if cur is None or cur["source"] == "missing" or fr.confidence > cur["confidence"]:
+                            current[fname] = {"value": fr.value, "raw": fr.raw,
+                                              "confidence": fr.confidence, "source": fr.source}
+
                 # Mix in corrections
                 for fname, fval in store.corrections(doc.sha256).items():
                     current[fname] = {"value": fval, "raw": str(fval), "confidence": 1.0, "source": "manual"}
@@ -256,6 +314,22 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         path = _resolve(file)
         return Response(_render_png(path, page), media_type="image/png")
 
+    @app.post("/api/line-items/preview")
+    def preview_line_items(body: LineItemPreviewPost) -> JSONResponse:
+        """Positionstabelle mit dem aktuellen (noch ungespeicherten) Spalten-
+        Mapping auslesen -- damit die Uebersicht "was wurde bestellt" schon
+        waehrend des Anlernens sichtbar ist, nicht erst nach dem Speichern."""
+        path = _resolve(body.file)
+        doc = pdfmod.load(path)
+        li = body.line_items
+        if not li.columns:
+            return JSONResponse({"items": []})
+        words = doc.pages[li.page].words
+        header_cols = [(words[c.header_word], c.name, c.value_type) for c in li.columns]
+        stop = [words[i] for i in li.stop_words]
+        spec = build_line_item_spec(header_cols, stop, doc.pages[li.page].width)
+        return JSONResponse({"items": apply_line_items(doc, spec)})
+
     @app.post("/api/template")
     def save_template(body: TemplatePost) -> JSONResponse:
         path = _resolve(body.file)
@@ -286,7 +360,28 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             pg = doc.pages[fa.page]
             specs.append(build_field_spec(fa.name, fa.value_type, fa.required,
                                           anchor, vwords, pg.width, pg.height))
-        tpl.fields = specs
+
+        # Merge by Feldname statt Ersetzen: der Aufrufer schickt oft nur die
+        # Felder mit, die er gerade (neu) angeklickt hat -- v.a. bei einer
+        # gezielten Nachtrag-Korrektur eines einzelnen Feldes auf einer
+        # bereits trainierten Rechnung (STATE.assign startet beim Oeffnen
+        # immer leer). Ein Ersetzen wuerde dabei alle uebrigen, laengst
+        # gesicherten Anker dieses Templates stillschweigend loeschen.
+        by_name = {f.name: f for f in tpl.fields}
+        for spec in specs:
+            by_name[spec.name] = spec
+        tpl.fields = list(by_name.values())
+
+        # Ein frisch trainierter Anker ersetzt eine bestehende manuelle
+        # Korrektur fuer GENAU diese Rechnung -- sonst zeigt das Feld hier
+        # fuer immer Quelle "manual", obwohl die Positions-Extraktion den
+        # Wert jetzt selbst zuverlaessig liefert. Kuenftige Rechnungen
+        # desselben Lieferanten waren davon ohnehin nie betroffen (Korrektur
+        # ist an sha256 gebunden).
+        from ..config import operator as _operator_for_correction
+        for spec in specs:
+            if spec.name in store.corrections(doc.sha256):
+                store.delete_correction(doc.sha256, spec.name, _operator_for_correction())
 
         if body.line_items and body.line_items.columns:
             li = body.line_items
@@ -358,6 +453,16 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         path = _resolve(body.file)
         doc = pdfmod.load(path)
         store.save_correction(doc.sha256, body.field, body.value, operator())
+        return JSONResponse({"ok": True})
+
+    @app.delete("/api/correction")
+    def delete_correction_ep(file: str, field: str) -> JSONResponse:
+        """Manuelle Korrektur zuruecknehmen -- faellt auf den automatisch
+        extrahierten/festen Wert zurueck, statt den Tippfehler zu behalten."""
+        from ..config import operator
+        path = _resolve(file)
+        doc = pdfmod.load(path)
+        store.delete_correction(doc.sha256, field, operator())
         return JSONResponse({"ok": True})
 
     @app.post("/api/category")
@@ -435,11 +540,13 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             fingerprint=fp,
             address_lines=[x for x in body.address_lines if x.strip()],
             bank_name=body.bank_name.strip(), bic=body.bic.strip().upper(),
+            bank_code=body.bank_code.strip(), bank_account=body.bank_account.strip(),
             creditor_id=body.creditor_id.strip(), contact=body.contact.strip(),
             default_payment_terms=body.default_payment_terms.strip(),
             default_tax_rate=body.default_tax_rate.strip(),
             notes=body.notes.strip(),
             fixed_fields=fixed,
+            currency=(body.currency or "EUR").strip().upper(),
         ))
         return JSONResponse({"ok": True})
 

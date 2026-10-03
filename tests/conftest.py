@@ -28,8 +28,6 @@ def make_invoice(path: Path, *, supplier: str, domain: str, ustid: str, iban: st
         c.drawString(200, y, invoice_no)
         c.drawString(40, y - 16, "Rechnungsdatum")
         c.drawString(200, y - 16, datum)
-        c.drawString(40, y - 32, "Bestellnummer")
-        c.drawString(200, y - 32, "BE-" + invoice_no[-4:])
         ty = y - 90
         c.drawString(40, ty, "Nettobetrag")
         c.drawRightString(300, ty, netto + " EUR")

@@ -23,11 +23,12 @@ def norm(s: str) -> str:
     return s
 
 
-_AMOUNT_RE = re.compile(r"-?\d[\d.\s ]*,\d{2}|-?\d[\d,\s ]*\.\d{2}|-?\d+")
+_AMOUNT_RE = re.compile(r"-?\d[\d.\s ]*,\d{1,2}|-?\d[\d,\s ]*\.\d{1,2}|-?\d+")
 
 
 def parse_amount(s: str) -> float | None:
-    """Erkennt '1.234,56', '1 234,56', '1234.56' und '1234'."""
+    """Erkennt '1.234,56', '1 234,56', '1234.56', '1234' und einstellige
+    Nachkommabetraege wie '8,1' (Schweizer MwSt-Saetze 2,6/8,1)."""
     if not s:
         return None
     m = _AMOUNT_RE.search(s.replace(" ", " "))

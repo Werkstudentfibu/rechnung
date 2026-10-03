@@ -37,6 +37,7 @@
   .badge.scan_no_textlayer { background: #e0d3f7; }
   .badge.library { background: #d3e4f7; }
   .badge.manual { background: #e8d3f7; border: 1px solid #b37feb; color: #531dab; }
+  .badge.llm { background: #d3f7ee; border: 1px solid #36cfc9; color: #08979c; }
 
   table { border-collapse: collapse; width: 100%; }
   td, th { border: 1px solid #e0e0e0; padding: 4px 6px; text-align: left; font-size: 13px; vertical-align: top; }
@@ -117,9 +118,13 @@
 <script>
 const $ = (s, r=document) => r.querySelector(s);
 const api = (u, opt) => fetch(u, opt).then(r => r.json());
-const FIXED_FIELDS = ['iban', 'ustid', 'bestellnummer', 'zahlungsziel', 'ust_satz'];
+// iban/ustid/adresse/steuernummer stehen hier bewusst nicht drin: die kommen
+// automatisch aus den Lieferanten-Stammdaten (siehe Formularfelder oben),
+// sobald der Lieferant erkannt ist -- kein Duplikat als "fester Wert" noetig.
+const FIXED_FIELDS = ['bestellnummer', 'ust_satz'];
 const LI_TYPES = ['text', 'amount', 'number', 'date'];
 let STATE = null;
+let LIST_FILES = [];  // Reihenfolge der zuletzt geladenen Liste, fuer "naechste Rechnung"
 
 function show(v) {
   document.querySelectorAll('.view').forEach(e => e.classList.remove('active'));
@@ -141,10 +146,12 @@ async function loadList() {
   const d = await api('/api/scan');
   const auto = d.results.filter(r => r.status === 'auto').length;
   $('#stats').textContent = `${d.results.length} PDF · ${auto} auto`;
+  LIST_FILES = d.results.map(r => r.file);
   const list = $('#list'); list.innerHTML = '';
   for (const r of d.results) {
     const div = document.createElement('div');
     div.className = 'row';
+    div.dataset.file = r.file;
     div.innerHTML = `<div>${esc(r.file.split('/').pop())}</div>
       <span class="badge ${r.status}">${r.status}</span>
       ${r.supplier_name ? ' ' + esc(r.supplier_name) : ''}
@@ -173,7 +180,8 @@ function applyInvoiceData(d) {
   STATE = {
     file: d.file, pages: d.pages, tid: d.template_id, variant: d.variant,
     addresses: d.addresses || [], defs, selField: null, assign: {},
-    current: d.current || {}, supplier: d.supplier,
+    current: d.current || {}, supplier: d.supplier, identifiers: d.identifiers || {},
+    match: d.match,
     lineItems: d.line_items || [], taxRows: null,
     similar: d.similar_suppliers || [],
     li: { active: false, page: 0, columns: [], stop_words: [], selCol: null },
@@ -222,11 +230,15 @@ function renderInvoice(d) {
     </div>
     <div class="hint">
       ${d.match ? `erkannt: ${esc(d.match.name)} (${d.match.score})` :
-        `neuer Lieferant – USt-IdNr ${(d.identifiers.ustids || []).join(',') || '?'}`}
+        `neuer Lieferant – USt-IdNr ${(d.identifiers.ustids || []).join(',') || '?'}` +
+        (d.identifiers.currency && d.identifiers.currency !== 'EUR'
+          ? ` · Währung erkannt: ${esc(d.identifiers.currency)}` : '')}
       ${d.detected_address ? ` · Adresse: ${esc(d.detected_address.name)} (${d.detected_address.score})` : ''}
       ${d.supplier && d.supplier.fixed_fields && Object.keys(d.supplier.fixed_fields).length
         ? ` · feste Werte: ${Object.keys(d.supplier.fixed_fields).join(', ')}` : ''}
     </div>`;
+  if (d.supplier) fbox.appendChild(renderSupplierInfoBox(d.supplier));
+  if (!d.match) fbox.appendChild(renderNewSupplierBox(d.identifiers || {}));
 
   const tbl = document.createElement('table');
   tbl.innerHTML = '<tr><th>Feld</th><th>Typ</th><th>aktuell (Klick zum Editieren)</th><th>Anker / Wert</th></tr>';
@@ -236,15 +248,22 @@ function renderInvoice(d) {
     const src = cur.source && cur.source !== 'missing'
       ? ` <span class="badge ${cur.source}">${cur.source}</span>` : '';
     const valStr = cur.value !== undefined && cur.value !== null ? (typeof cur.value === 'object' ? JSON.stringify(cur.value) : cur.value) : '';
+    // Kandidat fuers Markieren: kein Anker-Feld, oder einer, der (noch) nicht
+    // zuverlaessig genug liefert -- deckungsgleich mit den "Luecken", die der
+    // semantische Fallback serverseitig fuellt (pipeline.CONF_MIN = 0.7).
+    const needsAnchor = !cur.source || cur.source === 'missing' || cur.source === 'llm'
+      || (cur.confidence != null && cur.confidence < 0.7);
     tr.innerHTML = `<td>${esc(name)}${def.required ? ' *' : ''}</td>
       <td>${esc(def.value_type)}</td>
       <td>
         <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
-          <input class="val-input" data-field="${esc(name)}" value="${esc(valStr)}" 
-                 style="flex:1; border:none; background:transparent; font:inherit; outline:none; padding:2px;" 
-                 onchange="saveCorrection('${esc(name)}', this.value)" 
-                 onclick="event.stopPropagation()">
+          <input class="val-input" data-field="${esc(name)}" value="${esc(valStr)}"
+                 style="flex:1; border:none; background:transparent; font:inherit; outline:none; padding:2px;"
+                 onchange="saveCorrection('${esc(name)}', this.value)"
+                 onclick="event.stopPropagation(); selectField('${esc(name)}', this.closest('tr'))">
           <span style="white-space:nowrap; flex-shrink:0;">${cur.confidence ? `<span class="hint">(${cur.confidence})</span>` : ''}${src}</span>
+          ${needsAnchor ? `<button class="ghost" style="padding:2px 6px; white-space:nowrap" title="Position im PDF anklicken -- kuenftige Rechnungen dieses Lieferanten finden das Feld dann automatisch, ohne LLM-Aufruf" onclick="event.stopPropagation(); markInPdf('${esc(name)}')">📍 im PDF markieren</button>` : ''}
+          ${cur.source === 'manual' ? `<button class="danger" style="padding:0 4px" title="Korrektur zurücknehmen" onclick="event.stopPropagation(); clearCorrection('${esc(name)}')">↺</button>` : ''}
         </div>
       </td>
       <td class="ass"></td>`;
@@ -273,17 +292,17 @@ function renderInvoice(d) {
   const bar = document.createElement('div'); bar.style.marginTop = '8px';
   bar.innerHTML = `
     <button onclick="saveTemplate()">Template speichern</button>
-    ${STATE.tid ? `<button class="ghost" onclick="confirmTpl()">Extraktion bestätigen</button>` : ''}
+    ${STATE.tid ? `<button class="ghost" onclick="confirmTpl()">Extraktion bestätigen${STATE.tid ? ' (b)' : ''}</button>` : ''}
     <button class="ghost" onclick="addCustomField()">+ eigenes Feld</button>
     <button class="ghost" onclick="toggleLi()">Positionstabelle ${STATE.li.active ? 'ausblenden' : 'anlernen'}</button>
-    <span class="hint">Feld-Zeile wählen · Klick = Wert · Shift+Klick = Anker (Label)</span>
+    <span class="hint">Feld-Zeile wählen · Klick = Wert · Shift+Klick = Anker (Label)${STATE.tid ? ' · Taste „b" = bestätigen + nächste' : ''}</span>
     <span id="msg" class="hint"></span>`;
   fbox.appendChild(bar);
 
   if (STATE.li.active) fbox.appendChild(renderLiPanel());
   w.appendChild(fbox);
 
-  if (STATE.lineItems && STATE.lineItems.length) w.appendChild(renderLiPreview(STATE.lineItems));
+  w.appendChild(renderLiPreviewBox(STATE.lineItems));
   w.appendChild(renderTaxPreview(d));
 
   for (const pg of d.pages) {
@@ -306,6 +325,78 @@ function renderInvoice(d) {
   paint();
 }
 
+function renderNewSupplierBox(ids) {
+  // Nur ein Vorschlag: aus der Rechnung automatisch erkannte Kennungen
+  // (USt-IdNr/IBAN/Domain) werden hier gezeigt, aber NIE von selbst
+  // gespeichert -- erst der Klick auf "Als neuen Lieferanten anlegen" legt
+  // den Stammdatensatz an. Deckt sich mit dem generellen Prinzip dieses
+  // Programms (siehe SPEC §7c): Vorschlag ist billig, Übernahme ist ein
+  // bewusster Klick.
+  const rows = [
+    ['USt-IdNr', (ids.ustids || []).join(', ')],
+    ['IBAN', (ids.ibans || []).join(', ')],
+    ['Domain', (ids.domains || []).join(', ')],
+    ['Währung', ids.currency && ids.currency !== 'EUR' ? ids.currency : ''],
+  ].filter(([, v]) => v);
+  const box = document.createElement('div'); box.className = 'box';
+  if (!rows.length) {
+    box.innerHTML = `<h4>Neuer Lieferant</h4>
+      <div class="hint">Auf dieser Rechnung wurden keine USt-IdNr/IBAN/Domain gefunden --
+        Lieferant-ID und Name oben von Hand eintragen.</div>`;
+    return box;
+  }
+  box.innerHTML = `<h4>Neuer Lieferant erkannt</h4>
+    <div class="hint">Automatisch aus der Rechnung gelesen -- wird nur bei Klick unten
+      als Stammdatensatz angelegt, nichts passiert von selbst:</div>
+    <div class="form-grid">
+      ${rows.map(([k, v]) => `<label>${esc(k)}</label><div>${esc(v)}</div>`).join('')}
+    </div>
+    <button onclick="saveNewSupplierFromInvoice()">✓ Als neuen Lieferanten anlegen</button>`;
+  return box;
+}
+
+async function saveNewSupplierFromInvoice() {
+  const sid = $('#sid').value.trim();
+  const sname = $('#sname').value.trim();
+  if (!sid) { $('#msg').textContent = 'Erst Lieferant-ID oben eintragen (z.B. muster-gmbh)'; return; }
+  const ids = STATE.identifiers || {};
+  await api('/api/suppliers', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      id: sid, name: sname,
+      ustids: ids.ustids || [], ibans: ids.ibans || [], domains: ids.domains || [],
+      currency: ids.currency || 'EUR',
+    }),
+  });
+  $('#msg').textContent = `Lieferant „${sname || sid}“ angelegt -- jetzt die Felder unten anlernen.`;
+  const d2 = await api('/api/invoice?file=' + encodeURIComponent(STATE.file));
+  applyInvoiceData(d2);
+}
+
+function renderSupplierInfoBox(sup) {
+  // Reines Anzeige-Feld: diese Werte gehoeren zum Lieferanten (Reiter
+  // "Lieferanten"), nicht zur Rechnung -- werden hier nur zur Kontrolle
+  // gezeigt, nie in der Feldtabelle abgefragt/angelernt.
+  const box = document.createElement('div'); box.className = 'box';
+  const rows = [
+    ['Währung', sup.currency && sup.currency !== 'EUR' ? sup.currency : ''],
+    ['Adresse', (sup.address_lines || []).join(', ')],
+    ['IBAN', (sup.ibans || []).join(', ')],
+    ['USt-IdNr', (sup.ustids || []).join(', ')],
+    ['Gläubiger-ID / StNr', sup.creditor_id],
+    ['Bank', [sup.bank_name, sup.bic].filter(Boolean).join(' · ')],
+    ['Ansprechpartner', sup.contact],
+  ].filter(([, v]) => v);
+  if (!rows.length) return box;
+  box.innerHTML = `<h4>Lieferant – Stammdaten</h4>
+    <div class="hint">Fest beim Lieferanten hinterlegt, gilt für jede seiner Rechnungen –
+      hier nur zur Kontrolle, Änderungen im Reiter „Lieferanten“.</div>
+    <div class="form-grid">
+      ${rows.map(([k, v]) => `<label>${esc(k)}</label><div>${esc(v)}</div>`).join('')}
+    </div>`;
+  return box;
+}
+
 function selectField(name, tr) {
   STATE.li.selCol = null;
   STATE.selField = name;
@@ -313,8 +404,19 @@ function selectField(name, tr) {
   tr.classList.add('sel');
 }
 
+function markInPdf(name) {
+  const tr = document.querySelector(`#fields tr[data-field="${name}"]`);
+  if (!tr) return;
+  selectField(name, tr);
+  tr.scrollIntoView({ block: 'nearest' });
+  $('#msg').textContent =
+    `„${name}“: jetzt das Wort/die Wörter im PDF anklicken (Shift+Klick = optionaler Anker ` +
+    `für mehr Robustheit), danach oben „Template speichern“ – ab der nächsten Rechnung ` +
+    `dieses Lieferanten wird das Feld dann direkt gefunden, ohne LLM-Aufruf.`;
+}
+
 function addCustomField() {
-  const name = (prompt('Name des Feldes (z.B. leistungszeitraum, projektnummer):') || '').trim()
+  const name = (prompt('Name des Feldes (z.B. projektnummer, lieferdatum):') || '').trim()
     .toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
   if (!name) return;
   const type = (prompt('Typ: text / amount / date / number / iban / ustid / taxblock', 'text') || 'text').trim();
@@ -367,13 +469,22 @@ function addLiCol() {
 }
 function selLiCol(i) { STATE.selField = null; STATE.li.selCol = i; paintLiCols();
   document.querySelectorAll('#fields tr').forEach(x => x.classList.remove('sel')); }
-function delLiCol(i) { STATE.li.columns.splice(i, 1); STATE.li.selCol = null; paintLiCols(); paint(); }
+function delLiCol(i) { STATE.li.columns.splice(i, 1); STATE.li.selCol = null; paintLiCols(); paint(); refreshLiPreview(); }
 function wordText(page, i) {
   const pg = STATE.pages[page]; const wd = pg && pg.words[i]; return wd ? wd.text : '?';
 }
 
-function renderLiPreview(items) {
-  const box = document.createElement('div'); box.className = 'box';
+function renderLiPreviewBox(items) {
+  // Immer sichtbar (nicht erst nach dem Speichern) -- Ueberblick "was wurde
+  // bestellt" soll jederzeit da sein, auch waehrend die Spalten noch
+  // angelernt werden.
+  const box = document.createElement('div'); box.className = 'box'; box.id = 'li-preview-box';
+  if (!items || !items.length) {
+    box.innerHTML = `<h4>Positionen</h4>
+      <div class="hint">Noch keine Position erkannt – Spalten der Positionstabelle anlegen und
+        deren Kopfzelle anklicken, die Übersicht aktualisiert sich dann automatisch.</div>`;
+    return box;
+  }
   // interne Felder (Unterstrich) und die Konfidenz-Begleitspalte separat behandeln
   const cols = Object.keys(items[0]).filter(c => !c.startsWith('_') && c !== 'kategorie_konfidenz');
   box.innerHTML = `<h4>Positionen (${items.length})</h4>
@@ -391,6 +502,28 @@ function renderLiPreview(items) {
       }).join('')}</tr>`).join('')}
     </table>`;
   return box;
+}
+
+async function refreshLiPreview() {
+  const cols = STATE.li.columns.filter(c => c.header_word != null);
+  let items = [];
+  if (cols.length) {
+    const r = await api('/api/line-items/preview', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        file: STATE.file,
+        line_items: {
+          page: STATE.li.page,
+          columns: cols.map(c => ({ header_word: c.header_word, name: c.name, value_type: c.value_type })),
+          stop_words: STATE.li.stop_words,
+        },
+      }),
+    });
+    items = r.items || [];
+  }
+  STATE.lineItems = items;
+  const old = $('#li-preview-box');
+  if (old) old.replaceWith(renderLiPreviewBox(items));
 }
 
 async function saveCategoryCorrection(text, kategorie) {
@@ -425,20 +558,26 @@ function clickWord(page, i, ev) {
     } else {
       STATE.li.columns[STATE.li.selCol].header_word = i;
     }
-    paintLiCols(); paint();
+    paintLiCols(); paint(); refreshLiPreview();
     return;
   }
   if (!STATE.selField) { $('#msg').textContent = 'erst Feld-Zeile oder Spalte wählen'; return; }
   const a = STATE.assign[STATE.selField] || { page, anchor: null, values: [] };
   a.page = page;
-  if (ev.shiftKey) a.anchor = i;
+  if (ev.shiftKey) a.anchor = (a.anchor === i) ? null : i;  // erneutes Shift+Klick hebt den Anker wieder auf
   else a.values.includes(i) ? a.values = a.values.filter(x => x !== i) : a.values.push(i);
   STATE.assign[STATE.selField] = a;
   paint();
 }
 
+function clearAssign(field) {
+  delete STATE.assign[field];
+  paint();
+}
+
 function paint() {
   document.querySelectorAll('.w').forEach(e => e.classList.remove('anchor', 'value', 'licol', 'listop'));
+  document.querySelectorAll('#fields td.ass').forEach(td => td.innerHTML = '');
   const wraps = document.querySelectorAll('.pdfwrap');
   if (!wraps.length) return;
   for (const [f, a] of Object.entries(STATE.assign)) {
@@ -446,7 +585,10 @@ function paint() {
     if (a.anchor != null && wds[a.anchor]) wds[a.anchor].classList.add('anchor');
     a.values.forEach(i => wds[i] && wds[i].classList.add('value'));
     const cell = document.querySelector(`#fields tr[data-field="${f}"] .ass`);
-    if (cell) cell.textContent = (a.anchor != null ? '⚓ ' : '') + a.values.map(i => wds[i] && wds[i].title).join(' ');
+    if (!cell) continue;
+    const text = (a.anchor != null ? '⚓ ' : '') + a.values.map(i => wds[i] && wds[i].title).join(' ');
+    if (!text.trim()) continue;
+    cell.innerHTML = `${esc(text)} <button class="danger" style="padding:0 4px" onclick="clearAssign('${esc(f)}')">×</button>`;
   }
   if (STATE.li.active) {
     const wds = wraps[STATE.li.page].querySelectorAll('.w');
@@ -483,11 +625,14 @@ async function saveTemplate() {
       variant: $('#variant').value, fields, line_items,
     }),
   });
-  STATE.tid = r.template_id;
-  STATE.lineItems = r.line_items || [];
-  $('#msg').textContent = `gespeichert: ${r.fields} Felder, ${(r.line_items || []).length} Positionen → ` +
-    Object.entries(r.extraction).map(([k, v]) => `${k}=${JSON.stringify(v.value).slice(0,30)}`).join(', ');
-  renderCurrent();
+  $('#msg').textContent = `gespeichert: ${r.fields} Felder, ${(r.line_items || []).length} Positionen`;
+  // Komplett frisch laden statt r.extraction von Hand einzumischen: das
+  // deckt auch ab, dass eine bestehende manuelle Korrektur fuer ein gerade
+  // frisch verankertes Feld serverseitig geloescht wurde (der neue Anker
+  // ersetzt sie) -- ohne Neuladen wuerde die Anzeige noch den alten,
+  // inzwischen ungueltigen "manual"-Stand zeigen.
+  const d2 = await api('/api/invoice?file=' + encodeURIComponent(STATE.file));
+  applyInvoiceData(d2);
 }
 
 async function saveCorrection(field, value) {
@@ -510,23 +655,56 @@ async function saveCorrection(field, value) {
   }
 }
 
+async function clearCorrection(field) {
+  $('#msg').textContent = 'Nehme Korrektur zurück...';
+  await fetch('/api/correction?file=' + encodeURIComponent(STATE.file) + '&field=' + encodeURIComponent(field), { method: 'DELETE' });
+  const d = await api('/api/invoice?file=' + encodeURIComponent(STATE.file));
+  applyInvoiceData(d);
+  $('#msg').textContent = `Korrektur für ${field} zurückgenommen`;
+}
+
 async function confirmTpl() {
+  // Naechste Datei VOR dem Neuladen merken -- loadList() baut #list komplett
+  // neu auf, danach ist die alte Reihenfolge/Position weg.
+  const idx = LIST_FILES.indexOf(STATE.file);
+  const next = idx >= 0 ? LIST_FILES[idx + 1] : null;
+
   const r = await api('/api/confirm', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ file: STATE.file, template_id: STATE.tid }),
   });
-  $('#msg').textContent = `bestätigt ${r.confirmations}× ${r.secured ? '· GESICHERT' : ''}`;
-  loadList();
+  await loadList();
+  if (next) {
+    const row = document.querySelector(`#list .row[data-file="${CSS.escape(next)}"]`);
+    openInvoice(next, row);
+    $('#msg').textContent = `bestätigt ${r.confirmations}× ${r.secured ? '· GESICHERT' : ''} – nächste Rechnung geöffnet`;
+  } else {
+    $('#msg').textContent = `bestätigt ${r.confirmations}× ${r.secured ? '· GESICHERT' : ''} – keine weitere Rechnung in der Liste`;
+  }
 }
+
+// Tastenkuerzel fuers Durchklicken vieler Rechnungen: "b" bestaetigt die
+// gerade offene Rechnung und oeffnet direkt die naechste -- nur ausserhalb
+// von Eingabefeldern, damit z.B. eine Korrektur mit "b" darin nicht
+// versehentlich die Bestaetigung ausloest.
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'b' || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (!STATE || !STATE.tid) return;
+  ev.preventDefault();
+  confirmTpl();
+});
 
 /* ================= Lieferanten ================= */
 async function loadSuppliers() {
   const rows = await api('/api/suppliers');
   const t = document.createElement('table');
-  t.innerHTML = '<tr><th>ID</th><th>Name</th><th>USt-IdNr</th><th>IBAN</th><th>feste Werte</th><th>Templates</th><th></th></tr>';
+  t.innerHTML = '<tr><th>ID</th><th>Name</th><th>Währung</th><th>USt-IdNr</th><th>IBAN</th><th>feste Werte</th><th>Templates</th><th></th></tr>';
   for (const s of rows) {
     const tr = document.createElement('tr'); tr.className = 'clickable';
     tr.innerHTML = `<td>${esc(s.id)}</td><td>${esc(s.name || '')}</td>
+      <td>${esc(s.currency || 'EUR')}</td>
       <td>${(s.ustids || []).map(esc).join('<br>')}</td>
       <td>${(s.ibans || []).map(esc).join('<br>')}</td>
       <td>${Object.entries(s.fixed_fields || {}).map(([k, v]) => `${esc(k)}=${esc(v)}`).join('<br>')}</td>
@@ -549,12 +727,19 @@ function editSupplier(s) {
     <div class="form-grid">
       <label>ID</label><input id="f-id" value="${esc(s.id)}" ${s.id ? 'readonly' : ''}>
       <label>Name</label><input id="f-name" value="${esc(s.name || '')}">
+      <label>Währung</label>
+      <select id="f-currency">
+        <option value="EUR" ${(s.currency || 'EUR') === 'EUR' ? 'selected' : ''}>EUR</option>
+        <option value="CHF" ${s.currency === 'CHF' ? 'selected' : ''}>CHF</option>
+      </select>
       <label>USt-IdNr (je Zeile)</label><textarea id="f-ustids">${(s.ustids || []).join('\n')}</textarea>
       <label>IBAN (je Zeile)</label><textarea id="f-ibans">${(s.ibans || []).join('\n')}</textarea>
       <label>E-Mail-Domains (je Zeile)</label><textarea id="f-domains">${(s.domains || []).join('\n')}</textarea>
       <label>Anschrift (je Zeile)</label><textarea id="f-address">${(s.address_lines || []).join('\n')}</textarea>
       <label>Bank</label><input id="f-bank" value="${esc(s.bank_name || '')}">
       <label>BIC</label><input id="f-bic" value="${esc(s.bic || '')}">
+      <label>Bankleitzahl</label><input id="f-bankcode" value="${esc(s.bank_code || '')}" placeholder="nur falls neben IBAN gefuehrt">
+      <label>Kontonummer (alt)</label><input id="f-bankaccount" value="${esc(s.bank_account || '')}" placeholder="nur falls neben IBAN gefuehrt">
       <label>Gläubiger-ID / StNr</label><input id="f-creditor" value="${esc(s.creditor_id || '')}">
       <label>Ansprechpartner</label><input id="f-contact" value="${esc(s.contact || '')}">
       <label>Zahlungsziel (Standard)</label><input id="f-terms" value="${esc(s.default_payment_terms || '')}">
@@ -580,10 +765,12 @@ async function submitSupplier() {
   await api('/api/suppliers', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      id, name: $('#f-name').value.trim(),
+      id, name: $('#f-name').value.trim(), currency: $('#f-currency').value,
       ustids: lines('f-ustids'), ibans: lines('f-ibans'), domains: lines('f-domains'),
       address_lines: lines('f-address'), bank_name: $('#f-bank').value.trim(),
-      bic: $('#f-bic').value.trim(), creditor_id: $('#f-creditor').value.trim(),
+      bic: $('#f-bic').value.trim(),
+      bank_code: $('#f-bankcode').value.trim(), bank_account: $('#f-bankaccount').value.trim(),
+      creditor_id: $('#f-creditor').value.trim(),
       contact: $('#f-contact').value.trim(),
       default_payment_terms: $('#f-terms').value.trim(),
       default_tax_rate: $('#f-taxrate').value.trim(),

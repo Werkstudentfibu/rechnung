@@ -19,6 +19,7 @@ python -m venv .venv
 .venv\Scripts\pyinstaller --onefile --name rechnung ^
   --collect-all pdfplumber --collect-all pdfminer ^
   --collect-binaries pypdfium2 ^
+  --collect-all webview --collect-all clr_loader ^
   --add-data "rechnung/web/static;rechnung/web/static" ^
   -c run.py
 ```
@@ -30,12 +31,17 @@ Ergebnis: `dist/rechnung` bzw. `dist/rechnung.exe` (~40–60 MB).
 ## Starten (Endnutzer)
 
 ```
-rechnung.exe --samples "C:\Pfad\zu\Rechnungen" web
+rechnung.exe --samples "C:\Pfad\zu\Rechnungen" app
 ```
 
-Dann Browser auf `http://127.0.0.1:8000`. Templates/Ergebnisse landen im
-Unterordner `data\` neben der `.exe` (oder Umgebungsvariable `RECHNUNG_DATA`
-setzen).
+Öffnet ein eigenständiges Fenster (pywebview, Windows-Backend: Edge
+WebView2 – auf Windows 10/11 durch Edge normalerweise bereits vorhanden,
+keine separate Installation nötig). Kein Browser-Tab, kein sichtbarer
+`127.0.0.1`-Link. Templates/Ergebnisse landen im Unterordner `data\` neben
+der `.exe` (oder Umgebungsvariable `RECHNUNG_DATA` setzen).
+
+Für die Entwicklung/unter Linux weiterhin `rechnung web` (Browser) nutzbar –
+gleiche Oberfläche, nur ohne natives Fenster-Backend.
 
 ## run.py
 

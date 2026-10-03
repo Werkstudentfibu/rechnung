@@ -94,6 +94,7 @@ class Store:
         self._corrections = self.root / "corrections"
         self._categories = self.root / "categories.json"
         self._confirmations_log = self.root / "confirmations.jsonl"
+        self._processed_cache: list[dict] | None = None
 
     # ---- Lieferanten --------------------------------------------------
     def suppliers(self) -> list[Supplier]:
@@ -169,9 +170,20 @@ class Store:
     def mark_processed(self, rec: dict) -> None:
         with self._processed.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        self._processed_cache = None
 
     def processed(self) -> list[dict]:
-        return _read_jsonl_safe(self._processed)
+        # process() ruft ueber seen_invoice/seen_sha/distinct_confirmations
+        # bei jeder Datei erneut auf processed() zu -- ohne Cache liest und
+        # parst jede einzelne Rechnung im Scan das komplette Verarbeitungs-
+        # Log (processed.jsonl) neu von der Platte, und das Log waechst mit
+        # jeder bestaetigten Rechnung dauerhaft weiter. Im Prozess-Cache
+        # halten, bis mark_processed() ihn invalidiert -- alle Schreib-
+        # zugriffe laufen ausschliesslich darueber, die Invalidierung ist
+        # damit vollstaendig.
+        if self._processed_cache is None:
+            self._processed_cache = _read_jsonl_safe(self._processed)
+        return self._processed_cache
 
     def seen_invoice(self, supplier_id: str, invoice_no: str) -> bool:
         for r in self.processed():
@@ -230,6 +242,18 @@ class Store:
         cur["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         _atomic_write(p, json.dumps(cur, indent=2, ensure_ascii=False))
         self.audit("correct", {"sha256": sha, "field": field, "value": value}, operator)
+
+    def delete_correction(self, sha: str, field: str, operator: str = "") -> None:
+        """Manuelle Korrektur zurücknehmen -- fällt zurück auf den
+        automatisch extrahierten/regulären Wert."""
+        p = self._corrections / f"{sha}.json"
+        cur = _read_json_safe(p, {"sha256": sha, "fields": {}})
+        if field not in cur.get("fields", {}):
+            return
+        del cur["fields"][field]
+        cur["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        _atomic_write(p, json.dumps(cur, indent=2, ensure_ascii=False))
+        self.audit("uncorrect", {"sha256": sha, "field": field}, operator)
 
     # ---- Bestaetigungspflicht: JEDE Rechnung braucht einen expliziten,
     # geloggten Klick im Training-UI, bevor finalize() sie uebernehmen darf --

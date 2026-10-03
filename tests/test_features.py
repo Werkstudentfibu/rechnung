@@ -105,7 +105,7 @@ def test_fixed_field_from_library(tmp_path: Path):
     doc = pdfmod.load(inv)
 
     sup = supplier_from_doc(doc, "muster", "Muster Handels GmbH")
-    sup.fixed_fields = {"zahlungsziel": "14 Tage netto"}
+    sup.fixed_fields = {"kostenstelle": "KST-4711"}
     store.save_supplier(sup)
 
     t = Template(id="muster__standard", supplier_id="muster", secured_at=1, confirmations=1)
@@ -114,15 +114,51 @@ def test_fixed_field_from_library(tmp_path: Path):
         FieldSpec("netto", "amount", True, anchor=Anchor("nettobetrag", 0), rel=(120, -4, 340, 12)),
         FieldSpec("ust_betrag", "amount", True, anchor=Anchor("umsatzsteuer", 0), rel=(120, -4, 340, 12)),
         FieldSpec("brutto", "amount", True, anchor=Anchor("gesamtbetrag", 0), rel=(120, -4, 340, 12)),
-        FieldSpec("zahlungsziel", "text", False),  # kein Anker -> kommt aus Stammdaten
+        FieldSpec("kostenstelle", "text", False),  # kein Anker -> kommt aus Stammdaten
     ]
     store.save_template(t)
 
     res = process(inv, store)
-    assert res.fields["zahlungsziel"].source == "library"
-    assert res.fields["zahlungsziel"].value == "14 Tage netto"
+    assert res.fields["kostenstelle"].source == "library"
+    assert res.fields["kostenstelle"].value == "KST-4711"
     # echter Wert aus der Rechnung wird nicht ueberschrieben
     assert res.fields["netto"].source == "template-anchor"
+
+
+def test_master_data_fields_auto_from_supplier(tmp_path: Path):
+    """IBAN, USt-IdNr, Steuernummer und Adresse sind Lieferanten-Stammdaten:
+    sie muessen nie als Template-Feld angelernt werden, sondern kommen sobald
+    der Lieferant erkannt ist automatisch mit -- unabhaengig von "feste Werte"."""
+    from rechnung.synth import make_invoice
+
+    store = Store(tmp_path / "data")
+    samples = tmp_path / "s"
+    samples.mkdir()
+    inv = make_invoice(samples / "a.pdf", rechnungsnr="RE-6", netto=500.0)
+    doc = pdfmod.load(inv)
+
+    sup = supplier_from_doc(doc, "muster", "Muster Handels GmbH")
+    sup.ibans = ["DE02120300000000202051"]
+    sup.address_lines = ["Musterstr. 1", "12345 Musterstadt"]
+    sup.creditor_id = "DE98ZZZ09999999999"
+    store.save_supplier(sup)
+
+    t = Template(id="muster__standard", supplier_id="muster", secured_at=1, confirmations=1)
+    t.fields = [
+        FieldSpec("rechnungsnummer", "number", True, anchor=Anchor("rechnungsnummer", 0), rel=(60, -4, 240, 12)),
+        FieldSpec("netto", "amount", True, anchor=Anchor("nettobetrag", 0), rel=(120, -4, 340, 12)),
+        FieldSpec("ust_betrag", "amount", True, anchor=Anchor("umsatzsteuer", 0), rel=(120, -4, 340, 12)),
+        FieldSpec("brutto", "amount", True, anchor=Anchor("gesamtbetrag", 0), rel=(120, -4, 340, 12)),
+        # kein Feld fuer iban/ustid/steuernummer/adresse -- muss trotzdem auftauchen
+    ]
+    store.save_template(t)
+
+    res = process(inv, store)
+    assert res.fields["iban"].source == "library"
+    assert res.fields["iban"].value == "DE02120300000000202051"
+    assert res.fields["ustid"].source == "library"
+    assert res.fields["steuernummer"].value == "DE98ZZZ09999999999"
+    assert res.fields["adresse"].value == "Musterstr. 1, 12345 Musterstadt"
 
 
 # ---- Positionstabelle + USt-Aufstellung ------------------------------
@@ -239,6 +275,42 @@ def test_journal_rows_and_totals(tmp_path: Path):
     assert tot["ust_7"] == 14.0
 
 
+def test_journal_rows_swiss_rates_dynamic(tmp_path: Path):
+    """CH-Lieferant: eigene Spalten fuer 8,1/2,6 % -- schon bevor eine Rechnung
+    mit 2,6 % vorkommt (vorbelegt aus der Waehrung) -- und ein zusaetzlicher,
+    bisher unbekannter Satz bekommt trotzdem sofort eine eigene Spalte, ohne
+    dass er vorher irgendwo hinterlegt sein musste."""
+    store = Store(tmp_path / "data")
+    store.save_supplier(Supplier(id="ch1", name="Schweizer Lieferant AG", currency="CHF"))
+    store.mark_processed({
+        "file": "c.pdf", "supplier_id": "ch1", "supplier_name": "Schweizer Lieferant AG",
+        "rechnungsnummer": "CH-1", "rechnungsdatum": "2026-04-01",
+        "netto": 1000.0, "ust_betrag": 81.0, "brutto": 1081.0,
+        "tax_breakdown": [{"satz": 8.1, "netto": 1000.0, "ust": 81.0, "brutto": 1081.0}],
+    })
+
+    rows = journal_rows(store)
+    # Spalte fuer 2,6 % existiert, obwohl noch keine Rechnung diesen Satz hatte
+    assert rows[0]["netto_2_6"] is None
+    assert rows[0]["netto_8_1"] == 1000.0
+    assert rows[0]["ust_8_1"] == 81.0
+    assert rows[0]["weitere_saetze"] == ""
+
+    # spaeter taucht ein weiterer, bisher unbekannter Satz auf (z.B. Sonderfall)
+    store.mark_processed({
+        "file": "d.pdf", "supplier_id": "ch1", "supplier_name": "Schweizer Lieferant AG",
+        "rechnungsnummer": "CH-2", "rechnungsdatum": "2026-05-01",
+        "netto": 50.0, "ust_betrag": 1.9, "brutto": 51.9,
+        "tax_breakdown": [{"satz": 3.8, "netto": 50.0, "ust": 1.9, "brutto": 51.9}],
+    })
+    rows2 = journal_rows(store)
+    assert any(r.get("netto_3_8") == 50.0 for r in rows2)
+
+    tot = journal_totals(rows2)
+    assert tot["netto_8_1"] == 1000.0
+    assert tot["netto_3_8"] == 50.0
+
+
 # ---- Eigene Felder --------------------------------------------------
 
 def test_custom_field_name(tmp_path: Path):
@@ -252,7 +324,7 @@ def test_custom_field_name(tmp_path: Path):
 
     t = Template(id="x__standard", supplier_id="x")
     t.fields = [FieldSpec("leistungszeitraum", "text", False,
-                          anchor=Anchor("bestellnummer", 0), rel=(60, -4, 260, 12))]
+                          anchor=Anchor("rechnungsdatum", 0), rel=(60, -4, 260, 12))]
     res = apply_template(doc, t)
     assert "leistungszeitraum" in res
     assert res["leistungszeitraum"].raw  # irgendein Wert wurde gezogen

@@ -15,11 +15,17 @@ python -m venv .venv
 
 ```
 rechnung demo                       # Selbsttest mit synthetischen Rechnungen
-rechnung --samples ./samples web    # Training-UI auf http://127.0.0.1:8000
+rechnung --samples ./samples app    # Training-UI als eigenstaendiges Fenster (Endnutzer)
+rechnung --samples ./samples web    # Training-UI im Browser (Entwicklung/Linux)
 rechnung --samples ./samples scan   # alle PDFs verarbeiten (Konsole)
 rechnung suppliers                  # bekannte Lieferanten
 rechnung templates                  # gespeicherte Templates
 ```
+
+`app` und `web` sind dieselbe Oberfläche (gleicher FastAPI-Code) – `app`
+zeigt sie über `pywebview` in einem eigenständigen Fenster statt in einem
+Browser-Tab. Für den produktiven Einsatz auf dem Firmen-Laptop ist `app`
+gedacht.
 
 Daten (Lieferanten, Templates, Log) liegen unter `./data/` bzw. `$RECHNUNG_DATA`.
 Bestätigte Rechnungen landen als `data/out/<name>.json` **und** `.csv`.
@@ -46,6 +52,13 @@ gesicherten Template): **jede** Rechnung braucht einen expliziten Klick auf
 JobRouter weitergereicht wird. Automatisch ist nur die Vorbefüllung/Kategorie-
 Vorschläge – der Mensch drückt immer noch den Knopf und kann davor jederzeit
 korrigieren.
+
+**Langfristige Perspektive:** Ziel ist, schrittweise auf eine echte
+Automatisierung (Rechnungen laufen ohne Klick durch) hinzuarbeiten – aber
+erst, wenn die Fehlerquote im laufenden Testbetrieb nachweislich niedrig
+genug dafür ist. Das ist noch nicht der Fall und noch nicht umgesetzt; die
+Bestätigungspflicht oben gilt uneingeschränkt weiter, bis das explizit
+(und mit eigener IT-Freigabe) geändert wird.
 
 ## Status-Werte
 

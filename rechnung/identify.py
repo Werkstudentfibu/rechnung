@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .pdf import Document
@@ -13,10 +14,20 @@ from .textnorm import find_domains, find_iban, find_ustids, norm
 FIXED_FIELD_TYPES: dict[str, str] = {
     "iban": "iban",
     "ustid": "ustid",
+    "steuernummer": "text",
     "bestellnummer": "number",
-    "zahlungsziel": "text",
     "ust_satz": "amount",
 }
+
+# Nur ein Startwert je Waehrung fuers Buchungsjournal (praeferiert vorbelegte
+# Spalten, damit sie nicht erst nach der ersten passenden Rechnung auftauchen).
+# Legt NICHTS fest -- tatsaechlich beobachtete Saetze kommen in pipeline.py
+# unabhaengig davon dazu, egal ob mehr oder weniger als hier vorgeschlagen.
+EXPECTED_RATES: dict[str, list[float]] = {
+    "EUR": [19.0, 7.0, 0.0],
+    "CHF": [8.1, 2.6, 0.0],
+}
+DEFAULT_CURRENCY = "EUR"
 
 
 @dataclass
@@ -31,11 +42,15 @@ class Supplier:
     address_lines: list[str] = field(default_factory=list)
     bank_name: str = ""
     bic: str = ""
+    bank_code: str = ""            # Bankleitzahl (BLZ) -- vor SEPA/IBAN ueblich,
+                                    # manche Stammdatenlisten fuehren sie noch separat
+    bank_account: str = ""         # alte Kontonummer (vor IBAN), dito
     creditor_id: str = ""          # Glaeubiger-ID / Steuernummer
     contact: str = ""              # Ansprechpartner / Telefon / Mail
     default_payment_terms: str = ""
     default_tax_rate: str = ""
     notes: str = ""
+    currency: str = DEFAULT_CURRENCY
     # Feld -> fester Wert, gilt fuer alle Rechnungen dieses Lieferanten
     fixed_fields: dict[str, str] = field(default_factory=dict)
 
@@ -45,11 +60,12 @@ class Supplier:
             "ibans": self.ibans, "domains": self.domains,
             "fingerprint": self.fingerprint,
             "address_lines": self.address_lines, "bank_name": self.bank_name,
-            "bic": self.bic, "creditor_id": self.creditor_id,
+            "bic": self.bic, "bank_code": self.bank_code,
+            "bank_account": self.bank_account, "creditor_id": self.creditor_id,
             "contact": self.contact,
             "default_payment_terms": self.default_payment_terms,
             "default_tax_rate": self.default_tax_rate, "notes": self.notes,
-            "fixed_fields": self.fixed_fields,
+            "fixed_fields": self.fixed_fields, "currency": self.currency,
         }
 
     @classmethod
@@ -60,11 +76,13 @@ class Supplier:
             fingerprint=d.get("fingerprint", []),
             address_lines=d.get("address_lines", []),
             bank_name=d.get("bank_name", ""), bic=d.get("bic", ""),
+            bank_code=d.get("bank_code", ""), bank_account=d.get("bank_account", ""),
             creditor_id=d.get("creditor_id", ""), contact=d.get("contact", ""),
             default_payment_terms=d.get("default_payment_terms", ""),
             default_tax_rate=d.get("default_tax_rate", ""),
             notes=d.get("notes", ""),
             fixed_fields=d.get("fixed_fields", {}) or {},
+            currency=d.get("currency") or DEFAULT_CURRENCY,
         )
 
 
@@ -159,10 +177,24 @@ def cross_check(doc: Document, supplier: Supplier) -> list[dict]:
     return out
 
 
+def _detect_currency(text: str) -> str:
+    """Grobe Waehrungs-Erkennung am Rechnungstext -- nur ein Vorschlag fuer
+    einen neu angelegten Lieferanten, im Lieferanten-Tab jederzeit korrigierbar.
+    CHF gewinnt nur, wenn es vorkommt und kein EUR/€-Hinweis auf der Rechnung
+    steht (manche Schweizer Lieferanten fakturieren auch in Euro)."""
+    t = text.upper()
+    has_chf = bool(re.search(r"\bCHF\b", t))
+    has_eur = bool(re.search(r"\bEUR\b", t) or "€" in text)
+    if has_chf and not has_eur:
+        return "CHF"
+    return DEFAULT_CURRENCY
+
+
 def supplier_from_doc(doc: Document, supplier_id: str, name: str) -> Supplier:
     ids = extract_identifiers(doc)
     return Supplier(
         id=supplier_id, name=name,
         ustids=sorted(ids["ustids"]), ibans=sorted(ids["ibans"]),
         domains=sorted(ids["domains"]), fingerprint=sorted(ids["fingerprint"]),
+        currency=_detect_currency(doc.text),
     )

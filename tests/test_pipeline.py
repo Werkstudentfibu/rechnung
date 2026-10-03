@@ -67,6 +67,33 @@ def test_process_status(tmp_path: Path):
     assert process(a, store).status == NO_TEMPLATE
 
     store.save_template(_template())
+    assert process(a, store).status == AUTO
+
+
+def test_library_fields_prefilled_even_without_template(tmp_path: Path):
+    """Ein per Bulk-Import (importers.py) bekannter Lieferant -- IBAN/USt-IdNr
+    passen, aber noch kein Layout-Template trainiert -- soll IBAN/USt-IdNr/
+    Adresse trotzdem schon bei der allerersten Rechnung zeigen, nicht erst
+    nach dem ersten manuellen Anlernen. Siehe Konversation vom 2026-09-18."""
+    store = Store(tmp_path / "data")
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    a = make_invoice(samples / "a.pdf", rechnungsnr="RE-1", netto=500.0)
+    doc = pdfmod.load(a)
+
+    sup = supplier_from_doc(doc, "muster", "Muster Handels GmbH")
+    sup.address_lines = ["Musterstr. 1", "50667 Koeln"]
+    sup.creditor_id = "DE99STNR12345"
+    store.save_supplier(sup)
+
+    res = process(a, store)
+    assert res.status == NO_TEMPLATE
+    assert res.fields["adresse"].source == "library"
+    assert res.fields["adresse"].value == "Musterstr. 1, 50667 Koeln"
+    assert res.fields["steuernummer"].source == "library"
+    assert res.fields["iban"].source == "library"
+
+    store.save_template(_template())
     r = process(a, store)
     assert r.status == AUTO
     assert r.overall_confidence >= 0.7

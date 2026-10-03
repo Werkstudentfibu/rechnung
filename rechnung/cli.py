@@ -1,4 +1,4 @@
-"""Kommandozeile: fetch / scan / suppliers / templates / journal / push / web / demo."""
+"""Kommandozeile: fetch / scan / suppliers / templates / journal / push / web / app / demo."""
 
 from __future__ import annotations
 
@@ -98,6 +98,22 @@ def _cmd_suppliers(args) -> int:
     return 0
 
 
+def _cmd_import_vendors(args) -> int:
+    from .importers import import_vendors_csv
+
+    n = import_vendors_csv(args.file, Store(args.data))
+    print(f"{n} Lieferanten importiert/aktualisiert.")
+    return 0
+
+
+def _cmd_import_business_units(args) -> int:
+    from .importers import import_business_units_csv
+
+    n = import_business_units_csv(args.file, Store(args.data))
+    print(f"{n} Rechnungsadressen/Geschaeftsbereiche importiert/aktualisiert.")
+    return 0
+
+
 def _cmd_templates(args) -> int:
     store = Store(args.data)
     for t in store.all_templates():
@@ -145,6 +161,13 @@ def _cmd_web(args) -> int:
     return 0
 
 
+def _cmd_app(args) -> int:
+    from .desktop import run as run_desktop
+
+    run_desktop(Store(args.data), Path(args.samples), port=args.port)
+    return 0
+
+
 def _cmd_demo(args) -> int:
     """Erzeugt 3 synthetische Rechnungen, lernt ein Template, laeuft die Pipeline."""
     from .identify import supplier_from_doc
@@ -158,9 +181,27 @@ def _cmd_demo(args) -> int:
     samples = tmp / "samples"
     samples.mkdir()
 
-    make_invoice(samples / "re1.pdf", rechnungsnr="RE-2026-00042", netto=1000.0)
-    make_invoice(samples / "re2.pdf", rechnungsnr="RE-2026-00043", netto=2500.0)
-    make_invoice(samples / "re3.pdf", rechnungsnr="RE-2026-00044", netto=99.9)
+    # bewusst unterschiedliche Satz-Kombinationen je Rechnung (nicht ueberall
+    # alle drei), damit die dynamischen Journal-Spalten an einem echten Fall
+    # zeigen, dass sie sich pro Rechnung anpassen statt ein festes Set anzunehmen
+    make_invoice(samples / "re1.pdf", rechnungsnr="RE-2026-00042", items=[
+        {"beschreibung": "Buerostuhl ErgoLine", "menge": 4, "einzelpreis": 189.50,
+         "mwst": 19, "waehrung": "EUR"},
+        {"beschreibung": "Schreibtisch Alu 160x80", "menge": 2, "einzelpreis": 139.00,
+         "mwst": 19, "waehrung": "EUR"},
+    ])
+    make_invoice(samples / "re2.pdf", rechnungsnr="RE-2026-00043", items=[
+        {"beschreibung": "Notebook ProBook 14", "menge": 3, "einzelpreis": 799.00,
+         "mwst": 19, "waehrung": "EUR"},
+        {"beschreibung": "Fachbuch Buchhaltung kompakt", "menge": 10, "einzelpreis": 24.90,
+         "mwst": 7, "waehrung": "EUR"},
+    ])
+    make_invoice(samples / "re3.pdf", rechnungsnr="RE-2026-00044", items=[
+        {"beschreibung": "Fachzeitschrift Abo Q1", "menge": 1, "einzelpreis": 32.00,
+         "mwst": 7, "waehrung": "EUR"},
+        {"beschreibung": "Ausfuhrlieferung Schweiz (steuerfrei)", "menge": 1,
+         "einzelpreis": 120.00, "mwst": 0, "waehrung": "EUR"},
+    ])
 
     doc = pdfmod.load(samples / "re1.pdf")
     sup = supplier_from_doc(doc, "muster", "Muster Handels GmbH")
@@ -220,13 +261,27 @@ def main(argv=None) -> int:
     sub.add_parser("suppliers", help="Bekannte Lieferanten").set_defaults(func=_cmd_suppliers)
     sub.add_parser("templates", help="Gespeicherte Templates").set_defaults(func=_cmd_templates)
 
+    iv = sub.add_parser("import-vendors",
+                        help="Abbyy 'Vendors'-Datensatz (CSV) als Lieferanten einspielen")
+    iv.add_argument("file", help="Pfad zur CSV-Datei")
+    iv.set_defaults(func=_cmd_import_vendors)
+
+    ib = sub.add_parser("import-business-units",
+                        help="Abbyy 'BusinessUnits'-Datensatz (CSV) als Rechnungsadressen einspielen")
+    ib.add_argument("file", help="Pfad zur CSV-Datei")
+    ib.set_defaults(func=_cmd_import_business_units)
+
     j = sub.add_parser("journal", help="Buchungsjournal (Netto/USt je Steuersatz)")
     j.add_argument("--json", action="store_true")
     j.set_defaults(func=_cmd_journal)
 
-    w = sub.add_parser("web", help="Lokale Training-UI starten")
+    w = sub.add_parser("web", help="Lokale Training-UI im Browser starten (Entwicklung/Linux)")
     w.add_argument("--port", type=int, default=8000)
     w.set_defaults(func=_cmd_web)
+
+    a = sub.add_parser("app", help="Training-UI als eigenstaendiges Fenster starten (kein Browser)")
+    a.add_argument("--port", type=int, default=8000)
+    a.set_defaults(func=_cmd_app)
 
     sub.add_parser("demo", help="Selbsttest mit synthetischen Rechnungen").set_defaults(func=_cmd_demo)
 

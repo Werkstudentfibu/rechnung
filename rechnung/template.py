@@ -19,6 +19,11 @@ from .pdf import Document, Word
 from .textnorm import coerce, norm
 
 # Vorschlagsliste fuer die UI (keine Obergrenze!): name -> value_type, required
+#
+# ustid/iban/adresse/steuernummer stehen bewusst NICHT hier: die kommen als
+# Lieferanten-Stammdatum (Store.supplier) automatisch mit, sobald der
+# Lieferant erkannt ist, statt pro Rechnung per Anker angelernt zu werden --
+# siehe pipeline.process()/server.invoice() ("library"-Quelle).
 STANDARD_FIELDS: dict[str, tuple[str, bool]] = {
     "rechnungsnummer": ("number", True),
     "rechnungsdatum": ("date", True),
@@ -26,12 +31,8 @@ STANDARD_FIELDS: dict[str, tuple[str, bool]] = {
     "ust_betrag": ("amount", True),
     "ust_satz": ("amount", False),
     "brutto": ("amount", True),
-    "ustid": ("ustid", False),
-    "iban": ("iban", False),
     "bestellnummer": ("number", False),
-    "zahlungsziel": ("date", False),
     "ust_aufstellung": ("taxblock", False),
-    "leistungszeitraum": ("text", False),
     "kostenstelle": ("text", False),
 }
 
