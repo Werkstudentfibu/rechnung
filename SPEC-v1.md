@@ -288,6 +288,64 @@ Grundlage fuer den spaeteren Bulk-Import, der denselben Weg ueber
 `/api/suppliers` nehmen wird, nur mit vielen Datensaetzen auf einmal statt
 einem.
 
+## 7i. Stufe 1: Vorlagen automatisch lernen (2026-10-04)
+
+`rechnung/learn.py`. Beim Bestaetigen (`/api/confirm`, auch ohne Template)
+sucht das Programm die bestaetigten Werte (Extraktion + Korrekturen) im PDF
+wieder -- gemeinsame Normalisierung `textnorm.same_value` (Betraege
+`1.190,00`/`1190.00`, Datumsformate inkl. Monatsnamen, Rechnungsnummern
+ohne Trennzeichen verglichen) -- und erzeugt je Feld Anker + `rel`-Region
+im selben Format wie das manuelle Anlernen. Leitplanken:
+
+- nur aus bestaetigten Rechnungen (`Store.is_confirmed`), nie aus
+  ungepruefter KI-Ausgabe; Stammdaten/feste Werte und E-Rechnungen werden
+  nicht gelernt.
+- Anker = naechstgelegenes Label links/oberhalb, das auf der Seite nur
+  einmal vorkommt. Mehrfach vorkommende Werte (Brutto = Zahlbetrag,
+  USt-Satz in jeder Position) entscheidet eine Stichwort-Heuristik je Feld;
+  bleibt es unentschieden, wird das Feld weggelassen.
+- Probelauf je Feld und Gesamtprobe: gespeichert wird nur, wenn das Template
+  die Quell-Rechnung exakt reproduziert (Konfidenz >= 0,7).
+- neue Templates starten mit `confirmations=0`; ungesicherte werden
+  praezisiert, gesicherte nur ergaenzt. Widerspricht ein gesichertes
+  Template einer bestaetigten Rechnung, wird nichts gespeichert und
+  `template_learn_rejected` auditiert. Erfolg: Audit `template_learned`.
+
+## 7j. Stufe 2: KI-Extraktion als volle Stufe (2026-10-04) -- Erweiterung von §7f
+
+`semantic.extract_full()`: ohne Template liest das Modell die komplette
+Rechnung (alle einfachen `STANDARD_FIELDS`, Lieferant Name/IBAN/USt-IdNr,
+optional Positionen) als JSON, gegen ein festes Schema geprueft.
+
+- **Belegpflicht:** jeder Modellwert muss im PDF-Text wiederzufinden sein
+  (dieselbe Normalisierung wie §7i), sonst verworfen und in
+  `Result.llm_rejected` angezeigt. Gilt auch fuer den Luecken-Fallback.
+- **Backends:** `ollama` (wie bisher) oder `openai` = OpenAI-kompatibler
+  Endpoint auf eigener Hardware (vLLM/llama.cpp, `RECHNUNG_LLM_BACKEND`,
+  `_URL`, `_MODEL`, optional `_API_KEY`). Kein Cloud-Dienst fest eingebaut,
+  Standard weiterhin aus.
+- Herkunft je Feld als `origin` (`einvoice`/`template`/`llm`/`library`/
+  `manual`) in Result und `/api/invoice`.
+- Konfidenz-Deckel (§7f) und Status-Logik unveraendert: ohne Template bleibt
+  der Status `no_template`/`unknown_supplier`.
+- Antwort-Cache je Prompt: `/api/confirm` uebernimmt exakt den Vorschlag,
+  den der Mensch in `/api/invoice` gesehen hat.
+- **Hinweis IT-Freigabe:** `IT-FREIGABE.md` beschreibt das Modell noch als
+  "nur `127.0.0.1`". Mit `RECHNUNG_LLM_BACKEND=openai` auf einem Firmen-
+  server gehen Rechnungstexte an diesen Server -- vor dem Einschalten dort
+  nachziehen.
+
+## 7k. Schattenbetrieb-Messung (2026-10-04) -- Datengrundlage fuer §9
+
+`rechnung/shadow.py`. Pro Rechnung entscheidet die Pipeline auf dem Stand
+vor manuellen Korrekturen, ob sie sie selbst durchgelassen haette (alle
+Pflichtfelder, keine Pruefung rot, bei neuem Lieferanten kein Pflichtfeld
+nur aus der KI). Beim ersten Bestaetigen wird das mit dem Bestaetigten
+verglichen (`data/shadow.jsonl`, append-only): Korrektur = abweichender
+manueller Wert oder an dieser Rechnung trainierter Anker (Audit
+`template_trained`). Auswertung je Lieferant: `rechnung schatten`,
+`GET /api/shadow`. **Reine Messung** -- §7c gilt unveraendert.
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).
