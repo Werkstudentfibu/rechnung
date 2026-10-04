@@ -43,7 +43,7 @@ def test_extract_parses_response_and_caps_confidence(monkeypatch):
     monkeypatch.setattr(semantic, "_llm_cfg", lambda: _cfg(max_confidence=0.6))
     monkeypatch.setattr(semantic, "available", lambda: True)
     monkeypatch.setattr(semantic, "_call_ollama",
-                        lambda cfg, prompt: json.dumps({
+                        lambda cfg, prompt, schema=None: json.dumps({
                             "rechnungsnummer": "RE-2026-042",
                             "rechnungsdatum": "03.03.2026",
                         }))
@@ -65,7 +65,7 @@ def test_extract_ignores_taxblock_field(monkeypatch):
     monkeypatch.setattr(semantic, "available", lambda: True)
     called = {}
 
-    def fake_call(cfg, prompt):
+    def fake_call(cfg, prompt, schema=None):
         called["prompt"] = prompt
         return json.dumps({"rechnungsnummer": "RE-1"})
 
@@ -79,7 +79,7 @@ def test_extract_drops_uncoercible_values(monkeypatch):
     monkeypatch.setattr(semantic, "_llm_cfg", lambda: _cfg())
     monkeypatch.setattr(semantic, "available", lambda: True)
     monkeypatch.setattr(semantic, "_call_ollama",
-                        lambda cfg, prompt: json.dumps({"netto": "nicht ein Betrag"}))
+                        lambda cfg, prompt, schema=None: json.dumps({"netto": "nicht ein Betrag"}))
     out = semantic.extract("Text", ["netto"], {})
     assert out == {}
 
@@ -87,7 +87,7 @@ def test_extract_drops_uncoercible_values(monkeypatch):
 def test_extract_malformed_json_returns_empty(monkeypatch):
     monkeypatch.setattr(semantic, "_llm_cfg", lambda: _cfg())
     monkeypatch.setattr(semantic, "available", lambda: True)
-    monkeypatch.setattr(semantic, "_call_ollama", lambda cfg, prompt: "kein json")
+    monkeypatch.setattr(semantic, "_call_ollama", lambda cfg, prompt, schema=None: "kein json")
     out = semantic.extract("Text", ["rechnungsnummer"], {})
     assert out == {}
 
@@ -137,7 +137,7 @@ def test_extract_finds_field_beyond_old_cutoff(monkeypatch):
     monkeypatch.setattr(semantic, "available", lambda: True)
     seen_prompts = []
 
-    def fake_call(cfg, prompt):
+    def fake_call(cfg, prompt, schema=None):
         seen_prompts.append(prompt)
         # simuliert ein Modell, das den Wert nur zurueckgeben kann, wenn er
         # tatsaechlich im Prompt vorkam

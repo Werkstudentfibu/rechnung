@@ -40,7 +40,7 @@ def _cfg(**overrides) -> LlmConfig:
 def _mock(monkeypatch, answer, **cfg):
     calls = []
 
-    def fake_call(c, prompt):
+    def fake_call(c, prompt, schema=None):
         calls.append(prompt)
         return answer if isinstance(answer, str) else json.dumps(answer)
 

@@ -107,7 +107,7 @@ def test_untemplated_llm_new_supplier_not_passed(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(semantic, "_llm_cfg", lambda: LlmConfig(enabled=True))
     monkeypatch.setattr(semantic, "available", lambda: True)
-    monkeypatch.setattr(semantic, "_call_ollama", lambda c, p: json.dumps({
+    monkeypatch.setattr(semantic, "_call_ollama", lambda c, p, schema=None: json.dumps({
         "rechnungsnummer": "RE-2026-00042", "rechnungsdatum": "14.02.2026",
         "netto": "1000.00", "ust_betrag": "190.00", "brutto": "1190.00"}))
     store = Store(tmp_path / "data")

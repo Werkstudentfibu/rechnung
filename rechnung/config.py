@@ -174,6 +174,10 @@ class LlmConfig:
     full_extraction: bool = _b("RECHNUNG_LLM_FULL", True)
     # Positionen mit auslesen lassen (laengere Antwort, langsamer)
     line_items: bool = _b("RECHNUNG_LLM_LINE_ITEMS", False)
+    # Obergrenze fuer den Ollama-Kontext (RAM-Budget) -- der tatsaechlich
+    # angefragte Wert wird je Prompt dynamisch kleiner gewaehlt
+    # (semantic._dynamic_num_ctx, SPEC Effizienz-Baustein 1), dieser Wert ist
+    # nur die Decke fuer lange Rechnungen/den Belegpflicht-Nachfass-Versuch.
     num_ctx: int = int(os.environ.get("RECHNUNG_LLM_CTX", "4096"))
     timeout: int = int(os.environ.get("RECHNUNG_LLM_TIMEOUT", "30"))
     # Konfidenz-Deckel: ein LLM-Treffer soll nie allein auf 'auto' hochfahren

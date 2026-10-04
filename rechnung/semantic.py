@@ -63,6 +63,77 @@ def _head_and_tail(text: str, budget: int = _TEXT_BUDGET, tail_share: float = _T
     head_len = budget - tail_len
     return f"{text[:head_len]}\n[...gekuerzt...]\n{text[-tail_len:]}"
 
+
+# ---- Gezielte Textausschnitte (SPEC Effizienz-Baustein 1) ------------------
+# Statt dem Modell immer Kopf+Fuss der ganzen Rechnung zu schicken, nur die
+# Umgebung von Schluesselwoertern je angefragtem Feld -- deutlich weniger
+# Prompt-Text = schneller auf einem CPU-Laptop, kleinerer noetiger Kontext
+# (siehe _dynamic_num_ctx). Arbeitet auf Wort-Token statt auf Zeilen: der
+# Volltext einer Rechnung (``Document.text``) ist pro SEITE eine einzige
+# leerzeichengetrennte Zeile, Zeilenumbrueche sagen hier also nichts ueber
+# das Layout aus. Verglichen wird ausschliesslich gegen den VOLLEN Text
+# (``_check_value``/``verify_in_text`` bekommen immer den Original-Text, nie
+# den Ausschnitt) -- ein gekuerzter Prompt kann also nie dazu fuehren, dass
+# ein tatsaechlich belegter Wert faelschlich verworfen wird.
+_FIELD_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "rechnungsnummer": ("rechnungsnummer", "rechnungsnr", "rechnungs-nr", "rechnung",
+                        "belegnummer", "beleg-nr", "invoice"),
+    "rechnungsdatum": ("rechnungsdatum", "datum", "invoice-date"),
+    "netto": ("netto", "nettobetrag", "nettosumme", "zwischensumme", "warenwert", "subtotal"),
+    "ust_betrag": ("umsatzsteuer", "mehrwertsteuer", "ust", "mwst", "vat", "steuerbetrag"),
+    "ust_satz": ("umsatzsteuer", "mehrwertsteuer", "mwst", "vat", "steuersatz"),
+    "brutto": ("brutto", "bruttobetrag", "gesamtbetrag", "rechnungsbetrag", "endbetrag",
+              "gesamtsumme", "zahlbetrag", "total"),
+    "bestellnummer": ("bestellnummer", "bestellnr", "auftragsnummer", "order", "po"),
+    "kostenstelle": ("kostenstelle", "kst"),
+}
+# Bank-/Zahlungsblock -- fuer lieferant_iban/lieferant_ustid (Stufe 2) wichtig,
+# stehen aber nicht in _FIELD_KEYWORDS (kein eigenes STANDARD_FIELDS-Feld).
+_BANK_KEYWORDS = ("iban", "bic", "bankverbindung", "konto", "ustid", "ust-idnr", "steuernummer")
+# Positionsbereich (nur fuer extract_full mit line_items) -- grob, da die
+# Tabellenspalten je Lieferant unterschiedlich heissen.
+_LINE_KEYWORDS = ("pos", "menge", "beschreibung", "bezeichnung", "artikel", "einzelpreis")
+
+_GAP_BUDGET = 1500     # Stufe-1-Luecken-Fuellung: wenige, meist klar benannte Felder
+_FULL_EXCERPT_BUDGET = 3000  # Stufe 2: ganze Rechnung, aber Kopf+Summen+Bank+Positionen
+_HEAD_TOKENS = 60      # Kopfbereich (Rechnungsnummer/-datum, Lieferant) in Wort-Token
+_TAIL_TOKENS = 60      # Fuss-/Summenbereich
+_WINDOW = 8            # Woerter vor/nach einem Schluesselwort-Treffer
+
+
+def _targeted_excerpt(text: str, field_names: list[str], extra_keywords: tuple[str, ...] = (),
+                      budget: int = _GAP_BUDGET) -> str:
+    """Nur Kopf, Fuss (Summenblock) und die Umgebung von Schluesselwoertern
+    der angefragten Felder -- statt der ganzen Rechnung. Bleibt der Ausschnitt
+    trotzdem laenger als ``budget`` (z.B. sehr dichte Treffer) oder gibt es
+    gar keine Schluesselwoerter zum Suchen, faellt die Funktion auf den
+    bewaehrten Kopf+Fuss-Zeichenschnitt (``_head_and_tail``) zurueck -- nie
+    auf mehr Text als vorher, aber auch nie weniger robust."""
+    toks = text.split()
+    n = len(toks)
+    if n <= _HEAD_TOKENS + _TAIL_TOKENS:
+        return text
+    keep: set[int] = set(range(min(_HEAD_TOKENS, n))) | set(range(max(0, n - _TAIL_TOKENS), n))
+    keywords = [norm(kw) for name in field_names for kw in _FIELD_KEYWORDS.get(name, ())]
+    keywords += [norm(kw) for kw in extra_keywords]
+    if keywords:
+        for i, t in enumerate(toks):
+            nt = norm(t)
+            if nt and any(kw in nt for kw in keywords):
+                keep.update(range(max(0, i - _WINDOW), min(n, i + _WINDOW + 1)))
+    ordered = sorted(keep)
+    out: list[str] = []
+    prev = None
+    for i in ordered:
+        if prev is not None and i != prev + 1:
+            out.append("[...]")
+        out.append(toks[i])
+        prev = i
+    excerpt = " ".join(out)
+    if not keywords or len(excerpt) > budget:
+        return _head_and_tail(text, budget=max(budget, _TEXT_BUDGET))
+    return excerpt
+
 _PROMPT = """Du liest den Text einer deutschen Geschaeftsrechnung und gibst NUR ein JSON-Objekt zurueck, keinen Fliesstext, keine Erklaerung.
 
 Gesuchte Felder (nur zurueckgeben, was tatsaechlich im Text steht -- nichts raten oder erfinden):
@@ -108,25 +179,51 @@ def available() -> bool:
     return ok
 
 
-def _call_ollama(cfg, prompt: str) -> str | None:
-    body = json.dumps({
-        "model": cfg.model,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json",
-        "keep_alive": cfg.keep_alive,
-        "options": {"temperature": 0.0, "num_ctx": cfg.num_ctx},
-    }).encode("utf-8")
+def _dynamic_num_ctx(prompt: str, cap: int) -> int:
+    """Kontextgroesse an die tatsaechliche Promptlaenge anpassen (SPEC
+    Effizienz-Baustein 1) statt immer das Maximum zu reservieren --
+    ``RECHNUNG_LLM_CTX`` ist damit eine Obergrenze (Laptop-RAM), kein fester
+    Wert. Grobe Schaetzung: ~4 Zeichen/Token (Deutsch) plus Luft fuer die
+    Antwort, auf die naechste gaengige Ollama-Kontextgroesse aufgerundet."""
+    needed = len(prompt) // 4 + 256
+    for step in (512, 1024, 2048, 4096, 8192, 16384):
+        if needed <= step:
+            return min(step, cap)
+    return cap
+
+
+def _post_ollama(cfg, body: dict) -> str | None:
+    data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
-        f"{cfg.base_url}/api/generate", data=body,
+        f"{cfg.base_url}/api/generate", data=data,
         headers={"Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=cfg.timeout) as r:
-            data = json.loads(r.read().decode("utf-8"))
+            parsed = json.loads(r.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
         return None
-    return data.get("response")
+    return parsed.get("response")
+
+
+def _call_ollama(cfg, prompt: str, schema: dict | None = None) -> str | None:
+    """SPEC Effizienz-Baustein 2: ein echtes JSON-Schema im ``format``-Feld
+    statt nur ``"json"`` (Ollama >= 0.5) -- weniger kaputte/wiederholte
+    Antworten. Scheitert der Aufruf mit Schema (z.B. aeltere Ollama-Version),
+    einmal mit dem bisherigen ``"json"`` nachfassen statt leer zu bleiben."""
+    body = {
+        "model": cfg.model,
+        "prompt": prompt,
+        "stream": False,
+        "format": schema if schema is not None else "json",
+        "keep_alive": cfg.keep_alive,
+        "options": {"temperature": 0.0, "num_ctx": _dynamic_num_ctx(prompt, cfg.num_ctx)},
+    }
+    raw = _post_ollama(cfg, body)
+    if raw is None and schema is not None:
+        body["format"] = "json"
+        raw = _post_ollama(cfg, body)
+    return raw
 
 
 def _auth_headers(cfg) -> dict[str, str]:
@@ -139,13 +236,12 @@ def _auth_headers(cfg) -> dict[str, str]:
     return {"Authorization": f"Bearer {cfg.api_key}"}
 
 
-def _call_openai(cfg, prompt: str) -> str | None:
-    """OpenAI-kompatibles /chat/completions (vLLM, llama.cpp-Server, ...)."""
+def _post_openai(cfg, prompt: str, response_format: dict) -> str | None:
     body = json.dumps({
         "model": cfg.model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.0,
-        "response_format": {"type": "json_object"},
+        "response_format": response_format,
     }).encode("utf-8")
     req = urllib.request.Request(
         f"{cfg.base_url}/chat/completions", data=body,
@@ -160,6 +256,21 @@ def _call_openai(cfg, prompt: str) -> str | None:
         return None
 
 
+def _call_openai(cfg, prompt: str, schema: dict | None = None) -> str | None:
+    """OpenAI-kompatibles /chat/completions (vLLM, llama.cpp-Server, ...).
+    SPEC Effizienz-Baustein 2: ``response_format: json_schema`` wo ein Schema
+    vorliegt, sonst (und als Rueckfallebene, falls der Server json_schema
+    nicht kennt) das bisherige ``json_object``."""
+    if schema is not None:
+        raw = _post_openai(cfg, prompt, {
+            "type": "json_schema",
+            "json_schema": {"name": "extraktion", "schema": schema, "strict": True},
+        })
+        if raw is not None:
+            return raw
+    return _post_openai(cfg, prompt, {"type": "json_object"})
+
+
 # Antwort-Cache je (Modell, Prompt): /api/invoice zeigt dem Menschen den
 # Vorschlag, /api/confirm laeuft die Pipeline danach erneut -- ohne Cache
 # koennte ein zweiter Modellaufruf (trotz temperature 0) minimal anders
@@ -168,11 +279,13 @@ _resp_cache: dict[str, str] = {}
 _RESP_CACHE_MAX = 64
 
 
-def _call(cfg, prompt: str) -> str | None:
-    key = hashlib.sha256(f"{cfg.backend}|{cfg.model}|{prompt}".encode("utf-8")).hexdigest()
+def _call(cfg, prompt: str, schema: dict | None = None) -> str | None:
+    schema_part = json.dumps(schema, sort_keys=True) if schema is not None else ""
+    key = hashlib.sha256(f"{cfg.backend}|{cfg.model}|{schema_part}|{prompt}".encode("utf-8")).hexdigest()
     if key in _resp_cache:
         return _resp_cache[key]
-    raw = _call_openai(cfg, prompt) if cfg.backend == "openai" else _call_ollama(cfg, prompt)
+    raw = (_call_openai(cfg, prompt, schema) if cfg.backend == "openai"
+           else _call_ollama(cfg, prompt, schema))
     if raw:
         if len(_resp_cache) >= _RESP_CACHE_MAX:
             _resp_cache.pop(next(iter(_resp_cache)))
@@ -222,13 +335,25 @@ def _check_value(text: str, name: str, val, vtype: str) -> tuple[object, str]:
     return value, ""
 
 
+def _gap_schema(field_names: list[str]) -> dict:
+    """Schlankes JSON-Schema fuer die gezielte Luecken-Fuellung (nur die
+    angefragten Felder, SPEC Effizienz-Baustein 2)."""
+    props = {n: {"type": ["string", "number", "null"]} for n in field_names}
+    return {"type": "object", "properties": props, "additionalProperties": False}
+
+
 def extract(text: str, field_names: list[str], hints: dict[str, str],
             rejected: dict[str, str] | None = None) -> dict[str, FieldResult]:
     """Liefert je angefragtem, tatsaechlich gefundenem Feld ein FieldResult
     mit ``source="llm"``. Leer, wenn der Fallback aus/nicht erreichbar ist,
     keine Felder angefragt wurden, oder die Antwort nicht parsbar war.
     Werte, die nicht im Text stehen, landen statt im Ergebnis in
-    ``rejected`` (Feld -> Grund)."""
+    ``rejected`` (Feld -> Grund).
+
+    SPEC Effizienz-Baustein 1: die KI bekommt nur die Textumgebung der
+    angefragten Felder (``_targeted_excerpt``), nicht die ganze Rechnung --
+    belegt wird trotzdem immer gegen den vollen ``text`` (siehe
+    ``_check_value``)."""
     cfg = _llm_cfg()
     field_names = [n for n in field_names if STANDARD_FIELDS.get(n, ("text",))[0] in _SIMPLE_TYPES]
     if not cfg.enabled or not field_names or not available():
@@ -238,9 +363,10 @@ def extract(text: str, field_names: list[str], hints: dict[str, str],
         f"- {n} ({STANDARD_FIELDS.get(n, ('text',))[0]})" for n in field_names
     )
     hints_desc = "\n".join(f"- {k}: {v}" for k, v in hints.items() if v) or "(keine)"
-    prompt = _PROMPT.format(fields=fields_desc, hints=hints_desc, text=_head_and_tail(text))
+    excerpt = _targeted_excerpt(text, field_names)
+    prompt = _PROMPT.format(fields=fields_desc, hints=hints_desc, text=excerpt)
 
-    parsed = _parse_json(_call(cfg, prompt))
+    parsed = _parse_json(_call(cfg, prompt, _gap_schema(field_names)))
     if parsed is None:
         return {}
 
@@ -336,20 +462,18 @@ Rechnungstext:
 ---"""
 
 
-def extract_full(text: str) -> FullExtraction:
-    """Komplette Rechnung strukturiert auslesen (Stufe 2). Leer, wenn aus,
-    nicht erreichbar oder unbrauchbare Antwort. Jedes Feld ist im Text belegt
-    -- alles andere steht mit Grund in ``rejected``."""
-    cfg = _llm_cfg()
+def _extract_full_once(prompt_text: str, verify_text: str, cfg, schema: dict) -> FullExtraction:
+    """Ein Modellaufruf: ``prompt_text`` geht an das Modell, belegt wird
+    immer gegen ``verify_text`` (SPEC Effizienz-Baustein 1: bei der gezielten
+    Variante ist das der VOLLE Rechnungstext, auch wenn nur ein Ausschnitt im
+    Prompt stand -- ein Modellwert aus dem Ausschnitt muss trotzdem irgendwo
+    im ganzen Beleg stehen, sonst gilt er als nicht belegt)."""
     res = FullExtraction()
-    if not cfg.enabled or not cfg.full_extraction or not available():
-        return res
-    schema = _schema(cfg.line_items)
     lines = ("- positionen: Liste der Rechnungspositionen mit beschreibung, menge, "
              "einzelpreis, netto (Positionssumme), ust_satz\n" if cfg.line_items else "")
     prompt = _PROMPT_FULL.format(lines=lines, schema=json.dumps(schema, ensure_ascii=False),
-                                 text=_head_and_tail(text))
-    parsed = _parse_json(_call(cfg, prompt))
+                                 text=prompt_text)
+    parsed = _parse_json(_call(cfg, prompt, schema))
     if parsed is None:
         return res
     data = _validate(parsed, schema, res.rejected)
@@ -359,7 +483,7 @@ def extract_full(text: str) -> FullExtraction:
         val = data.get(name)
         if vtype not in _SIMPLE_TYPES or val in (None, ""):
             continue
-        value, why = _check_value(text, name, val, vtype)
+        value, why = _check_value(verify_text, name, val, vtype)
         if why:
             res.rejected[name] = f"{why}: {val}"
             continue
@@ -376,7 +500,7 @@ def extract_full(text: str) -> FullExtraction:
             value, ok = coerce(val, "ustid")
         else:
             value, ok = str(val).strip(), True
-        if not ok or not verify_in_text(text, value, kind):
+        if not ok or not verify_in_text(verify_text, value, kind):
             res.rejected[key] = f"nicht im PDF gefunden/ungueltig: {val}"
             continue
         res.supplier[kind] = value
@@ -395,11 +519,48 @@ def extract_full(text: str) -> FullExtraction:
             if not ok:
                 item.pop(k)
         # Position nur behalten, wenn ihr Betrag im Text belegt ist
-        if item.get("netto") is None or not value_in_text(text, item["netto"], "amount"):
+        if item.get("netto") is None or not value_in_text(verify_text, item["netto"], "amount"):
             dropped += 1
             continue
         item["_quelle"] = "llm"
         res.line_items.append(item)
     if dropped:
         res.rejected["positionen"] = f"{dropped} Position(en) ohne belegten Betrag verworfen"
+    return res
+
+
+def extract_full(text: str) -> FullExtraction:
+    """Komplette Rechnung strukturiert auslesen (Stufe 2). Leer, wenn aus,
+    nicht erreichbar oder unbrauchbare Antwort. Jedes Feld ist im Text belegt
+    -- alles andere steht mit Grund in ``rejected``.
+
+    SPEC Effizienz-Baustein 1: die Volllesung bekommt zuerst nur einen
+    gekuerzten Ausschnitt (Kopf + Summen-/Bankbloecke + ggf. Positionsbereich,
+    ``_targeted_excerpt``). Fehlt danach noch ein PFLICHTFELD (nicht nur ein
+    optionales), fasst genau einmal mit dem vollen Text nach, statt zu raten
+    -- der Ausschnitt kann ein Feld verpassen, das keinem der bekannten
+    Schluesselwoerter nahe steht."""
+    cfg = _llm_cfg()
+    res = FullExtraction()
+    if not cfg.enabled or not cfg.full_extraction or not available():
+        return res
+    schema = _schema(cfg.line_items)
+    extra = _BANK_KEYWORDS + (_LINE_KEYWORDS if cfg.line_items else ())
+    excerpt = _targeted_excerpt(text, list(STANDARD_FIELDS), extra_keywords=extra,
+                               budget=_FULL_EXCERPT_BUDGET)
+    res = _extract_full_once(excerpt, text, cfg, schema)
+
+    missing_required = [n for n, (vtype, req) in STANDARD_FIELDS.items()
+                        if req and vtype in _SIMPLE_TYPES
+                        and n not in res.fields and n not in res.rejected]
+    if missing_required and excerpt != text:
+        retry = _extract_full_once(text, text, cfg, schema)
+        for n, fr in retry.fields.items():
+            res.fields.setdefault(n, fr)
+        for kind, value in retry.supplier.items():
+            res.supplier.setdefault(kind, value)
+        if not res.line_items and retry.line_items:
+            res.line_items = retry.line_items
+        for n, why in retry.rejected.items():
+            res.rejected.setdefault(n, why)
     return res
