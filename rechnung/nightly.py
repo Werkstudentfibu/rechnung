@@ -85,6 +85,18 @@ def _stufen_verteilung(events: list[dict]) -> dict:
     return {name: _distribution(werte) for name, werte in stufen.items()}
 
 
+def _dauer_je_seitenzahl(events: list[dict]) -> dict:
+    """Gesamtdauer nach Seitenzahl gruppiert (1, 2-4, 5-9, 10+) -- zeigt, ob
+    lange Rechnungen die 120-s-Grenze halten (Postfach-Baustein 3)."""
+    def gruppe(n: int) -> str:
+        return "1" if n <= 1 else "2-4" if n <= 4 else "5-9" if n <= 9 else "10+"
+    out: dict[str, list[float]] = {}
+    for e in events:
+        if e.get("seiten"):
+            out.setdefault(gruppe(e["seiten"]), []).append(e.get("duration_s") or 0.0)
+    return {k: _distribution(v) for k, v in sorted(out.items())}
+
+
 def _rueckstand(store, samples) -> int:
     """Wie viele Rechnungsdateien im Sample-Ordner liegen, die noch nie
     erfolgreich uebernommen wurden (kein Eintrag im Verarbeitungs-Log mit
@@ -139,6 +151,7 @@ def tagesbericht(store, samples=None, tag: str | None = None) -> dict:
         # Baustein 0) -- Grundlage fuer alle weiteren Effizienz-Massnahmen.
         "dauer": _distribution(durations),
         "dauer_je_stufe": _stufen_verteilung(events),
+        "dauer_je_seitenzahl": _dauer_je_seitenzahl(events),
         "rueckstand": _rueckstand(store, samples),
     }
 
@@ -169,6 +182,10 @@ def run_nightly(store, samples: str | Path | None = None,
         feedback = jobrouter.fetch_feedback(store.root, queued)
         applied = jobrouter.apply_feedback(store, feedback, operator="jobrouter")
 
+        # Lange Scans: restliche Seiten erkennen (ausserhalb der Zeitgrenze)
+        from .pipeline import complete_background_ocr
+        ocr_rest = complete_background_ocr(store)
+
         stale = [{"template_id": t.id, "supplier_id": t.supplier_id}
                  for t in store.all_templates() if t.stale]
 
@@ -176,6 +193,7 @@ def run_nightly(store, samples: str | Path | None = None,
             "erstellt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "jobrouter_feedback": {"abgeholt": len(feedback), "eingespielt": applied},
             "layoutwechsel": {"veraltete_vorlagen": stale},
+            "ocr_rest": ocr_rest,
             "fehlerbericht": eventlog.report(store),
             "tagesbericht": tagesbericht(store, samples),
             "betrieb": betrieb(store),

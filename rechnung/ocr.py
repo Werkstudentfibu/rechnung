@@ -75,6 +75,29 @@ def jobs() -> int:
     return max(1, (os.cpu_count() or 2) - 1)
 
 
+def kopf_fuss_seiten() -> tuple[int, int]:
+    """Lange Scans (Postfach-Baustein 3): fuer die Feld-Extraktion reichen
+    Kopf (erste Seiten: Nummer, Datum, Lieferant) und Summen-/Bankteil
+    (letzte Seiten). ``RECHNUNG_OCR_KOPF``/``RECHNUNG_OCR_FUSS`` (Standard
+    je 2). Hat ein Scan mehr Seiten als Kopf + Fuss + 1, werden innerhalb der
+    Zeitgrenze nur diese Seiten erkannt, der Rest danach im Hintergrund
+    (``complete_pending``)."""
+    def _int(name: str, default: int) -> int:
+        try:
+            return max(1, int(os.environ.get(name, str(default))))
+        except ValueError:
+            return default
+    return _int("RECHNUNG_OCR_KOPF", 2), _int("RECHNUNG_OCR_FUSS", 2)
+
+
+def partial_pages(n: int) -> list[int] | None:
+    """Seitenindizes fuer die schnelle Teil-Erkennung, ``None`` = alle."""
+    kopf, fuss = kopf_fuss_seiten()
+    if n <= kopf + fuss + 1:
+        return None
+    return list(range(kopf)) + list(range(n - fuss, n))
+
+
 # Standard-Installationsorte unter Windows (UB-Mannheim-Installer, siehe
 # build.md/INSTALL-WINDOWS.md) -- greifen nur, wenn weder RECHNUNG_TESSERACT
 # gesetzt ist noch tesseract im PATH liegt.
@@ -155,6 +178,10 @@ class OcrResult:
     pages: int = 0
     seconds: float = 0.0
     error: str = ""
+    # Teil-Erkennung eines langen Scans: nur Kopf-/Fussseiten haben eine
+    # Textebene, die uebrigen (0-basiert) folgen im Hintergrund
+    partial: bool = False
+    missing_pages: list[int] = field(default_factory=list)
 
     @property
     def low(self) -> bool:
@@ -164,7 +191,9 @@ class OcrResult:
         return {"engine": "tesseract", "lang": LANG, "confidence": self.confidence,
                 "min_confidence": min_confidence(), "low": self.low,
                 "unsichere_woerter": len(self.low_words), "pages": self.pages,
-                "seconds": self.seconds, "error": self.error}
+                "seconds": self.seconds, "error": self.error,
+                "teilweise": self.partial,
+                "seiten_ohne_ocr": [i + 1 for i in self.missing_pages]}
 
 
 def needs_ocr(path: str | Path) -> bool:
@@ -179,8 +208,24 @@ def needs_ocr(path: str | Path) -> bool:
     return not pdfmod.has_text_layer(path)
 
 
-def _page_images(path: Path):
-    """Seiten als PIL-Bilder (300 dpi)."""
+def page_count(path: Path) -> int:
+    from PIL import Image, ImageSequence
+
+    if path.suffix.lower() in IMAGE_SUFFIXES:
+        with Image.open(path) as im:
+            return sum(1 for _ in ImageSequence.Iterator(im))
+    import pypdfium2 as pdfium
+
+    doc = pdfium.PdfDocument(str(path))
+    try:
+        return len(doc)
+    finally:
+        doc.close()
+
+
+def _page_images(path: Path, indices: list[int] | None = None):
+    """Seiten als PIL-Bilder (300 dpi); bei ``indices`` nur diese (die
+    uebrigen ``None`` -- ein langer Scan wird nicht komplett gerendert)."""
     from PIL import Image, ImageSequence
 
     if path.suffix.lower() in IMAGE_SUFFIXES:
@@ -191,7 +236,9 @@ def _page_images(path: Path):
 
     doc = pdfium.PdfDocument(str(path))
     try:
-        return [doc[i].render(scale=DPI / 72).to_pil().convert("RGB") for i in range(len(doc))]
+        want = set(range(len(doc)) if indices is None else indices)
+        return [doc[i].render(scale=DPI / 72).to_pil().convert("RGB") if i in want else None
+                for i in range(len(doc))]
     finally:
         doc.close()
 
@@ -253,8 +300,21 @@ def _merge_mixed(original: Path, page_pdfs: list[Path | None], skip: list[bool],
             src_orig.close()
 
 
+def _cached(target: Path, meta: Path, sha: str) -> OcrResult | None:
+    if not (target.exists() and meta.exists()):
+        return None
+    try:
+        m = json.loads(meta.read_text("utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return OcrResult(sha, target, m.get("confidence"), m.get("low_words", []),
+                     m.get("pages", 0), m.get("seconds", 0.0),
+                     partial=bool(m.get("teilweise")),
+                     missing_pages=list(m.get("fehlend") or []))
+
+
 def ensure_text(path: str | Path, cache_dir: str | Path,
-                timeout: float | None = None) -> OcrResult:
+                timeout: float | None = None, full: bool = False) -> OcrResult:
     """Original -> OCR-PDF mit Textebene (aus dem Cache, falls schon erzeugt).
     ``timeout`` begrenzt die gesamte Erkennung (alle Seiten zusammen).
 
@@ -269,22 +329,35 @@ def ensure_text(path: str | Path, cache_dir: str | Path,
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
     cache_dir = Path(cache_dir)
     target, meta = cache_dir / f"{sha}.pdf", cache_dir / f"{sha}.json"
-    if target.exists() and meta.exists():
-        try:
-            m = json.loads(meta.read_text("utf-8"))
-            return OcrResult(sha, target, m.get("confidence"), m.get("low_words", []),
-                             m.get("pages", 0), m.get("seconds", 0.0))
-        except (json.JSONDecodeError, OSError):
-            pass
+    hit = _cached(target, meta, sha)
+    if hit is not None:
+        return hit
     if not enabled():
         return OcrResult(sha, error=OCR_DISABLED)
     if not available():
         return OcrResult(sha, error=OCR_UNAVAILABLE)
 
+    # Langer Scan (Postfach-Baustein 3): innerhalb der Zeitgrenze nur Kopf-
+    # und Fussseiten erkennen; Seitenzahlen bleiben gleich (die uebrigen
+    # Seiten kommen ohne Textebene aus dem Original), der Rest folgt im
+    # Hintergrund (complete_pending). Nur fuer PDFs.
+    is_pdf = path.suffix.lower() == ".pdf"
+    selected = None
+    if not full and is_pdf:
+        try:
+            selected = partial_pages(page_count(path))
+        except Exception:  # noqa: BLE001 -- im Zweifel alles erkennen
+            selected = None
+    if selected is not None:
+        target, meta = cache_dir / f"{sha}.teil.pdf", cache_dir / f"{sha}.teil.json"
+        hit = _cached(target, meta, sha)
+        if hit is not None:
+            return hit
+
     t0 = time.monotonic()
     deadline = t0 + timeout if timeout else None
     try:
-        images = _page_images(path)
+        images = _page_images(path, selected)
     except Exception as e:  # noqa: BLE001 -- defektes Bild/PDF
         return OcrResult(sha, error=f"OCR: Datei nicht lesbar ({type(e).__name__})")
 
@@ -293,11 +366,13 @@ def ensure_text(path: str | Path, cache_dir: str | Path,
     # die ersten drei Seiten des gesamten Dokuments, das reicht hier nicht).
     from . import pdf as pdfmod
 
-    is_pdf = path.suffix.lower() == ".pdf"
     try:
         skip = [is_pdf and pdfmod.page_has_text(path, i) for i in range(len(images))]
     except Exception:  # noqa: BLE001 -- im Zweifel lieber jede Seite erkennen
         skip = [False] * len(images)
+    # nicht ausgewaehlte Seiten eines langen Scans: unveraendert aus dem Original
+    missing = [i for i, im in enumerate(images) if im is None and not skip[i]]
+    skip = [s or images[i] is None for i, s in enumerate(skip)]
     todo = [i for i, s in enumerate(skip) if not s]
 
     confs: list[float] = []
@@ -347,8 +422,55 @@ def ensure_text(path: str | Path, cache_dir: str | Path,
     # textbasierte Rechnung faelschlich als OCR-unsicher markiert.
     confidence = None if not todo else (round(sum(confs) / len(confs), 1) if confs else 0.0)
     res = OcrResult(sha, target, confidence, sorted(set(low)), len(images),
-                    round(time.monotonic() - t0, 2))
+                    round(time.monotonic() - t0, 2), partial=bool(missing),
+                    missing_pages=missing)
     meta.write_text(json.dumps({"confidence": res.confidence, "low_words": res.low_words,
                                 "pages": res.pages, "seconds": res.seconds,
-                                "source": path.name}, ensure_ascii=False), "utf-8")
+                                "source": path.name, "original": str(path.resolve()),
+                                "teilweise": res.partial, "fehlend": missing},
+                               ensure_ascii=False), "utf-8")
     return res
+
+
+def pending(cache_dir: str | Path) -> list[dict]:
+    """Lange Scans, deren uebrige Seiten noch auf die Texterkennung warten."""
+    cache_dir = Path(cache_dir)
+    out = []
+    for meta in sorted(cache_dir.glob("*.teil.json")) if cache_dir.exists() else []:
+        sha = meta.name.split(".", 1)[0]
+        if (cache_dir / f"{sha}.pdf").exists():
+            continue
+        try:
+            m = json.loads(meta.read_text("utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        out.append(dict(m, sha256=sha))
+    return out
+
+
+def complete_pending(cache_dir: str | Path, archive_dir: str | Path | None = None,
+                     limit: int = 0) -> list[dict]:
+    """Hintergrundschritt AUSSERHALB der Zeitgrenze je Rechnung (Ende von
+    ``rechnung scan``, Nachtlauf): lange Scans vollstaendig erkennen
+    (Positionen/Archiv). Danach liest ``pipeline.load_document`` die
+    vollstaendige Arbeitskopie; die Teil-Erkennung wird entfernt. Original
+    nicht mehr da (verschoben) -> Archivkopie ``<sha>.pdf``, sonst bleibt
+    der Eintrag offen."""
+    cache_dir = Path(cache_dir)
+    done = []
+    for m in pending(cache_dir)[: limit or None]:
+        sha = m["sha256"]
+        src = Path(m.get("original") or "")
+        if not src.exists() and archive_dir is not None:
+            src = Path(archive_dir) / f"{sha}.pdf"
+        if not src.exists() or hashlib.sha256(src.read_bytes()).hexdigest() != sha:
+            done.append({"sha256": sha, "ok": False, "grund": "Original nicht gefunden"})
+            continue
+        r = ensure_text(src, cache_dir, None, full=True)
+        if r.error:
+            done.append({"sha256": sha, "ok": False, "grund": r.error})
+            continue
+        (cache_dir / f"{sha}.teil.pdf").unlink(missing_ok=True)
+        (cache_dir / f"{sha}.teil.json").unlink(missing_ok=True)
+        done.append({"sha256": sha, "ok": True, "seiten": r.pages, "sekunden": r.seconds})
+    return done

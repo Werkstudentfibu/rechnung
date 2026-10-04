@@ -66,6 +66,7 @@ def record(store, res, operator: str = "") -> dict:
         "duration_s": res.duration_s,
         "aborted": res.aborted,
         "stufenzeiten": dict(res.stufenzeiten or {}),
+        "seiten": getattr(res, "seiten", 0),
         "fields": {
             name: {"origin": _origin(fr.source), "confidence": fr.confidence}
             for name, fr in (res.fields or {}).items()

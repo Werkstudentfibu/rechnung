@@ -120,6 +120,8 @@ class Result:
     # Teil eines aufgeteilten Sammel-PDFs (split.py): Verweis auf das
     # Original (sha256, Name, Seiten), sonst None
     sammel: dict | None = None
+    # Seitenzahl (Zeitmessung je Seitenzahl, Postfach-Baustein 3)
+    seiten: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -144,6 +146,7 @@ class Result:
             "duration_s": self.duration_s,
             "aborted": self.aborted,
             "stufenzeiten": self.stufenzeiten,
+            "seiten": self.seiten,
             "overall_confidence": self.overall_confidence,
             "line_items": self.line_items,
             "tax_breakdown": self.tax_breakdown,
@@ -163,6 +166,16 @@ class Result:
 
 # Quellen, die nicht aus dem Rechnungstext gelesen sind (kein "via ocr")
 _NOT_READ = ("library", "manual", "missing", "einvoice")
+
+
+def extraction_text(doc) -> str:
+    """Text fuer die KI: bei langen Rechnungen nur Kopf- und Fussseiten
+    (Postfach-Baustein 3) -- Nummer/Datum/Lieferant stehen vorn, Summen/Bank
+    hinten; die Positionsseiten dazwischen kosten nur Modellzeit."""
+    idx = ocr.partial_pages(len(doc.pages))
+    if idx is None:
+        return doc.text
+    return "\n".join(" ".join(w.text for w in doc.pages[i].words) for i in idx)
 
 
 def load_document(path: str | Path, store: Store):
@@ -586,7 +599,7 @@ def _llm_full(res: Result, doc) -> None:
     """Stufe 2: komplette KI-Extraktion, wenn es (noch) kein Template gibt.
     Fuellt nur, was nicht schon da ist -- Stammdaten aus dem gepflegten
     Lieferanten-Datensatz (``library``) gewinnen gegen das Modell."""
-    full = semantic.extract_full(doc.text)
+    full = semantic.extract_full(extraction_text(doc))
     res.llm_rejected.update(full.rejected)
     for name, fr in full.fields.items():
         cur = res.fields.get(name)
@@ -683,7 +696,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
         _apply_hold(res)
         res.stufenzeiten = timer.times
         return res
-    res = Result(file=str(path), sha256=doc.sha256)
+    res = Result(file=str(path), sha256=doc.sha256, seiten=len(doc.pages))
 
     # Sammel-PDF (split.py): Teile tragen den Verweis aufs Original. Ein PDF
     # mit (moeglicherweise) mehreren Rechnungen wird nie als eine verarbeitet.
@@ -762,7 +775,8 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     if gaps and use_llm:
         with timer.stage("ki"):
             hints = {n: r.raw for n, r in res.fields.items() if r.source != "missing"}
-            for name, fr in semantic.extract(doc.text, gaps, hints, res.llm_rejected).items():
+            for name, fr in semantic.extract(extraction_text(doc), gaps, hints,
+                                             res.llm_rejected).items():
                 cur = res.fields.get(name)
                 if cur is None or cur.source == "missing" or fr.confidence > cur.confidence:
                     res.fields[name] = fr
@@ -772,7 +786,13 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     corrections = store.corrections(doc.sha256)
     _apply_corrections(res.fields, corrections, {f.name: f.value_type for f in tpl.fields})
 
-    if tpl.line_items:
+    if tpl.line_items and o is not None and o.partial:
+        # Langer Scan, Positionsseiten noch ohne Texterkennung: keine halbe
+        # Tabelle lesen (die Positionssumme waere falsch rot) -- die Positionen
+        # kommen, sobald complete_pending den Rest erkannt hat.
+        res.warnings.append("Positionen erst nach vollstaendiger Texterkennung "
+                            f"(Seiten {', '.join(str(i + 1) for i in o.missing_pages)})")
+    elif tpl.line_items:
         with timer.stage("vorlage"):
             res.line_items = apply_line_items(doc, tpl.line_items)
         _suggest_categories(res.line_items, tpl, store)
@@ -844,7 +864,17 @@ def scan_folder(folder: str | Path, store: Store, guard=None) -> list[Result]:
             guard.close()
         if had_slow:
             semantic.release_model()
+    # Hintergrundschritt ausserhalb der Zeitgrenze je Rechnung: lange Scans
+    # vollstaendig erkennen (Positionen/Archiv), Postfach-Baustein 3.
+    complete_background_ocr(store)
     return results
+
+
+def complete_background_ocr(store: Store, limit: int = 0) -> list[dict]:
+    done = ocr.complete_pending(store.root / "ocr", store.root / "archive", limit)
+    for d in done:
+        store.audit("ocr_rest", d)
+    return done
 
 
 def dispatch(res: Result, store: Store) -> dict:

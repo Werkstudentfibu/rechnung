@@ -148,7 +148,7 @@ def _cmd_messen(args) -> int:
         return 0
     for r in results:
         stufen = " ".join(f"{k}={v:.2f}s" for k, v in (r.stufenzeiten or {}).items())
-        print(f"{Path(r.file).name:40.40s} gesamt={r.duration_s:.2f}s  {stufen}")
+        print(f"{Path(r.file).name:40.40s} {r.seiten:3d} S. gesamt={r.duration_s:.2f}s  {stufen}")
     print("\nVerteilung je Stufe (Median/P90/Max, n=Anzahl):")
     for name, d in verteilung(results).items():
         if not d:
