@@ -482,6 +482,40 @@ Zaehler zurueck.
 - Nur fuer gesicherte Vorlagen relevant -- eine noch nicht gesicherte ist
   ohnehin in der Lernphase und wird durch Fehlschlaege nicht "veraltet".
 
+## 7q. Rueckmeldung aus JobRouter (2026-10-04)
+
+`rechnung/jobrouter.py` (`FeedbackAdapter`, `FileFeedbackAdapter`,
+`RestFeedbackAdapter`, `fetch_feedback`, `apply_feedback`). Die genaue
+JobRouter-API fuer Rueckmeldungen (Korrekturen/Ablehnungen, die ein
+Sachbearbeiter spaeter in JobRouter eintraegt) ist noch unbekannt -- die
+Kunden-IT hat sie noch nicht spezifiziert. Deshalb eine duenne Adapter-
+Schnittstelle (`FeedbackAdapter.fetch(queued)`):
+
+- `FileFeedbackAdapter` (dateibasiert, `data/jobrouter_feedback/*.json`) ist
+  der Standard ohne `RECHNUNG_JOBROUTER_ENABLED=1` und fuer Tests/Simulation
+  voll funktionsfaehig.
+- `RestFeedbackAdapter` ist ein Platzhalter-Pfad (`cfg.feedback_endpoint`,
+  ein GET je Rechnung) fuer den scharfen Betrieb. **Noch nicht gegen ein
+  echtes JobRouter getestet** -- Pfad/Antwortformat muessen angepasst
+  werden, sobald die Kunden-IT die echte Schnittstelle liefert.
+
+`apply_feedback()` spielt eine Rueckmeldung mit korrigierten Feldern als
+Korrektur ein -- Operator `"jobrouter"` statt eines Menschen am Rechner,
+sonst derselbe Weg wie eine manuelle Korrektur im Training-UI:
+
+- `store.corrections` (ueberschreibt den Wert fuer die naechste
+  Verarbeitung) + Audit `correct`.
+- Ereignisprotokoll (`eventlog.record_correction`, §7o) -- taucht im
+  Fehlerbericht als Korrektur auf.
+- Schattenstatistik (`shadow.record_feedback_correction`): eine vorher als
+  "wuerde durchlassen" gewertete Rechnung, die JobRouter nachtraeglich
+  korrigiert, zaehlt dann als Fehlentscheidung. Haengt einen neuen Eintrag
+  an (append-only); `shadow.stats()` wertet seitdem je sha256 den zuletzt
+  angehaengten Eintrag statt immer des ersten.
+- Neu-Lernen der Vorlage (`learn.learn_from_confirmed`) auf Basis der
+  korrigierten Werte -- kann z.B. eine Vorlage praezisieren oder (bei einer
+  bereits als veraltet markierten, §7p) eine neue Version anstossen.
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).

@@ -168,6 +168,19 @@ aber nicht mehr angewendet: die nächsten Rechnungen laufen über die
 KI-Stufe/Handeingabe, bis aus der nächsten Bestätigung automatisch eine neue
 Vorlage/Variante gelernt ist (eigene Id `<lieferant>__<variante>__v2`, ...).
 
+## Rückmeldung aus JobRouter
+
+Die genaue JobRouter-API dafür ist noch unbekannt. `rechnung/jobrouter.py`
+stellt deshalb eine Adapter-Schnittstelle (`FeedbackAdapter.fetch()`) bereit:
+`FileFeedbackAdapter` (dateibasiert, `data/jobrouter_feedback/*.json`,
+Standard ohne `RECHNUNG_JOBROUTER_ENABLED=1`) für Tests/Simulation,
+`RestFeedbackAdapter` als Platzhalter für den scharfen Betrieb -- **noch
+nicht gegen ein echtes JobRouter getestet**. `apply_feedback()` spielt eine
+Rückmeldung mit korrigierten Feldern als Korrektur ein (Operator
+`jobrouter`): `store.corrections`, Ereignisprotokoll, Schattenstatistik
+(eine vorher "würde durchlassen" gewertete Rechnung kann so nachträglich
+zur Fehlentscheidung werden) und stößt ggf. Neu-Lernen der Vorlage an.
+
 ## Fehler-/Ereignisprotokoll + Fehlerbericht
 
 Jede Verarbeitung (CLI `scan`, Bestätigen im Training-UI) hängt ein

@@ -62,6 +62,13 @@ class JobRouterConfig:
     endpoint: str = os.environ.get(
         "RECHNUNG_JOBROUTER_ENDPOINT", "/rest/v2/application/incidents"
     )
+    # Rueckmeldungen (Korrekturen/Ablehnungen) je Rechnung abholen -- Pfad
+    # und Format sind ein Platzhalter, die genaue JobRouter-API ist noch
+    # unbekannt (siehe jobrouter.py: RestFeedbackAdapter, noch nicht gegen
+    # ein echtes JobRouter getestet).
+    feedback_endpoint: str = os.environ.get(
+        "RECHNUNG_JOBROUTER_FEEDBACK_ENDPOINT", "/rest/v2/application/incidents/feedback"
+    )
     timeout: int = int(os.environ.get("RECHNUNG_JOBROUTER_TIMEOUT", "30"))
     max_retries: int = int(os.environ.get("RECHNUNG_JOBROUTER_RETRIES", "3"))
     # nur diese Status uebergeben (kommagetrennt); leer = alle bestaetigten

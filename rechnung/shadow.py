@@ -112,11 +112,34 @@ def record(store, res, operator: str = "") -> dict:
     return rec
 
 
+def record_feedback_correction(store, sha256: str, corrected_fields: list[str],
+                               operator: str = "") -> dict | None:
+    """Eine spaeter eintreffende Rueckmeldung (z.B. aus JobRouter, siehe
+    ``jobrouter.apply_feedback``) als nachtraegliche Korrektur im
+    Schattenbetrieb nachtragen -- eine vorher als "wuerde durchlassen"
+    gewertete Rechnung, die sich im Nachhinein als falsch herausstellt,
+    zaehlt dann als Fehlentscheidung. Haengt einen NEUEN Eintrag an
+    (append-only wie ``record``); ``stats()`` wertet je sha256 den
+    zuletzt angehaengten Eintrag."""
+    prev = next((r for r in store.shadow_log() if r.get("sha256") == sha256), None)
+    if prev is None or not corrected_fields:
+        return None
+    merged = sorted(set(prev.get("corrected") or []) | set(corrected_fields))
+    rec = dict(prev, corrected=merged,
+              wrong=bool(prev.get("would_pass")) and bool(merged),
+              ts=time.strftime("%Y-%m-%dT%H:%M:%S%z"), operator=operator or "?")
+    store.shadow_append(rec)
+    return rec
+
+
 def stats(store) -> dict:
-    """Tabelle je Lieferant (ein Eintrag je Rechnung, siehe ``record``)."""
+    """Tabelle je Lieferant (ein Eintrag je Rechnung, siehe ``record``).
+    Je sha256/Datei zaehlt der zuletzt angehaengte Eintrag -- eine spaetere
+    Rueckmeldung (``record_feedback_correction``) kann die urspruengliche
+    Entscheidung also nachtraeglich zu einer Fehlentscheidung machen."""
     latest: dict[str, dict] = {}
     for r in store.shadow_log():
-        latest.setdefault(r.get("sha256") or r.get("file"), r)
+        latest[r.get("sha256") or r.get("file")] = r
     rows: dict[str, dict] = {}
     for r in latest.values():
         key = r.get("supplier_id") or "(unbekannt)"
