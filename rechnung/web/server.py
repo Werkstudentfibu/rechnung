@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from .. import billing
 from .. import einvoice
+from .. import learn
 from .. import pdf as pdfmod
 from .. import semantic
 from ..billing import BillingAddress
@@ -269,14 +270,17 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                             current[fname] = {"value": fr.value, "raw": fr.raw,
                                               "confidence": fr.confidence, "source": fr.source}
 
-                # Mix in corrections
-                for fname, fval in store.corrections(doc.sha256).items():
-                    current[fname] = {"value": fval, "raw": str(fval), "confidence": 1.0, "source": "manual"}
                 tpl_fields = [{"name": f.name, "value_type": f.value_type,
                                "required": f.required} for f in chosen.fields]
                 if chosen.line_items:
                     tpl_line_items = chosen.line_items.to_dict()
                     line_items = apply_line_items(doc, chosen.line_items)
+
+        # Manuelle Korrekturen gewinnen immer -- auch ohne Template: dann sind
+        # sie die Werte, die der Mensch bestaetigt und aus denen Stufe 1 die
+        # Vorlage lernt (learn.py).
+        for fname, fval in store.corrections(doc.sha256).items():
+            current[fname] = {"value": fval, "raw": str(fval), "confidence": 1.0, "source": "manual"}
 
         # Kein Template fuer diesen Lieferanten (oder Lieferant unbekannt):
         # aehnliche bekannte Lieferanten mit Template als Anlern-Starthilfe
@@ -464,12 +468,46 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                              "extraction": {k: {"value": v.value, "confidence": v.confidence}
                                             for k, v in apply_template(doc, tpl).items()}})
 
+    def _log_confirmed(path: Path, res, template_id: str | None, variant: str | None,
+                       extraction: str | None = None) -> None:
+        """Journal-Eintrag + JSON/CSV-Ausgabe einer gerade bestaetigten Rechnung."""
+        fields = res.fields
+
+        def fv(name):
+            return fields[name].value if name in fields else None
+
+        rec = {
+            "file": path.name, "sha256": res.sha256,
+            "supplier_id": res.supplier_id, "supplier_name": res.supplier_name,
+            "template_id": template_id, "variant": variant,
+            "billing_address_id": res.billing_address_id,
+            "billing_address_name": res.billing_address_name,
+            "rechnungsnummer": fv("rechnungsnummer"),
+            "rechnungsdatum": fv("rechnungsdatum"),
+            "netto": fv("netto"),
+            "ust_betrag": fv("ust_betrag"),
+            "brutto": fv("brutto"),
+            "tax_breakdown": res.tax_breakdown,
+            "line_items": res.line_items,
+        }
+        if extraction:
+            rec["extraction"] = extraction
+            rec["status"] = res.status
+        store.mark_processed(rec)
+        out = {k: v.value for k, v in fields.items()}
+        out["_positionen"] = res.line_items
+        out["_ust_aufstellung"] = res.tax_breakdown
+        if variant and variant != "standard":
+            addr = store.address(variant)
+            out["rechnungsadresse"] = addr.name if addr else variant
+        store.write_output(path.stem, out)
+
     @app.post("/api/confirm")
     def confirm(body: ConfirmPost) -> JSONResponse:
         from ..config import operator as _operator
 
         if body.template_id is None:
-            return _confirm_einvoice(body.file, _operator())
+            return _confirm_untemplated(body.file, _operator())
         tpl = store.template(body.template_id)
         if tpl is None:
             raise HTTPException(404, "Template nicht gefunden")
@@ -485,59 +523,39 @@ def create_app(store: Store, samples: Path) -> FastAPI:
 
         # Volle Pipeline -> feste Werte, Positionen, USt-Aufstellung, Pruefungen
         res = process(path, store)
-        fields = res.fields
-        rn = fields.get("rechnungsnummer")
-        store.mark_processed({
-            "file": path.name, "sha256": doc.sha256,
-            "supplier_id": tpl.supplier_id, "supplier_name": res.supplier_name,
-            "template_id": tpl.id, "variant": tpl.variant,
-            "billing_address_id": res.billing_address_id,
-            "billing_address_name": res.billing_address_name,
-            "rechnungsnummer": (rn.value if rn else None),
-            "rechnungsdatum": (fields["rechnungsdatum"].value
-                               if "rechnungsdatum" in fields else None),
-            "netto": (fields["netto"].value if "netto" in fields else None),
-            "ust_betrag": (fields["ust_betrag"].value
-                           if "ust_betrag" in fields else None),
-            "brutto": (fields["brutto"].value if "brutto" in fields else None),
-            "tax_breakdown": res.tax_breakdown,
-            "line_items": res.line_items,
-        })
-        out = {k: v.value for k, v in fields.items()}
-        out["_positionen"] = res.line_items
-        out["_ust_aufstellung"] = res.tax_breakdown
-        if tpl.variant and tpl.variant != "standard":
-            addr = store.address(tpl.variant)
-            out["rechnungsadresse"] = addr.name if addr else tpl.variant
-        store.write_output(path.stem, out)
-        return JSONResponse({"confirmations": tpl.confirmations, "secured": tpl.secured})
+        _log_confirmed(path, res, tpl.id, tpl.variant)
+        # Stufe 1: aus den eben bestaetigten Werten das Template ergaenzen/
+        # praezisieren (gesicherte Templates werden nur ergaenzt).
+        learned = learn.learn_from_confirmed(store, res, doc, _operator())
+        return JSONResponse({"confirmations": tpl.confirmations, "secured": tpl.secured,
+                             "learned": learned.to_dict()})
 
-    def _confirm_einvoice(file: str, operator: str) -> JSONResponse:
+    def _confirm_untemplated(file: str, operator: str) -> JSONResponse:
+        """Bestaetigen ohne Template: E-Rechnung (Werte aus dem XML) oder ein
+        PDF, dessen Werte der Mensch eingetippt/korrigiert bzw. aus der KI-
+        Extraktion uebernommen und geprueft hat. Aus Letzterem lernt Stufe 1
+        automatisch ein Template fuer den Lieferanten."""
         path = _resolve(file)
+        if einvoice.load(path) is not None:
+            return _confirm_einvoice(path, operator)
         res = process(path, store)
-        if res.extraction != EXTRACT_EINVOICE:
-            raise HTTPException(400, "Keine E-Rechnung -- Bestaetigen braucht ein Template")
+        if not any(f.source not in ("library", "missing") for f in res.fields.values()):
+            raise HTTPException(400, "Keine Werte zum Bestaetigen -- erst Werte eintragen "
+                                     "oder Template anlernen")
         store.mark_confirmed(res.sha256, operator)
-        fields = res.fields
+        if not store.seen_sha_template(res.sha256, res.template_id):
+            _log_confirmed(path, res, res.template_id, res.template_variant,
+                           extraction=res.extraction)
+        learned = learn.learn_from_confirmed(store, res, pdfmod.load(path), operator)
+        return JSONResponse({"confirmed": True, "status": res.status,
+                             "confirmations": 0, "secured": False,
+                             "learned": learned.to_dict()})
+
+    def _confirm_einvoice(path: Path, operator: str) -> JSONResponse:
+        res = process(path, store)
+        store.mark_confirmed(res.sha256, operator)
         if not store.seen_sha_template(res.sha256, None):
-            store.mark_processed({
-                "file": path.name, "sha256": res.sha256,
-                "supplier_id": res.supplier_id, "supplier_name": res.supplier_name,
-                "template_id": None, "variant": None, "extraction": EXTRACT_EINVOICE,
-                "billing_address_id": None, "billing_address_name": None,
-                "status": res.status,
-                "rechnungsnummer": fields["rechnungsnummer"].value if "rechnungsnummer" in fields else None,
-                "rechnungsdatum": fields["rechnungsdatum"].value if "rechnungsdatum" in fields else None,
-                "netto": fields["netto"].value if "netto" in fields else None,
-                "ust_betrag": fields["ust_betrag"].value if "ust_betrag" in fields else None,
-                "brutto": fields["brutto"].value if "brutto" in fields else None,
-                "tax_breakdown": res.tax_breakdown,
-                "line_items": res.line_items,
-            })
-        out = {k: v.value for k, v in fields.items()}
-        out["_positionen"] = res.line_items
-        out["_ust_aufstellung"] = res.tax_breakdown
-        store.write_output(path.stem, out)
+            _log_confirmed(path, res, None, None, extraction=EXTRACT_EINVOICE)
         return JSONResponse({"confirmed": True, "extraction": EXTRACT_EINVOICE,
                              "status": res.status})
 

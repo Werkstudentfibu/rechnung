@@ -329,10 +329,7 @@ def _process_einvoice(path: Path, inv, store: Store) -> Result:
     if supplier is not None:
         _inject_library_fields(res.fields, supplier)
 
-    for fname, fval in store.corrections(res.sha256).items():
-        vtype = STANDARD_FIELDS.get(fname, ("text",))[0]
-        value, ok = coerce(str(fval), vtype)
-        res.fields[fname] = FieldResult(fname, value if ok else fval, str(fval), 1.0, "manual")
+    _apply_corrections(res.fields, store.corrections(res.sha256))
 
     res.line_items = [dict(p) for p in inv.positionen]
     res.tax_breakdown = _tax_breakdown(res.fields, [])
@@ -346,6 +343,28 @@ def _process_einvoice(path: Path, inv, store: Store) -> Result:
     res.status = AUTO if (supplier is not None and checks_ok
                           and res.overall_confidence >= CONF_MIN) else REVIEW
     return res
+
+
+def _apply_corrections(fields: dict[str, FieldResult], corrections: dict,
+                       type_map: dict[str, str] | None = None) -> None:
+    for fname, fval in corrections.items():
+        vtype = (type_map or {}).get(fname) or STANDARD_FIELDS.get(fname, ("text",))[0]
+        value, ok = coerce(str(fval), vtype)
+        fields[fname] = FieldResult(fname, value if ok else fval, str(fval), 1.0, "manual")
+
+
+def _finish_untemplated(res: Result, doc, supplier, store: Store) -> None:
+    """Rechnung ohne Template (Lieferant unbekannt oder noch nicht angelernt):
+    Korrekturen trotzdem einmischen und, sobald Werte da sind, pruefen. Damit
+    kann ein Mensch die Werte direkt eintippen und bestaetigen -- aus genau
+    diesen bestaetigten Werten lernt learn.py dann das Template (Stufe 1),
+    statt dass jeder Anker von Hand angeklickt werden muss. Der Status bleibt
+    ``no_template``/``unknown_supplier``."""
+    _apply_corrections(res.fields, store.corrections(doc.sha256))
+    if not any(f.source != "library" for f in res.fields.values()):
+        return
+    res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
+    res.checks = run_all(res.fields, supplier, store.seen_invoice, res.line_items)
 
 
 def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
@@ -367,6 +386,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     match = identify(doc, store.suppliers())
     if not match:
         res.status = UNKNOWN
+        _finish_untemplated(res, doc, None, store)
         return res
 
     supplier, score = match
@@ -383,6 +403,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     if tpl is None:
         res.status = NO_TEMPLATE
         _inject_library_fields(res.fields, supplier)
+        _finish_untemplated(res, doc, supplier, store)
         return res
 
     res.template_id = tpl.id
@@ -412,12 +433,8 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
                 res.fields[name] = fr
 
     # Manuelle Korrekturen fuer genau diese Rechnung (sha256) gewinnen immer.
-    _type_map = {f.name: f.value_type for f in tpl.fields}
-    for fname, fval in store.corrections(doc.sha256).items():
-        vtype = _type_map.get(fname) or (STANDARD_FIELDS.get(fname, ("text",))[0])
-        value, ok = coerce(str(fval), vtype)
-        res.fields[fname] = FieldResult(fname, value if ok else fval, str(fval),
-                                        1.0, "manual")
+    _apply_corrections(res.fields, store.corrections(doc.sha256),
+                       {f.name: f.value_type for f in tpl.fields})
 
     if tpl.line_items:
         res.line_items = apply_line_items(doc, tpl.line_items)

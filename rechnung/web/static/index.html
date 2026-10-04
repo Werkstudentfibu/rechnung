@@ -292,10 +292,10 @@ function renderInvoice(d) {
   const bar = document.createElement('div'); bar.style.marginTop = '8px';
   bar.innerHTML = `
     <button onclick="saveTemplate()">Template speichern</button>
-    ${STATE.tid ? `<button class="ghost" onclick="confirmTpl()">Extraktion bestätigen${STATE.tid ? ' (b)' : ''}</button>` : ''}
+    ${canConfirm() ? `<button class="ghost" onclick="confirmTpl()">Extraktion bestätigen (b)</button>` : ''}
     <button class="ghost" onclick="addCustomField()">+ eigenes Feld</button>
     <button class="ghost" onclick="toggleLi()">Positionstabelle ${STATE.li.active ? 'ausblenden' : 'anlernen'}</button>
-    <span class="hint">Feld-Zeile wählen · Klick = Wert · Shift+Klick = Anker (Label)${STATE.tid ? ' · Taste „b" = bestätigen + nächste' : ''}</span>
+    <span class="hint">Feld-Zeile wählen · Klick = Wert · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = bestätigen + nächste' : ''}</span>
     <span id="msg" class="hint"></span>`;
   fbox.appendChild(bar);
 
@@ -663,6 +663,22 @@ async function clearCorrection(field) {
   $('#msg').textContent = `Korrektur für ${field} zurückgenommen`;
 }
 
+// Bestaetigen geht mit Template ODER -- ohne Template -- sobald Werte da
+// sind (eingetippte Korrekturen / KI-Extraktion). Aus solchen bestaetigten
+// Werten lernt der Server die Vorlage automatisch (Stufe 1).
+function canConfirm() {
+  if (!STATE) return false;
+  if (STATE.tid) return true;
+  return Object.values(STATE.current || {}).some(
+    v => v && v.source !== 'library' && v.source !== 'missing');
+}
+
+function learnedMsg(r) {
+  const l = r && r.learned;
+  if (!l || !l.saved) return '';
+  return ` · Vorlage ${l.created ? 'gelernt' : 'ergänzt'}: ${l.learned.join(', ')}`;
+}
+
 async function confirmTpl() {
   // Naechste Datei VOR dem Neuladen merken -- loadList() baut #list komplett
   // neu auf, danach ist die alte Reihenfolge/Position weg.
@@ -677,9 +693,9 @@ async function confirmTpl() {
   if (next) {
     const row = document.querySelector(`#list .row[data-file="${CSS.escape(next)}"]`);
     openInvoice(next, row);
-    $('#msg').textContent = `bestätigt ${r.confirmations}× ${r.secured ? '· GESICHERT' : ''} – nächste Rechnung geöffnet`;
+    $('#msg').textContent = `bestätigt ${r.confirmations}× ${r.secured ? '· GESICHERT' : ''}${learnedMsg(r)} – nächste Rechnung geöffnet`;
   } else {
-    $('#msg').textContent = `bestätigt ${r.confirmations}× ${r.secured ? '· GESICHERT' : ''} – keine weitere Rechnung in der Liste`;
+    $('#msg').textContent = `bestätigt ${r.confirmations}× ${r.secured ? '· GESICHERT' : ''}${learnedMsg(r)} – keine weitere Rechnung in der Liste`;
   }
 }
 
@@ -691,7 +707,7 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key !== 'b' || ev.ctrlKey || ev.metaKey || ev.altKey) return;
   const tag = document.activeElement && document.activeElement.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-  if (!STATE || !STATE.tid) return;
+  if (!canConfirm()) return;
   ev.preventDefault();
   confirmTpl();
 });

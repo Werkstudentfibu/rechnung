@@ -192,3 +192,73 @@ def coerce(raw: str, value_type: str):
         m = re.search(r"[A-Za-z0-9][\w\-/.]*", raw)
         return (m.group(0) if m else raw), bool(m)
     return raw, True
+
+
+# ---- Wert-Abgleich: steht ein (bestaetigter/vorgeschlagener) Wert im PDF? ----
+# Gemeinsame Normalisierung fuer das automatische Vorlagen-Lernen (learn.py:
+# wo steht der bestaetigte Wert?) und die Halluzinations-Pruefung der KI-
+# Extraktion (semantic.py: steht der Modellwert ueberhaupt im Text?). Beide
+# muessen dieselbe Vorstellung von "gleicher Wert" haben -- sonst lernt das
+# eine, was das andere verwirft.
+
+# Ein Wort-Fenster gilt nur dann als Betrag, wenn es (nach Abzug von
+# Waehrung/Prozent) ganz aus einer Zahl besteht -- sonst "findet" man den
+# Betrag 2026 in "RE-2026-00042".
+_AMOUNT_FULL_RE = re.compile(
+    r"-?\d{1,3}(?:[.\s ]\d{3})*,\d{1,2}|-?\d{1,3}(?:,\d{3})*\.\d{1,2}"
+    r"|-?\d+[.,]\d{1,2}|-?\d+"
+)
+_CURRENCY_RE = re.compile(r"(?i)^(eur|euro|chf|usd|€|\$|%)+|(eur|euro|chf|usd|€|\$|%)+$")
+MAX_SPAN = 4  # laengste Wortfolge, die als ein Wert gilt ("14. Februar 2026")
+
+
+def compact(s) -> str:
+    """Nur Buchstaben/Ziffern, gross -- 'RE-2026/00042' == 're 2026 00042'."""
+    return re.sub(r"[^A-Z0-9]", "", str(s or "").upper().translate(
+        str.maketrans({"Ä": "AE", "Ö": "OE", "Ü": "UE"})))
+
+
+def _amount_of(raw: str) -> float | None:
+    t = raw.strip().rstrip(":;")
+    for _ in range(2):
+        t = _CURRENCY_RE.sub("", t).strip()
+    if not t or not _AMOUNT_FULL_RE.fullmatch(t):
+        return None
+    return parse_amount(t)
+
+
+def same_value(raw: str, value, value_type: str) -> bool:
+    """Beschreibt der Rohtext ``raw`` (ein Wort oder eine kurze Wortfolge aus
+    dem PDF) denselben Wert wie ``value``? Betraege/Datum werden geparst
+    (1.190,00 == 1190.00, 14.02.2026 == 2026-02-14 == 14. Februar 2026),
+    Nummern/IBAN/USt-IdNr ohne Trenn-/Leerzeichen verglichen."""
+    if value is None or value == "" or not (raw or "").strip():
+        return False
+    if value_type == "amount":
+        want = value if isinstance(value, (int, float)) else parse_amount(str(value))
+        got = _amount_of(raw)
+        return want is not None and got is not None and abs(got - float(want)) < 0.005
+    if value_type == "date":
+        want = value if isinstance(value, date) else parse_date(str(value))
+        # parse_date sucht nur irgendwo im Text -- hier muss das Fenster
+        # selbst datumsfoermig sein, keine Beschriftung drumherum.
+        if not re.fullmatch(r"[\d.\-/\s]+|\d{1,2}\.?\s+[A-Za-zäöüÄÖÜ]+\.?\s+\d{4}",
+                            raw.strip().rstrip(",;")):
+            return False
+        return want is not None and parse_date(raw) == want
+    if value_type in ("number", "iban", "ustid"):
+        a, b = compact(raw), compact(value)
+        return bool(a) and a == b
+    return bool(norm(raw)) and norm(raw) == norm(str(value))
+
+
+def value_in_text(text: str, value, value_type: str) -> bool:
+    """Kommt ``value`` irgendwo im Volltext vor (Wortfenster bis MAX_SPAN)?"""
+    toks = (text or "").split()
+    for i in range(len(toks)):
+        for n in range(1, MAX_SPAN + 1):
+            if i + n > len(toks):
+                break
+            if same_value(" ".join(toks[i:i + n]), value, value_type):
+                return True
+    return False
