@@ -124,14 +124,32 @@ def _jaccard(a: set, b: set) -> float:
     return len(a & b) / len(a | b)
 
 
+def build_identifier_index(suppliers: list[Supplier]) -> dict[tuple[str, str], set[str]]:
+    """USt-IdNr/IBAN -> Menge der Lieferanten-IDs, die diese Kennung fuehren.
+    Einmal aus der Bibliothek aufgebaut und gecacht (``Store.supplier_index``,
+    SPEC Effizienz-Baustein 4) -- erspart bei einem eindeutigen Treffer das
+    Fingerprint-/Domain-/Namens-Scoring ueber die ganze Bibliothek. Die
+    Steuernummer ist bewusst NICHT Teil dieses Index: ihr Format ist je
+    Bundesland uneinheitlich, eine Freitext-Erkennung im Rechnungstext waere
+    riskant (falsche Treffer) -- sie bleibt reiner Stammdaten-Abgleich
+    (``cross_check``)."""
+    idx: dict[tuple[str, str], set[str]] = {}
+    for s in suppliers:
+        for u in s.ustids:
+            idx.setdefault(("ustid", u), set()).add(s.id)
+        for i in s.ibans:
+            idx.setdefault(("iban", i), set()).add(s.id)
+    return idx
+
+
 def identify(doc: Document, suppliers: list[Supplier], threshold: float = 0.5,
-            min_margin: float = 0.15):
+            min_margin: float = 0.15, index: dict | None = None):
     """-> (Supplier, score) oder None. Kurzform von ``identify_with_reason``."""
-    return identify_with_reason(doc, suppliers, threshold, min_margin)[0]
+    return identify_with_reason(doc, suppliers, threshold, min_margin, index)[0]
 
 
 def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: float = 0.5,
-                         min_margin: float = 0.15):
+                         min_margin: float = 0.15, index: dict | None = None):
     """-> ((Supplier, score) oder None, Grund).
 
     Einzige Quelle fuer die Lieferanten-Identitaet ist die Bibliothek
@@ -139,21 +157,39 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
     angelegt oder per KI abgeleitet. Kein eindeutiger Treffer -> ``None`` und
     ein Grund fuer den Menschen (Rechnung wird zurueckgestellt).
 
-    Bei zu knappem Abstand zum zweitbesten Treffer (< ``min_margin``) wird
-    lieber "kein sicherer Treffer" zurückgegeben statt eine mehrdeutige
-    Zuordnung zu raten -- verhindert eine stille Verwechslung zwischen zwei
-    Lieferanten mit ähnlichem Kopf-Layout (z.B. dieselbe Buchhaltungssoftware).
-    Ein exakter Treffer auf USt-IdNr./IBAN gilt als eindeutig genug und
-    überspringt die Margin-Prüfung -- ausser USt-IdNr/IBAN zeigen auf
-    verschiedene Lieferanten (dann mehrdeutig).
+    SPEC Effizienz-Baustein 4: harte Kennungen (USt-IdNr/IBAN) zuerst gegen
+    einen Index abgleichen (``index``, Standard: einmalig aus ``suppliers``
+    aufgebaut -- ``Store.supplier_index()`` cacht ihn ueber mehrere Aufrufe).
+    Ein EINDEUTIGER Treffer entscheidet sofort, ohne das Fingerprint-/Domain-/
+    Namens-Scoring ueber die ganze Bibliothek laufen zu lassen -- ein exakter
+    Treffer soll ohnehin nie von einem bloss aehnlichen Kopf-Layout eines
+    anderen Lieferanten ueberstimmt werden (Betrugsschutz: zeigen USt-IdNr
+    und IBAN auf verschiedene Lieferanten, ist das ein Widerspruch -> Mensch,
+    nie eine stille Entscheidung fuer einen von beiden). Ohne harten Treffer
+    entscheidet wie bisher das Fingerprint-/Domain-/Namens-Scoring -- bei zu
+    knappem Abstand zum zweitbesten Treffer (< ``min_margin``) lieber "kein
+    sicherer Treffer" als eine mehrdeutige Zuordnung zu raten (verhindert
+    eine stille Verwechslung zwischen zwei Lieferanten mit aehnlichem
+    Kopf-Layout, z.B. derselben Buchhaltungssoftware).
     """
+    if not suppliers:
+        return None, "Bibliothek ist leer -- kein Lieferant hinterlegt"
     ids = extract_identifiers(doc)
     ids["ibans"] = ids["ibans"] | find_ibans(doc.text)
+    idx = index if index is not None else build_identifier_index(suppliers)
+    hard_ids: set[str] = set()
+    for u in ids["ustids"]:
+        hard_ids |= idx.get(("ustid", u), set())
+    for i in ids["ibans"]:
+        hard_ids |= idx.get(("iban", i), set())
+    if len(hard_ids) > 1:
+        names = ", ".join(sorted(hard_ids))
+        return None, f"mehrdeutig: USt-IdNr/IBAN passen zu mehreren Lieferanten ({names})"
     text_n = norm(doc.text)
-    scored: list[tuple[Supplier, float, bool]] = []
-    for s in suppliers:
+    if len(hard_ids) == 1:
+        by_id = {s.id: s for s in suppliers}
+        s = by_id[next(iter(hard_ids))]
         score = 0.0
-        hard_hit = bool(ids["ustids"] & set(s.ustids) or ids["ibans"] & set(s.ibans))
         if ids["ustids"] & set(s.ustids):
             score += 0.6
         if ids["ibans"] & set(s.ibans):
@@ -163,19 +199,24 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
         if s.name and norm(s.name) in text_n:
             score += 0.2
         score += 0.3 * _jaccard(ids["fingerprint"], set(s.fingerprint))
-        scored.append((s, round(score, 3), hard_hit))
-    if not scored:
-        return None, "Bibliothek ist leer -- kein Lieferant hinterlegt"
-    hard = [x for x in scored if x[2]]
-    if len(hard) > 1:
-        names = ", ".join(sorted(x[0].id for x in hard))
-        return None, f"mehrdeutig: USt-IdNr/IBAN passen zu mehreren Lieferanten ({names})"
+        return (s, round(score, 3)), ""
+
+    # Kein harter Treffer: wie bisher per Fingerprint/Domain/Name scoren.
+    scored: list[tuple[Supplier, float]] = []
+    for s in suppliers:
+        score = 0.0
+        if ids["domains"] & set(s.domains):
+            score += 0.3
+        if s.name and norm(s.name) in text_n:
+            score += 0.2
+        score += 0.3 * _jaccard(ids["fingerprint"], set(s.fingerprint))
+        scored.append((s, round(score, 3)))
     scored.sort(key=lambda x: x[1], reverse=True)
-    best_s, best_score, best_hard = scored[0]
+    best_s, best_score = scored[0]
     if best_score < threshold:
         return None, "kein Lieferant aus der Bibliothek passt"
-    if len(scored) > 1 and not best_hard:
-        second_s, second_score, _ = scored[1]
+    if len(scored) > 1:
+        second_s, second_score = scored[1]
         if (best_score - second_score) < min_margin:
             return None, (f"mehrdeutig: {best_s.id} / {second_s.id} "
                           f"(Score {best_score} vs. {second_score})")

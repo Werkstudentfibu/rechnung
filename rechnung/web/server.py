@@ -235,7 +235,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             }
             for pg in doc.pages
         ]
-        match = identify(doc, store.suppliers())
+        match = identify(doc, store.suppliers(), index=store.supplier_index())
         suggestion = supplier_from_doc(doc, "", "").to_dict()
         addr_match = billing.detect(doc, store.addresses())
         current = {}
@@ -676,7 +676,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         sup_id = sup_name = None
         try:
             doc = _load(path)
-            match = identify(doc, store.suppliers())
+            match = identify(doc, store.suppliers(), index=store.supplier_index())
             if match:
                 sup_id, sup_name = match[0].id, match[0].name
         except HTTPException:

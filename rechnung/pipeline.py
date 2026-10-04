@@ -678,7 +678,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     # Bibliothek. Kein eindeutiger Treffer -> zurueckgestellt; die Extraktion
     # laeuft trotzdem, damit der Mensch die Werte gleich vor sich hat.
     with timer.stage("lieferant"):
-        match, why = identify_with_reason(doc, store.suppliers())
+        match, why = identify_with_reason(doc, store.suppliers(), index=store.supplier_index())
         addr_check = _billing_check(doc.text, store, res)
     if not match:
         res.hold_reasons.insert(0, f"Lieferant: {why}")

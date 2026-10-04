@@ -97,10 +97,22 @@ class Store:
         self._shadow = self.root / "shadow.jsonl"
         self._events = self.root / "events.jsonl"
         self._processed_cache: list[dict] | None = None
+        self._supplier_index_cache: dict | None = None
 
     # ---- Lieferanten --------------------------------------------------
     def suppliers(self) -> list[Supplier]:
         return [Supplier.from_dict(d) for d in _read_json_safe(self._suppliers, [])]
+
+    def supplier_index(self) -> dict:
+        """USt-IdNr/IBAN -> Lieferanten-IDs (identify.build_identifier_index),
+        gecacht bis zur naechsten Aenderung (SPEC Effizienz-Baustein 4) --
+        erspart bei jeder Rechnung das erneute Aufbauen ueber die ganze
+        Bibliothek."""
+        if self._supplier_index_cache is None:
+            from .identify import build_identifier_index
+
+            self._supplier_index_cache = build_identifier_index(self.suppliers())
+        return self._supplier_index_cache
 
     def save_supplier(self, s: Supplier) -> None:
         rows = {x.id: x for x in self.suppliers()}
@@ -109,6 +121,7 @@ class Store:
             self._suppliers,
             json.dumps([x.to_dict() for x in rows.values()], indent=2, ensure_ascii=False),
         )
+        self._supplier_index_cache = None
 
     def supplier(self, supplier_id: str) -> Supplier | None:
         return next((s for s in self.suppliers() if s.id == supplier_id), None)
@@ -118,6 +131,7 @@ class Store:
         _atomic_write(
             self._suppliers, json.dumps([x.to_dict() for x in rows], indent=2, ensure_ascii=False)
         )
+        self._supplier_index_cache = None
         for t in self.templates_for(supplier_id):
             self.delete_template(t.id)
 
