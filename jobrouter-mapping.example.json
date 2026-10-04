@@ -1,0 +1,16 @@
+{
+  "rechnungsnummer": "InvoiceNumber",
+  "rechnungsdatum": "InvoiceDate",
+  "netto": "NetAmount",
+  "ust_betrag": "VatAmount",
+  "ust_satz": "VatRate",
+  "brutto": "GrossAmount",
+  "bestellnummer": "PONumber",
+  "faelligkeit": "DueDate",
+  "zahlbetrag": "PaymentAmount",
+  "waehrung": "Currency",
+  "iban": "IBAN",
+  "ustid": "VATID",
+  "steuernummer": "TaxNumber",
+  "adresse": "Address"
+}

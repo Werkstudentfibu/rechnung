@@ -23,6 +23,8 @@ rechnung templates                  # gespeicherte Templates
 rechnung schatten                   # Schattenbetrieb: haette das Programm allein richtig gelegen?
 rechnung fehlerbericht              # haeufigste wiederkehrende Fehler/Korrekturen
 rechnung nacht                      # Nachtlauf: JobRouter, Layoutwechsel, Berichte, Gesundheit
+rechnung imap-test                  # IONOS: Anmeldung/Ordner/ungelesen pruefen, ohne abzuholen
+rechnung jobrouter-test              # JobRouter: Erreichbarkeit/Anmeldung pruefen, ohne anzulegen
 ```
 
 `app` und `web` sind dieselbe Oberfläche (gleicher FastAPI-Code) – `app`
@@ -209,6 +211,51 @@ Rückmeldung mit korrigierten Feldern als Korrektur ein (Operator
 `jobrouter`): `store.corrections`, Ereignisprotokoll, Schattenstatistik
 (eine vorher "würde durchlassen" gewertete Rechnung kann so nachträglich
 zur Fehlentscheidung werden) und stößt ggf. Neu-Lernen der Vorlage an.
+
+## JobRouter-Übergabe für den echten Anschluss vorbereiten
+
+Die echten Prozessdaten kommen erst vom JobRouter-Admin des Kunden. Bis
+dahin ist alles Trockenlauf (`RECHNUNG_JOBROUTER_ENABLED` bleibt `0`) und
+**nicht gegen ein echtes JobRouter getestet**:
+
+- Prozessname/-version/Schritt/Benutzer/Rolle sind über
+  `RECHNUNG_JOBROUTER_PROCESS`/`_VERSION`/`_STEP`/`_USER`/`_ROLE`
+  konfigurierbar (siehe `rechnung.env.example`), nicht fest im Code.
+- Die Feldzuordnung (unser Feldname → JobRouter-Feldname) kommt aus einer
+  JSON-Datei (`RECHNUNG_JOBROUTER_MAPPING`, Standard
+  `data/jobrouter-mapping.json`) statt fest im Code -- Beispiel siehe
+  `jobrouter-mapping.example.json`. Ohne diese Datei (oder ohne Eintrag für
+  ein Feld) bleibt der eigene Feldname unverändert.
+- Das Original (PDF bzw. XML bei E-Rechnungen) geht als Anhang mit
+  (`multipart/form-data`, wie es die JobRouter-REST-API für Incidents mit
+  Dateien erwartet -- reine stdlib-Implementierung, kein neues Paket).
+- `rechnung jobrouter-test` prüft nur Erreichbarkeit/Anmeldung (ein GET auf
+  die Basis-URL mit dem konfigurierten Token), **ohne** eine Rechnung
+  anzulegen. `rechnung imap-test` prüft analog Anmeldung + Ordnerliste +
+  Anzahl ungelesener Mails am IONOS-Postfach, **ohne** etwas abzuholen oder
+  als gelesen zu markieren.
+
+### Checkliste: Was wir vom Kunden für den Anschluss brauchen
+
+**IONOS-Postfach:**
+- Host, Port (Standard `imap.ionos.de:993`, SSL)
+- Benutzer (Postfach-Adresse) + Passwort bzw. App-Passwort
+- Quellordner (Standard `INBOX`)
+- Zielordner nach erfolgreicher Abholung (optional -- sonst bleibt die Mail
+  im Quellordner, nur als gelesen markiert)
+
+**JobRouter:**
+- Basis-URL + Zugangsdaten (Bearer-Token oder Benutzer/Passwort -- je
+  nachdem, was die JobRouter-Installation des Kunden verlangt)
+- Prozessname, Prozessversion, Schritt, Benutzer/Rolle, unter denen die
+  Rechnung angelegt werden soll
+- Die JobRouter-Feldnamen für unsere Felder (`rechnungsnummer`,
+  `rechnungsdatum`, `netto`, `ust_betrag`, `ust_satz`, `brutto`,
+  `bestellnummer`, `iban`, `ustid`, `steuernummer`, `adresse`, ...) für
+  `jobrouter-mapping.json`
+- Der Rückmelde-Weg: wie/wo trägt ein Sachbearbeiter eine Korrektur oder
+  Ablehnung in JobRouter ein, und wie liest unser Programm das zurück
+  (REST-Endpunkt, Format) -- siehe "Rückmeldung aus JobRouter" oben
 
 ## Fehler-/Ereignisprotokoll + Fehlerbericht
 

@@ -32,6 +32,37 @@ def _cmd_fetch(args) -> int:
     return 0
 
 
+def _cmd_imap_test(args) -> int:
+    """Anmeldung + Ordnerliste + Anzahl ungelesener Mails pruefen, ohne
+    etwas abzuholen oder zu markieren."""
+    from .config import imap
+    from .ingest import check_connection
+
+    res = check_connection(imap())
+    if args.json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return 0 if res["ok"] is not False else 1
+    mark = {True: "ok", False: "FAIL", None: "-"}[res["ok"]]
+    print(f"[{mark}] {res['detail']}")
+    for f in res.get("folders", []):
+        print(f"   {f}")
+    return 0 if res["ok"] is not False else 1
+
+
+def _cmd_jobrouter_test(args) -> int:
+    """Erreichbarkeit/Anmeldung pruefen, ohne eine Rechnung anzulegen."""
+    from .config import jobrouter as jr_cfg
+    from .jobrouter import check_connection
+
+    res = check_connection(jr_cfg())
+    if args.json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return 0 if res["ok"] is not False else 1
+    mark = {True: "ok", False: "FAIL", None: "-"}[res["ok"]]
+    print(f"[{mark}] {res['detail']}")
+    return 0 if res["ok"] is not False else 1
+
+
 def _cmd_push(args) -> int:
     """Bestaetigte Rechnungen aus der Warteschlange an JobRouter uebergeben."""
     from .jobrouter import push_queue
@@ -345,6 +376,16 @@ def main(argv=None) -> int:
     pu = sub.add_parser("push", help="Warteschlange an JobRouter uebergeben")
     pu.add_argument("--json", action="store_true")
     pu.set_defaults(func=_cmd_push)
+
+    it = sub.add_parser("imap-test",
+                        help="IONOS-Postfach: Anmeldung/Ordner/ungelesene Mails pruefen, ohne abzuholen")
+    it.add_argument("--json", action="store_true")
+    it.set_defaults(func=_cmd_imap_test)
+
+    jt = sub.add_parser("jobrouter-test",
+                        help="JobRouter: Erreichbarkeit/Anmeldung pruefen, ohne eine Rechnung anzulegen")
+    jt.add_argument("--json", action="store_true")
+    jt.set_defaults(func=_cmd_jobrouter_test)
 
     sub.add_parser("suppliers", help="Bekannte Lieferanten").set_defaults(func=_cmd_suppliers)
     sub.add_parser("templates", help="Gespeicherte Templates").set_defaults(func=_cmd_templates)

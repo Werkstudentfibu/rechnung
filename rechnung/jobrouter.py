@@ -27,16 +27,49 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import JobRouterConfig, jobrouter as _jr_cfg
 
 
+def load_mapping(cfg: JobRouterConfig | None = None) -> dict[str, str]:
+    """Feldzuordnung unser Feldname -> JobRouter-Feldname aus einer JSON-
+    Datei (Standard ``<data>/jobrouter-mapping.json``, Beispiel siehe
+    ``jobrouter-mapping.example.json`` im Projektwurzelverzeichnis) --
+    bewusst nicht fest im Code, da die echten JobRouter-Feldnamen erst vom
+    Kunden kommen. Fehlt die Datei oder ein Feld darin, bleibt der eigene
+    Feldname unveraendert (rein additive Zuordnung, nie Pflicht)."""
+    cfg = cfg or _jr_cfg()
+    p = cfg.mapping_path
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text("utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, str)}
+
+
+def _map_fields(fields: dict, cfg: JobRouterConfig) -> dict:
+    mapping = load_mapping(cfg)
+    return {mapping.get(k, k): v for k, v in fields.items()}
+
+
 def payload_from_result(res: dict, cfg: JobRouterConfig | None = None) -> dict:
-    """Result.to_dict() -> flache Struktur fuer JobRouter."""
+    """Result.to_dict() -> flache Struktur fuer JobRouter. Prozessangaben
+    (Name/Version/Schritt/Benutzer/Rolle, siehe config.JobRouterConfig) und
+    die Feldzuordnung (``load_mapping``) sind konfigurierbar, nicht fest im
+    Code -- die echten Werte kommen spaeter vom JobRouter-Admin des Kunden."""
+    cfg = cfg or _jr_cfg()
     fields = res.get("fields", {})
+    flat_fields = {k: (v.get("value") if isinstance(v, dict) else v)
+                  for k, v in fields.items()}
     return {
+        "process": {"name": cfg.process, "version": cfg.process_version, "step": cfg.step},
+        "user": cfg.user,
+        "role": cfg.role,
         "sourceFile": Path(res.get("file", "")).name,
         "sha256": res.get("sha256"),
         "status": res.get("status"),
@@ -45,20 +78,40 @@ def payload_from_result(res: dict, cfg: JobRouterConfig | None = None) -> dict:
         "billingAddress": res.get("billing_address_name"),
         "billingAddressId": res.get("billing_address_id"),
         "confidence": res.get("overall_confidence"),
-        "fields": {k: (v.get("value") if isinstance(v, dict) else v)
-                   for k, v in fields.items()},
+        "fields": _map_fields(flat_fields, cfg),
         "taxBreakdown": res.get("tax_breakdown", []),
         "lineItems": res.get("line_items", []),
         "checks": {c["name"]: c["ok"] for c in res.get("checks", [])},
     }
 
 
-def _post(cfg: JobRouterConfig, body: dict) -> dict:
+def _build_multipart(fields: dict[str, str],
+                     files: list[tuple[str, str, bytes, str]]) -> tuple[bytes, str]:
+    """Nur stdlib: ``multipart/form-data``-Rumpf bauen, wie es die
+    JobRouter-REST-API fuer Incidents mit Datei-Anhang erwartet (ein
+    Textfeld ``data`` mit der JSON-Nutzlast + ein Datei-Feld). ``files`` ist
+    (Feldname, Dateiname, Inhalt, Content-Type)."""
+    boundary = uuid.uuid4().hex
+    parts: list[bytes] = []
+    for name, value in fields.items():
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
+            f'{value}\r\n'.encode("utf-8")
+        )
+    for name, filename, content, content_type in files:
+        header = (f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; '
+                 f'filename="{filename}"\r\nContent-Type: {content_type}\r\n\r\n').encode("utf-8")
+        parts.append(header + content + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
+
+
+def _send(cfg: JobRouterConfig, data: bytes, headers: dict) -> dict:
+    """Gemeinsamer Retry/Backoff-Kern fuer JSON- (``_post``) und
+    Multipart-Requests (``_post_with_attachment``)."""
     url = f"{cfg.base_url}{cfg.endpoint}"
-    data = json.dumps(body).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
     if cfg.token:
-        headers["Authorization"] = f"Bearer {cfg.token}"
+        headers = {**headers, "Authorization": f"Bearer {cfg.token}"}
         if not cfg.base_url.lower().startswith("https://"):
             print("WARNUNG: RECHNUNG_JOBROUTER_URL ist kein https:// -- der Bearer-Token "
                   "geht im Klartext ueber das Netzwerk.", file=sys.stderr)
@@ -79,8 +132,29 @@ def _post(cfg: JobRouterConfig, body: dict) -> dict:
     return {"sent": False, "error": last, "attempts": cfg.max_retries}
 
 
-def submit(res: dict, out_dir: str | Path, cfg: JobRouterConfig | None = None) -> dict:
-    """Einzelne Rechnung uebergeben (bzw. Trockenlauf schreiben)."""
+def _post(cfg: JobRouterConfig, body: dict) -> dict:
+    return _send(cfg, json.dumps(body).encode("utf-8"), {"Content-Type": "application/json"})
+
+
+def _post_with_attachment(cfg: JobRouterConfig, body: dict, pdf_path: Path) -> dict:
+    """Wie ``_post``, aber mit dem Original (PDF/XML) als Anhang -- wie es
+    die JobRouter-REST-API fuer Incidents mit Dateien erwartet (nur
+    stdlib). **Noch nicht gegen ein echtes JobRouter getestet** -- Feldname
+    und Aufbau (ein JSON-Textfeld + ein Datei-Feld) sind eine plausible
+    Annahme, keine bestaetigte Vorgabe."""
+    content_type = "application/pdf" if pdf_path.suffix.lower() == ".pdf" else "application/xml"
+    data, mp_content_type = _build_multipart(
+        {"data": json.dumps(body, ensure_ascii=False)},
+        [("file", pdf_path.name, pdf_path.read_bytes(), content_type)],
+    )
+    return _send(cfg, data, {"Content-Type": mp_content_type})
+
+
+def submit(res: dict, out_dir: str | Path, cfg: JobRouterConfig | None = None,
+          pdf_path: str | Path | None = None) -> dict:
+    """Einzelne Rechnung uebergeben (bzw. Trockenlauf schreiben). Ist
+    ``pdf_path`` gesetzt und vorhanden, geht das Original als Anhang mit
+    (Multipart statt reinem JSON)."""
     cfg = cfg or _jr_cfg()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -92,7 +166,36 @@ def submit(res: dict, out_dir: str | Path, cfg: JobRouterConfig | None = None) -
         return {"sent": False, "dry_run": str(dry)}
     if cfg.allow_status and res.get("status") not in cfg.allow_status:
         return {"sent": False, "skipped": f"status {res.get('status')} nicht in allow_status"}
+    pdf = Path(pdf_path) if pdf_path else None
+    if pdf is not None and pdf.exists():
+        return _post_with_attachment(cfg, body, pdf)
     return _post(cfg, body)
+
+
+def check_connection(cfg: JobRouterConfig | None = None) -> dict:
+    """Erreichbarkeit/Anmeldung pruefen, OHNE eine Rechnung anzulegen
+    (``rechnung jobrouter-test``). Da die genaue JobRouter-API noch nicht
+    bekannt ist, ist das ein bestmoeglicher generischer Check (GET auf die
+    Basis-URL mit demselben Bearer-Token wie ``_post``) -- **noch nicht
+    gegen ein echtes JobRouter getestet.**"""
+    cfg = cfg or _jr_cfg()
+    if not cfg.enabled:
+        return {"ok": None, "detail": "RECHNUNG_JOBROUTER_ENABLED ist nicht 1 -- Trockenlauf"}
+    if not cfg.base_url:
+        return {"ok": False, "detail": "RECHNUNG_JOBROUTER_URL nicht gesetzt"}
+    headers = {}
+    if cfg.token:
+        headers["Authorization"] = f"Bearer {cfg.token}"
+    req = urllib.request.Request(cfg.base_url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=cfg.timeout) as r:  # noqa: S310
+            return {"ok": True, "detail": f"HTTP {r.status}"}
+    except urllib.error.HTTPError as e:
+        # Eine Antwort -- auch ein Fehlercode -- zeigt immerhin, dass der
+        # Server erreichbar ist; 401/403 deuten auf ein Anmeldeproblem hin.
+        return {"ok": e.code not in (401, 403), "detail": f"HTTP {e.code}"}
+    except (urllib.error.URLError, OSError) as e:
+        return {"ok": False, "detail": f"{type(e).__name__}: {e}"}
 
 
 # ---- Warteschlange -------------------------------------------------------
@@ -126,7 +229,8 @@ def push_queue(data_root: str | Path, cfg: JobRouterConfig | None = None,
     results = []
     for f in sorted(q.glob("*.json")):
         res = json.loads(f.read_text("utf-8"))
-        r = submit(res, out_dir, cfg)
+        pdf_path = _find_archived(root, res.get("sha256"))
+        r = submit(res, out_dir, cfg, pdf_path=pdf_path)
         r["file"] = res.get("file")
         results.append(r)
         if r.get("sent") or r.get("dry_run") or r.get("skipped"):
@@ -292,7 +396,7 @@ def apply_feedback(store, feedback: list[Feedback], operator: str = "jobrouter")
         learned = None
         if fb.fields:
             shadow.record_feedback_correction(store, fb.sha256, list(fb.fields), operator)
-            archived = _find_archived(store, fb.sha256)
+            archived = _find_archived(store.root, fb.sha256)
             if archived is not None:
                 doc, o = load_document(archived, store)
                 if doc is not None:
@@ -303,10 +407,12 @@ def apply_feedback(store, feedback: list[Feedback], operator: str = "jobrouter")
     return out
 
 
-def _find_archived(store, sha256: str) -> Path | None:
+def _find_archived(data_root: str | Path, sha256: str | None) -> Path | None:
     """Pfad des unveraendert archivierten Originals (``store.archive_pdf``)
     zu einem sha256 -- egal ob ``.pdf`` oder ``.xml`` (E-Rechnung)."""
-    arch = store.root / "archive"
+    if not sha256:
+        return None
+    arch = Path(data_root) / "archive"
     for suffix in (".pdf", ".xml"):
         p = arch / f"{sha256}{suffix}"
         if p.exists():

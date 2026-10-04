@@ -168,3 +168,35 @@ def fetch(cfg: ImapConfig | None = None, dest: Path | None = None,
         except Exception:
             pass
     return FetchResult(saved, mails, dry_run)
+
+
+def check_connection(cfg: ImapConfig | None = None) -> dict:
+    """Anmeldung + Ordnerliste + Anzahl ungelesener Mails pruefen, OHNE
+    irgendetwas abzuholen oder als gelesen zu markieren (``rechnung
+    imap-test``). ``SELECT ... readonly`` verhindert zusaetzlich jede
+    Status-Aenderung durch den Check selbst."""
+    cfg = cfg or ImapConfig()
+    if not cfg.configured:
+        return {"ok": None, "detail": "IMAP nicht konfiguriert (RECHNUNG_IMAP_*)", "folders": []}
+    try:
+        M = imaplib.IMAP4_SSL(cfg.host, cfg.port) if cfg.ssl else imaplib.IMAP4(cfg.host, cfg.port)
+    except OSError as e:
+        return {"ok": False, "detail": f"{type(e).__name__}: {e}", "folders": []}
+    try:
+        M.login(cfg.user, cfg.password)
+        typ, raw = M.list()
+        folders = ([f.decode("utf-8", "replace") for f in raw]
+                  if typ == "OK" and raw and raw[0] else [])
+        M.select(cfg.source_folder, readonly=True)
+        typ2, data = M.search(None, "UNSEEN")
+        unseen = len(data[0].split()) if typ2 == "OK" and data and data[0] else 0
+        return {"ok": True, "detail": f"{len(folders)} Ordner, {unseen} ungelesen in "
+               f"'{cfg.source_folder}'", "folders": folders, "unseen": unseen}
+    except (imaplib.IMAP4.error, OSError) as e:
+        return {"ok": False, "detail": f"{type(e).__name__}: {e}", "folders": []}
+    finally:
+        try:
+            M.logout()
+        except Exception:  # noqa: BLE001 -- Check darf nicht abstuerzen
+            pass
+    return FetchResult(saved, mails, dry_run)

@@ -549,6 +549,41 @@ entsteht kein Mehraufwand (ein Datei-Existenz-Check). Ein Sicherheitsnetz
 (`MAX_WAIT_S`, 6 Stunden) verhindert ein ewiges Haengen, falls eine
 Lock-Datei nach einem Absturz liegen bleibt.
 
+## 7s. JobRouter-Uebergabe fuer den echten Anschluss vorbereiten (2026-10-04)
+
+Die echten Prozessdaten kommen erst vom JobRouter-Admin des Kunden -- bis
+dahin bleibt alles Trockenlauf (`RECHNUNG_JOBROUTER_ENABLED=0`) und
+**nicht gegen ein echtes JobRouter getestet**.
+
+- `config.JobRouterConfig` bekommt `process`/`process_version`/`step`/
+  `user`/`role` (`RECHNUNG_JOBROUTER_PROCESS`/`_VERSION`/`_STEP`/`_USER`/
+  `_ROLE`) -- fliessen in `jobrouter.payload_from_result()` als eigener
+  `process`-Block + `user`/`role` ein, bewusst konfigurierbar statt fest im
+  Code.
+- `jobrouter.load_mapping()` liest die Feldzuordnung (unser Feldname ->
+  JobRouter-Feldname) aus einer JSON-Datei (`cfg.mapping_path`, Standard
+  `<data>/jobrouter-mapping.json`, `RECHNUNG_JOBROUTER_MAPPING` ueberschreibt
+  den Pfad) -- Beispiel `jobrouter-mapping.example.json` im Projektwurzel-
+  verzeichnis. Fehlt die Datei oder ein Feld darin, bleibt der eigene
+  Feldname unveraendert (additiv, nie Pflicht).
+- `jobrouter._build_multipart`/`_post_with_attachment`: das Original (PDF
+  bzw. XML bei E-Rechnungen, aus `data/archive/`) geht als
+  `multipart/form-data`-Anhang mit, wie es die JobRouter-REST-API fuer
+  Incidents mit Dateien erwartet -- nur stdlib (`uuid` fuer die Boundary),
+  kein neues Paket. `push_queue` findet das archivierte Original automatisch
+  ueber den sha256 und haengt es an; `submit()` faellt ohne Original auf
+  reines JSON zurueck.
+- `rechnung jobrouter-test` (`jobrouter.check_connection`): ein GET auf die
+  Basis-URL mit demselben Bearer-Token wie `_post`, **ohne** eine Rechnung
+  anzulegen. `rechnung imap-test` (`ingest.check_connection`): IMAP-
+  Anmeldung + Ordnerliste + Anzahl ungelesener Mails, **ohne** etwas
+  abzuholen oder als gelesen zu markieren (`SELECT ... readonly`). Beide
+  liefern `ok=None`, wenn die jeweilige Schnittstelle nicht konfiguriert
+  ist (kein Fehlschlag, nur "nichts zu pruefen").
+- README-Checkliste "Was wir vom Kunden fuer den Anschluss brauchen"
+  (IONOS: Host/Benutzer/Passwort/Ordner/Zielordner; JobRouter: URL/Token,
+  Prozess/Version/Schritt, Feldnamen, Rueckmelde-Weg).
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).

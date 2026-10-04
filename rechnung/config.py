@@ -77,6 +77,23 @@ class JobRouterConfig:
         for s in os.environ.get("RECHNUNG_JOBROUTER_ALLOW_STATUS", "auto,review").split(",")
         if s.strip()
     )
+    # Prozessname/-version/Schritt/Benutzer/Rolle: die echten Werte kommen
+    # spaeter vom JobRouter-Admin des Kunden (siehe README-Checkliste "Was
+    # wir vom Kunden fuer den Anschluss brauchen") -- bewusst konfigurierbar
+    # statt fest im Code, da noch unbekannt.
+    process: str = os.environ.get("RECHNUNG_JOBROUTER_PROCESS", "")
+    process_version: str = os.environ.get("RECHNUNG_JOBROUTER_VERSION", "")
+    step: str = os.environ.get("RECHNUNG_JOBROUTER_STEP", "")
+    user: str = os.environ.get("RECHNUNG_JOBROUTER_USER", "")
+    role: str = os.environ.get("RECHNUNG_JOBROUTER_ROLE", "")
+    # Feldzuordnung (unser Feldname -> JobRouter-Feldname) ueber eine
+    # JSON-Datei statt fest im Code -- Beispiel siehe
+    # jobrouter-mapping.example.json. Leer = Standard (<data>/jobrouter-mapping.json).
+    mapping_file: str = os.environ.get("RECHNUNG_JOBROUTER_MAPPING", "")
+
+    @property
+    def mapping_path(self) -> Path:
+        return Path(self.mapping_file) if self.mapping_file else data_dir() / "jobrouter-mapping.json"
 
     @property
     def live(self) -> bool:
