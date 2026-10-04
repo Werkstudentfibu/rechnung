@@ -35,8 +35,10 @@ import email
 import email.header
 import html
 import imaplib
+import io
 import re
 import time
+import zipfile
 from dataclasses import dataclass, field
 from email.message import Message
 from html.parser import HTMLParser
@@ -53,6 +55,19 @@ MAIL_OHNE_ANHANG = "Mail ohne Rechnungsanhang"
 MAIL_NUR_LINK = "nur Link im Mailtext"
 MAIL_TEXT_RECHNUNG = "Rechnung im Mailtext (kein Anhang)"
 MAIL_VERSCHLUESSELT = "Mail verschluesselt (S/MIME/PGP)"
+ANHANG_PDF_PASSWORT = "Anhang verschluesselt (PDF passwortgeschuetzt)"
+ANHANG_ZIP_PASSWORT = "Anhang verschluesselt (ZIP mit Passwort)"
+ANHANG_ZIP_DEFEKT = "ZIP-Anhang nicht lesbar"
+ANHANG_ZIP_GRENZE = "ZIP-Anhang ueberschreitet Sicherheitsgrenze"
+ANHANG_ZIP_LEER = "ZIP-Anhang ohne verwertbare Datei"
+
+# Sicherheitsgrenzen fuer ZIP-Anhaenge (Zip-Bomben): Anzahl Eintraege,
+# entpackte Groesse je Datei und gesamt, Kompressionsverhaeltnis. Ein ZIP
+# im ZIP wird nicht weiter entpackt (-> Mensch).
+ZIP_MAX_FILES = 50
+ZIP_MAX_FILE_BYTES = 50 * 1024 * 1024
+ZIP_MAX_TOTAL_BYTES = 200 * 1024 * 1024
+ZIP_MAX_RATIO = 200
 
 
 def _safe_name(name: str) -> str:
@@ -205,6 +220,10 @@ class MailOutcome:
     human_reason: str = ""
     body_text: str = ""                       # Mailtext (fuer "Rechnung im Mailtext")
     ignored: list[str] = field(default_factory=list)  # nicht verwertbare Anhaenge
+    # Einzelne Anhaenge fuer den Menschen (Name, Inhalt, Grund) -- z.B.
+    # passwortgeschuetztes PDF, ZIP ueber der Sicherheitsgrenze. Die Mail
+    # selbst kann daneben trotzdem verwertbare Anhaenge haben.
+    human_items: list[tuple[str, bytes, str]] = field(default_factory=list)
     from_addr: str = ""
     subject: str = ""
     message_id: str = ""
@@ -219,10 +238,21 @@ def analyse_mail(raw: bytes, extensions: tuple[str, ...] = (".pdf",)) -> MailOut
     if _is_encrypted(msg):
         out.human_reason = MAIL_VERSCHLUESSELT
         return out
-    out.attachments = attachments_from_bytes(raw, extensions)
-    if out.attachments:
-        return out
     exts = tuple(e.lower() for e in extensions)
+    candidates = attachments_from_bytes(raw, tuple(exts) + (".zip",))
+    for att in candidates:
+        if att.filename.lower().endswith(".zip") and ".zip" not in exts:
+            inner, problems = unpack_zip(att, exts)
+            out.attachments += inner
+            out.human_items += problems
+        else:
+            out.attachments.append(att)
+    for att in list(out.attachments):
+        if att.filename.lower().endswith(".pdf") and _pdf_locked(att.content):
+            out.attachments.remove(att)
+            out.human_items.append((att.filename, att.content, ANHANG_PDF_PASSWORT))
+    if out.attachments or out.human_items:
+        return out
     out.ignored = [_safe_name(f) for _p, f, is_att in _parts(msg)
                    if is_att and f and not f.lower().endswith(exts)]
     body, links = mail_body(msg)
@@ -237,6 +267,68 @@ def analyse_mail(raw: bytes, extensions: tuple[str, ...] = (".pdf",)) -> MailOut
     if out.ignored:
         out.human_reason += " (nicht verwertbare Anhaenge: " + ", ".join(out.ignored) + ")"
     return out
+
+
+def _pdf_locked(content: bytes) -> bool:
+    from .pdf import password_protected
+
+    try:
+        return password_protected(content)
+    except Exception:  # noqa: BLE001 -- kaputtes PDF faellt der Pipeline auf
+        return False
+
+
+def unpack_zip(att: Attachment, exts: tuple[str, ...]
+               ) -> tuple[list[Attachment], list[tuple[str, bytes, str]]]:
+    """ZIP-Anhang im Speicher entpacken -> (verwertbare Dateien, Faelle fuer
+    den Menschen). Nie auf die Platte entpacken: Pfadanteile der Eintraege
+    werden verworfen (``../../x.pdf`` -> ``x.pdf``, kein Pfad-Traversal).
+    Sicherheitsgrenzen (``ZIP_MAX_*``) gegen Zip-Bomben werden VOR dem
+    Entpacken aus dem Inhaltsverzeichnis geprueft und beim Lesen noch einmal
+    hart begrenzt. Passwortgeschuetzte Eintraege, verschachtelte ZIPs und
+    Grenzueberschreitungen gehen mit dem ganzen ZIP an den Menschen."""
+    def mk(name: str, content: bytes) -> Attachment:
+        return Attachment(_safe_name(name), content, att.from_addr, att.subject, att.message_id)
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(att.content))
+        infos = [i for i in zf.infolist() if not i.is_dir()]
+    except (zipfile.BadZipFile, OSError, ValueError):
+        return [], [(att.filename, att.content, ANHANG_ZIP_DEFEKT + f": {att.filename}")]
+    if len(infos) > ZIP_MAX_FILES:
+        return [], [(att.filename, att.content,
+                     f"{ANHANG_ZIP_GRENZE}: {len(infos)} Dateien (max. {ZIP_MAX_FILES})")]
+    total = sum(i.file_size for i in infos)
+    for i in infos:
+        ratio = i.file_size / max(i.compress_size, 1)
+        if i.file_size > ZIP_MAX_FILE_BYTES or total > ZIP_MAX_TOTAL_BYTES or (
+                i.file_size > 1024 * 1024 and ratio > ZIP_MAX_RATIO):
+            return [], [(att.filename, att.content,
+                         f"{ANHANG_ZIP_GRENZE}: {att.filename} ({total} Bytes entpackt)")]
+    if any(i.flag_bits & 0x1 for i in infos):
+        return [], [(att.filename, att.content, f"{ANHANG_ZIP_PASSWORT}: {att.filename}")]
+    out: list[Attachment] = []
+    problems: list[tuple[str, bytes, str]] = []
+    for i in infos:
+        base = re.split(r"[\\/]", i.filename)[-1]
+        if not base or base.startswith("."):
+            continue
+        low = base.lower()
+        if low.endswith(".zip"):
+            problems.append((att.filename, att.content,
+                             f"{ANHANG_ZIP_GRENZE}: ZIP im ZIP ({base}) wird nicht entpackt"))
+            return [], problems
+        if not low.endswith(exts):
+            continue
+        with zf.open(i) as fh:
+            data = fh.read(ZIP_MAX_FILE_BYTES + 1)   # harte Grenze, falls Header luegt
+        if len(data) > ZIP_MAX_FILE_BYTES:
+            return [], [(att.filename, att.content, f"{ANHANG_ZIP_GRENZE}: {base}")]
+        if data:
+            out.append(mk(base, data))
+    if not out:
+        problems.append((att.filename, att.content, f"{ANHANG_ZIP_LEER}: {att.filename}"))
+    return out, problems
 
 
 def text_pdf(title: str, text: str) -> bytes:
@@ -296,25 +388,37 @@ def handle_mail(raw: bytes, cfg: ImapConfig, dest: Path, store=None,
     out = analyse_mail(raw, cfg.extensions)
     saved: list[str] = []
     to_human: list[str] = []
+    herkunft = {"von": out.from_addr, "betreff": out.subject,
+                "message_id": out.message_id, "original": "postfach"}
     for att in out.attachments:
         if dry_run:
             saved.append(f"(dry) {att.filename} <- {att.from_addr}")
             continue
         saved.append(str(_save(att, dest)))
+    for name, content, why in out.human_items:
+        if dry_run:
+            to_human.append(f"(dry) {name}: {why}")
+            continue
+        store = store or Store(data_dir())
+        rec = human.ablegen_datei(store, name, content,
+                                  [{"art": human.ART_ANHANG, "grund": why, "felder": []}],
+                                  beilagen={".eml": raw}, herkunft=herkunft)
+        to_human.append(f"{rec['datei'] if rec else name}: {why}")
     if out.human_reason:
         if dry_run:
             to_human.append(f"(dry) {out.human_reason} <- {out.from_addr}")
         else:
             store = store or Store(data_dir())
-            herkunft = {"von": out.from_addr, "betreff": out.subject,
-                        "message_id": out.message_id, "original": "postfach"}
             grund = [{"art": human.ART_MAIL, "grund": out.human_reason, "felder": []}]
             name = _mail_name(out)
             if out.body_text:
-                rec = human.ablegen_datei(
-                    store, name + ".pdf",
-                    text_pdf(f"Mailtext: {out.subject}  (von {out.from_addr})", out.body_text),
-                    grund, beilagen={".eml": raw}, herkunft=herkunft)
+                try:
+                    datei, inhalt = name + ".pdf", text_pdf(
+                        f"Mailtext: {out.subject}  (von {out.from_addr})", out.body_text)
+                except ImportError:  # reportlab fehlt -> Mailtext als .txt
+                    datei, inhalt = name + ".txt", out.body_text.encode("utf-8")
+                rec = human.ablegen_datei(store, datei, inhalt, grund,
+                                          beilagen={".eml": raw}, herkunft=herkunft)
             else:
                 rec = human.ablegen_datei(store, name + ".eml", raw, grund, herkunft=herkunft)
             to_human.append(f"{rec['datei'] if rec else name}: {out.human_reason}")

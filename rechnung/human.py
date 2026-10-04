@@ -104,6 +104,8 @@ def _hold_art(reason: str) -> str:
         return ART_FEHLER
     if reason.startswith("OCR"):
         return ART_OCR
+    if reason.startswith("PDF passwortgeschuetzt"):
+        return ART_ANHANG
     return ART_ZURUECKGESTELLT
 
 
@@ -123,7 +125,8 @@ def gruende(res) -> list[dict]:
                     "felder": ["iban"] if _hold_art(why) == ART_IBAN else []})
     # Abbruch (Zeitgrenze/Fehler) oder Text gar nicht lesbar (OCR nicht
     # verfuegbar/aus): es gibt keine Felder -- die Rueckstellung ist der Grund.
-    if res.aborted or (res.ocr and res.ocr.get("error")):
+    if res.aborted or (res.ocr and res.ocr.get("error")) or any(
+            o["art"] == ART_ANHANG for o in out):
         return out
     if res.status == DEFERRED and not out:
         out.append({"art": ART_ZURUECKGESTELLT, "grund": "zurueckgestellt", "felder": []})

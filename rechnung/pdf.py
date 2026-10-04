@@ -81,3 +81,21 @@ def page_has_text(path: str | Path, index: int) -> bool:
         if index >= len(pdf.pages):
             return False
         return bool((pdf.pages[index].extract_text() or "").strip())
+
+
+PDF_PASSWORD = "PDF passwortgeschuetzt"
+
+
+def password_protected(src: str | Path | bytes) -> bool:
+    """Braucht das PDF ein Passwort zum Oeffnen? Ein PDF, das nur mit
+    Rechte-Einschraenkungen (leeres Benutzerpasswort) verschluesselt ist,
+    laesst sich lesen und zaehlt NICHT. Kaputte PDFs zaehlen ebenfalls
+    nicht -- die faellt die normale Verarbeitung auf."""
+    import pypdfium2 as pdfium
+
+    try:
+        doc = pdfium.PdfDocument(src if not isinstance(src, Path) else str(src))
+    except pdfium.PdfiumError as e:
+        return "password" in str(e).lower()
+    doc.close()
+    return False

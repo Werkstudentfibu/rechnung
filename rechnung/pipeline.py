@@ -646,6 +646,12 @@ def _all_checks(fields, supplier, store: Store, line_items, doc,
 def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     path = Path(path)
     timer = StageTimer()
+    # Passwortgeschuetztes PDF: nichts lesbar, nichts zu raten -> Mensch.
+    if path.suffix.lower() == ".pdf" and pdfmod.password_protected(path):
+        res = Result(file=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                     status=DEFERRED, hold_reasons=[pdfmod.PDF_PASSWORD])
+        _apply_hold(res)
+        return res
     # Stufe 0: E-Rechnung (eigenes XML oder in ein PDF eingebettet). Hat
     # Vorrang vor allem anderen -- dort steht nichts, was geraten werden muss.
     with timer.stage("erechnung"):
