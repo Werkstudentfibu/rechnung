@@ -24,6 +24,7 @@ der IT benötigt wird (Abschnitt 13).
 | Freigabe je Rechnung | immer Klick im Programm | Testphase: Klick im Programm. Modus „autonom“: sichere Rechnungen ohne Klick an JobRouter, dort Freigabe durch einen Menschen |
 | Unsichere Rechnungen | Anzeige „review“ | eigener Ordner „Menschliche Bearbeitung“, nichts wird geraten |
 | Zeitgesteuerter Lauf | keiner | optional: Windows-Aufgabenplanung („Nachtlauf“) |
+| Vorab-Lernen | – | alte Rechnungen eines lokalen Ordners werden ausgewertet, um Vorlagen vorzuschlagen; aktiv erst nach Bestätigung durch einen Menschen; keine Übergabe an JobRouter |
 | Installation | Einzeldatei, keine Adminrechte | Betrieb weiterhin ohne Adminrechte; Build und Installation von Tesseract/Ollama mit Adminrechten |
 
 ## 3. Einsatzszenario
@@ -63,10 +64,21 @@ Abschnitt 11.
      Warteschlange für JobRouter.
 5. **Lernen:** Aus jeder vom Menschen bearbeiteten und bestätigten Rechnung
    lernt das Programm die Vorlage des Lieferanten (nur wenn die Vorlage die
-   bestätigten Werte exakt reproduziert).
+   bestätigten Werte exakt reproduziert). Zusätzlich können **alte
+   Rechnungen** aus einem lokalen Ordner vorab ausgewertet werden
+   („Vorlernen“): das Programm schlägt je Lieferant/Layout eine Vorlage vor,
+   ein Mensch prüft alle Werte der Gruppe und bestätigt; erst dann ist die
+   Vorlage aktiv. Diese Alt-Rechnungen werden nicht an JobRouter übergeben
+   und nicht als Live-Rechnungen gezählt.
 6. **Übergabe:** an JobRouter (REST, mit Originaldatei als Anhang). In
    JobRouter gibt ein Mensch die Rechnung frei; Korrekturen von dort
    werden zurückgelesen und fließen in Fehlerprotokoll und Lernen ein.
+7. **Ressourcen:** ausgelegt auf einen Rechner ohne Grafikkarte. Das
+   Sprachmodell wird nur für fehlende Pflichtfelder bzw. unbekannte Layouts
+   gefragt, mit gekürztem Text; Texterkennung nur für Seiten ohne
+   Textebene, Anzahl der Prozessorkerne begrenzbar (`RECHNUNG_OCR_JOBS`).
+   Das Modell wird nach einem Stapel aus dem Arbeitsspeicher entladen.
+   Zeitgrenze je Rechnung 120 s.
 
 ## 5. Betriebsmodi: Testphase und autonom
 
@@ -171,6 +183,7 @@ JSON-/CSV-Format):
 | Inhalt | Ablage |
 |---|---|
 | Lieferanten-Stammdaten, Rechnungsadressen, gelernte Vorlagen | `suppliers.json`, `addresses.json`, `templates\` |
+| Vorlernen: Gruppen-Vorschläge mit gelesenen Werten alter Rechnungen (Pfad zur Datei, keine Kopie) | `vorlernen\` |
 | Originale unverändert (GoBD) | `archive\<Prüfsumme>.pdf/.xml` |
 | Audit-Protokoll (wer/wann/was, inkl. Moduswechsel), nur anhängend | `audit.jsonl` |
 | Ereignisprotokoll je Verarbeitung, Korrekturen, Ablagen in „Menschliche Bearbeitung“ | `events.jsonl` |
@@ -226,7 +239,9 @@ Nicht Teil dieser Freigabe; wird gesondert vorgelegt. Absehbar nötig:
 - Der Richtwert für den Wechsel in den autonomen Modus ist eine Schätzung
   ohne Betriebsdaten und konfigurierbar.
 - Das Sprachmodell auf einem Laptop ohne Grafikkarte ist langsam (Sekunden
-  bis Minuten je Rechnung); seine Werte gelten in der Standardeinstellung
+  bis Minuten je Rechnung; gemessen bisher nur auf dem Entwicklungsserver mit
+  synthetischen Rechnungen – auf dem Laptop mit `rechnung messen` zu
+  ermitteln); seine Werte gelten in der Standardeinstellung
   als unsicher (Konfidenz gedeckelt) und führen allein nie zu einer
   autonomen Übergabe.
 

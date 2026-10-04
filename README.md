@@ -28,6 +28,10 @@ rechnung modus autonom --operator NAME   # ausdruecklich umschalten (Audit-Eintr
 rechnung nacht                      # Nachtlauf: JobRouter, Layoutwechsel, Berichte, Gesundheit
 rechnung imap-test                  # IONOS: Anmeldung/Ordner/ungelesen pruefen, ohne abzuholen
 rechnung jobrouter-test              # JobRouter: Erreichbarkeit/Anmeldung pruefen, ohne anzulegen
+rechnung messen <ordner> [--json]    # Stufenzeiten je Rechnung messen (Trockenlauf, nichts wird gespeichert)
+rechnung vorlernen <ordner>          # Altbestand gruppieren, Vorlagen-Vorschlaege anlegen
+rechnung vorlernen                   # Vorlernen-Gruppen auflisten
+rechnung vorlernen --bestaetigen GRUPPE --operator NAME   # Vorlage einer Gruppe aktivieren
 ```
 
 `app` und `web` sind dieselbe Oberfläche (gleicher FastAPI-Code) – `app`
@@ -352,6 +356,40 @@ werden erkannt statt geraten (siehe `SPEC-v1.md` §7d), ein "Kategorien"-Reiter
 macht die gelernte Kategorie-Tabelle sichtbar/korrigierbar, und alle
 Zustandsdateien werden atomar mit Backup geschrieben -- ein Absturz mitten im
 Speichern zerstört keine Daten mehr.
+
+## Effizienz: messen, gezielt lesen, Vorab-Lernen
+
+Zielplattform ist ein Laptop/Server **ohne Grafikkarte** mit kleinem lokalem
+Modell, ≤ 120 s je Rechnung, ~60 Rechnungen/Tag (Details SPEC §7x).
+
+- **Messen:** `rechnung messen <ordner> [--json]` verarbeitet alle Dateien
+  trocken (kein Speichern, keine Warteschlange, keine Ablage) und zeigt je
+  Rechnung die Dauer der Stufen Laden/OCR/E-Rechnung/Lieferant/Vorlage/KI/
+  Prüfungen sowie Median/P90/Max. Dieselbe Verteilung steht im
+  Tagesbericht des Nachtlaufs (`dauer_je_stufe`).
+- **KI liest gezielt:** Mit Vorlage fragt die KI nur fehlende Pflichtfelder
+  (bzw. Felder der Vorlage) nach, mit Textausschnitt statt Volltext und
+  passend kleinem Kontext; bei vollständiger Vorlage gar nicht. Antwortform
+  per JSON-Schema (Ollama ≥ 0.5 / OpenAI `json_schema`, sonst Rückfall).
+  Belegt wird immer gegen den vollen Text; fehlt ein Pflichtfeld wegen des
+  Ausschnitts, wird einmal mit vollem Text nachgefasst – nie geraten.
+- **OCR nur wo nötig:** nur Seiten ohne Textebene, parallel
+  (`RECHNUNG_OCR_JOBS`, Standard Kerne−1; Laptop: 1–2).
+- **Lieferant zuerst über USt-IdNr./IBAN:** gecachter Index der Bibliothek;
+  zeigen Kennungen auf verschiedene Lieferanten → Mensch (Betrugsschutz).
+- **Warteschlange nach Aufwand:** schnelle Fälle (E-Rechnung, Textebene +
+  Vorlage) zuerst, OCR/KI dahinter; ältestes zuerst; Modell nach dem
+  KI-Stapel freigegeben.
+- **Vorab-Lernen aus Altbestand:** `rechnung vorlernen <ordner>` bzw. Reiter
+  **„Vorlernen“** in der Oberfläche: alte Rechnungen werden nach Lieferant
+  (Bibliothek) und Layout gruppiert; je Gruppe stehen alle Werte aller
+  Rechnungen nebeneinander, fehlende/abweichende gelb markiert. Werte per
+  Klick korrigieren, Rechnungen ausschließen, ggf. Lieferant zuordnen –
+  **erst „Gruppe bestätigen“ macht die Vorlage aktiv** (startet mit 0
+  Bestätigungen, Bestätigungspflicht für Live-Rechnungen bleibt).
+  Vorgelernte Rechnungen gehen **nie** nach JobRouter und zählen nicht in
+  der Schattenstatistik (Ablage `data/vorlernen/`, Audit
+  `vorlernen_bestaetigt`).
 
 ## KI-Extraktion konfigurieren (optional)
 

@@ -149,7 +149,44 @@ schtasks /Create /TN "Rechnung Nachtlauf" /TR "\"C:\Rechnung\nachtlauf.cmd\"" /S
 - Testen ohne zu warten: `schtasks /Run /TN "Rechnung Nachtlauf"`.
 - Entfernen: `schtasks /Delete /TN "Rechnung Nachtlauf" /F`.
 
-## Schritt 8 – Testphase und Umschalten auf autonom
+## Schritt 8 – Alte Rechnungen vorlernen (empfohlen, vor dem ersten Echtbetrieb)
+
+Die alten Rechnungen (z.B. ~170 Stück) in einen Ordner legen, etwa
+`C:\Rechnung\altbestand`. Dann entweder im Programm den Reiter
+**„Vorlernen“** öffnen, den Ordner eintragen und „Ordner einlesen“ klicken –
+oder in einer Eingabeaufforderung:
+
+```
+cd /d C:\Rechnung
+rechnung.exe --data .\data vorlernen C:\Rechnung\altbestand
+```
+
+Das Programm bildet Gruppen je Lieferant und Layout. Im Reiter „Vorlernen“
+stehen je Gruppe alle Rechnungen nebeneinander; **gelb** heißt: Wert fehlt
+oder weicht ab. Werte per Klick korrigieren, unpassende Rechnungen
+ausschließen, dann **„Gruppe bestätigen“** – erst dann ist die Vorlage aktiv.
+Diese alten Rechnungen gehen **nicht** an JobRouter und zählen nicht für die
+Testphase. Lieferanten müssen vorher in der Bibliothek stehen (Reiter
+„Lieferanten“ bzw. Abbyy-Import); eine Gruppe ohne erkannten Lieferanten
+lässt sich dort zuordnen.
+
+## Schritt 9 – Geschwindigkeit messen
+
+Wie lange braucht der Laptop je Rechnung und wofür? Ein paar typische
+Rechnungen in einen Ordner legen und:
+
+```
+rechnung.exe --data .\data messen C:\Rechnung\messung
+```
+
+Es wird nichts gespeichert oder weitergegeben; angezeigt werden je Rechnung
+die Zeiten für Laden, Texterkennung, Lieferant, Vorlage, KI und Prüfungen
+sowie Median/P90/Max. Liegt eine Rechnung nahe an 120 s, in `rechnung.env`
+z.B. `RECHNUNG_OCR_JOBS=1` bzw. ein kleineres Modell wählen – die
+120-s-Grenze selbst bleibt; was nicht rechtzeitig fertig wird, landet in
+„Menschliche Bearbeitung“.
+
+## Schritt 10 – Testphase und Umschalten auf autonom
 
 Das Programm startet immer in der **Testphase**: jede Rechnung muss im
 Programm bestätigt werden. Wenn der Fortschritt oben rechts den Richtwert

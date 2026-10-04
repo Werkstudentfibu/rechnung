@@ -747,8 +747,9 @@ vorhanden), kein GitHub/CI.
   Nachtlauf-Log `data\nacht.log`, optional `MIT_VERARBEITUNG=1`
   (fetch/scan/push vor `nacht`). Aufgabenplanung per `schtasks`.
 - Leichtes Laptop-Profil am Ende von `rechnung.env.example` (kleines Modell
-  `qwen2.5:1.5b-instruct`, `RECHNUNG_LLM_CTX=2048`, laengere Zeitgrenzen,
-  OCR an/aus).
+  `qwen2.5:1.5b-instruct`, `RECHNUNG_LLM_CTX=2048`, `RECHNUNG_OCR_JOBS=1`,
+  OCR an/aus). Die Zeitgrenze bleibt auch dort bei 120 s (§7x; der fruehere
+  Vorschlag `RECHNUNG_TIMEOUT=300` ist entfernt).
 - Build: `build-windows.ps1` (Python pruefen/Hinweis, venv, Abhaengigkeiten,
   Tests, PyInstaller ueber `rechnung.spec`, Starttest, Programmordner
   `dist\Rechnung`; optional Tesseract mit `deu` + Testbild, Ollama + kleines
@@ -759,6 +760,90 @@ vorhanden), kein GitHub/CI.
   Tests mit simuliertem Windows. `rechnung.spec` wurde unter Linux mit
   PyInstaller 6.22 gebaut und die Einzeldatei getestet (`modus`, `scan` mit
   spawn-Arbeitsprozess, `menschlich`, `nacht`, `web` inkl. neuem Reiter).
+
+## 7x. Effizienz: CPU-Laptop, kleines Modell, <= 120 s je Rechnung (2026-10-04)
+
+Zielplattform: Windows-Firmenlaptop bzw. Firmenserver **ohne Grafikkarte**,
+kleines lokales Modell (Ollama / OpenAI-kompatibel), ~60 Rechnungen/Tag.
+Keine Pruefung, keine Bestaetigungspflicht und keine "nicht raten"-Regel
+wurde fuer Geschwindigkeit gelockert; die 120-s-Grenze (§7m) gilt
+unveraendert pro Rechnung.
+
+0. **Zeitmessung je Stufe** (`timing.py`): `Result.stufenzeiten` misst
+   laden/ocr/erechnung/lieferant/vorlage/ki/pruefungen, landet im
+   Ereignisprotokoll (§7o) und als Median/P90/Max je Stufe im Tagesbericht
+   des Nachtlaufs (`dauer_je_stufe`). `rechnung messen [<ordner>] [--json]`
+   (`messen.py`) verarbeitet trocken: kein Speichern, keine Warteschlange,
+   keine Ablage, kein Ereignis.
+1. **KI liest gezielt** (`semantic.py`): mit Vorlage werden nur fehlende/
+   schwache **Pflichtfelder** und Felder, die die Vorlage selbst kennt,
+   nachgefragt -- bei vollstaendiger Vorlage kein Modellaufruf. Die KI
+   bekommt nur Textausschnitte (Kopf, Summen-/Bankblock, Umgebung der
+   Schluesselwoerter je Feld), die Volllesung unbekannter Layouts einen
+   gekuerzten Text. `num_ctx` passend zur Promptlaenge (512..16384,
+   `RECHNUNG_LLM_CTX` ist nur noch die Obergrenze). Belegt wird immer gegen
+   den **vollen** Text; faellt dabei ein Pflichtfeld aus, wird genau einmal
+   mit vollem Text nachgefasst -- nie geraten.
+2. **Feste Antwortform:** Ollama bekommt ein JSON-Schema im `format`-Feld
+   (Ollama >= 0.5), OpenAI-kompatibel `response_format: json_schema`; versteht
+   der Server das nicht, Rueckfall auf `"json"` bzw. `json_object`.
+3. **OCR nur wo noetig** (`ocr.py`): nur Seiten ohne eigene Textebene
+   (`pdf.page_has_text`); PDF-Seiten mit 300 dpi, Bilder in ihrer
+   Originalaufloesung (kein Hochskalieren),
+   parallel ueber `RECHNUNG_OCR_JOBS` Kerne (Standard Kerne-1, Laptop 1-2).
+4. **Lieferant zuerst ueber harte Kennungen** (`identify.py`): einmal
+   gebauter, im `Store` gecachter Index USt-IdNr/IBAN -> Lieferant (bei
+   Aenderung der Bibliothek verworfen). Eindeutiger Treffer entscheidet ohne
+   Durchprobieren; zeigen Kennungen/Name auf verschiedene Lieferanten,
+   bleibt es "mehrdeutig -> Mensch" -- eine IBAN allein bestimmt nie den
+   Lieferanten. Steuernummer bewusst nicht im Index (uneinheitliches
+   Format), bleibt Stammdaten-Abgleich.
+5. **Warteschlange nach Aufwand** (`queueing.py`): schnelle Faelle
+   (E-Rechnung, Textebene + bekannte Vorlage) werden komplett verarbeitet,
+   bevor die langsame Schlange (OCR/KI) beginnt; je Schlange aelteste
+   zuerst. Das Modell bleibt waehrend eines KI-Stapels geladen
+   (`keep_alive`) und wird danach freigegeben (`semantic.release_model`).
+6. **Vorab-Lernen aus Altbestand** (`vorlernen.py`, Reiter "Vorlernen",
+   `rechnung vorlernen`): Alt-Rechnungen werden nach Lieferant (Bibliothek)
+   + Layout/Rechnungsadresse gruppiert (unbekannte nach Kopf-Fingerabdruck),
+   Werte je Datei ueber eine schon aktive Vorlage, sonst KI-Volllesung mit
+   Beleg-Pflicht. Ablage als Vorschlag unter `data/vorlernen/<gruppe>.json`.
+   Stapel-Bestaetigung: Tabelle je Gruppe mit allen Werten nebeneinander,
+   fehlende bzw. von der Mehrheit abweichende stabile Werte (USt-IdNr,
+   IBAN, USt-Satz, ...) markiert; Korrektur je Zelle, Ausschluss je Datei,
+   Lieferant von Hand zuordnen (nur aus der Bibliothek). Erst "Gruppe
+   bestaetigen" lernt die Vorlage (`learn.learn_template`, gleiche
+   Probe-Logik wie §7i) -- eine aktive Vorlage wird ergaenzt, nie
+   ueberschrieben; neue Vorlagen starten mit 0 Bestaetigungen, die
+   Bestaetigungspflicht fuer Live-Rechnungen (§7c/§7v) bleibt. Vorgelernte
+   Rechnungen: kein `finalize`/`dispatch` (nie JobRouter), kein
+   `processed`/Schatten-Eintrag (§7k), eigene Kennzeichnung
+   `vorlernen` (Ablage + Audit `vorlernen_bestaetigt`).
+
+**Messung vorher/nachher -- synthetische Testrechnungen, Entwicklungsserver**
+(nicht der Kunden-Laptop; Entwicklungsserver mit 12 Kernen und
+**Grafikkarte** (RTX 2070), Ollama 0.32.5, Modell `llama3.2:3b`; auf einem
+CPU-Laptop sind die KI-Zeiten um ein Vielfaches hoeher -- dort mit
+`rechnung messen` neu messen). Korpus: 7 Text-PDFs aus `synth.py`, 23
+Lieferanten in der Bibliothek; 2 Rechnungen mit vollstaendiger Vorlage, 2
+mit Vorlage ohne `brutto` (KI-Luecke), 3 unbekannte Layouts (KI-Volllesung).
+Kein Scan (Tesseract auf dem Entwicklungsserver nicht installiert -> OCR
+nicht gemessen). "Vorher" = Stand nach Baustein 0 (`ee2459f`),
+"nachher" = Bausteine 1-6; je 3 Laeufe, Werte aus Lauf 3 (Modell warm).
+
+| Fall | vorher | nachher |
+|---|---|---|
+| vollstaendige Vorlage (je Rechnung) | 0,61-1,05 s, davon KI 0,58-0,89 s | 0,03-0,16 s, kein KI-Aufruf |
+| Vorlage ohne `brutto` | 0,61-0,75 s (KI fragt 3 Felder) | 0,46-0,50 s (KI fragt nur `brutto`) |
+| unbekanntes Layout (Volllesung) | 1,90-2,00 s, **0 von 5** Pflichtfeldern (Antwort unbrauchbar) | 1,53-1,58 s, **5 von 5** Pflichtfeldern belegt |
+| Summe 7 Rechnungen (Lauf 1/2/3) | 16,7 / 8,9 / 8,9 s | 6,2 / 5,8 / 5,8 s |
+| Gesamt Median / P90 / Max | 1,05 / 2,00 / 2,00 s | 0,50 / 1,58 / 1,58 s |
+
+Nebenbefund der Messung (behoben): vorher fragte die KI auch bei
+vollstaendiger Vorlage jedes Mal nicht angelernte optionale Felder ab und
+setzte dabei u.a. eine Positionszeile als `kostenstelle` ein -- im Text
+belegt, aber sachlich falsch. Jetzt werden nur Pflicht- und Vorlagenfelder
+nachgefragt.
 
 ## 8. Offene Punkte für v1.1
 
