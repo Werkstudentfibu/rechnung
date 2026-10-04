@@ -79,7 +79,9 @@ def _cmd_scan(args) -> int:
         head = f"{name:40.40s} {r.status:18s}"
         if r.supplier_name:
             head += f" {r.supplier_name} (score {r.match_score})"
-        print(head)
+        print(head + f"  [{r.duration_s:.1f} s]")
+        for why in r.hold_reasons:
+            print(f"   >> menschlich bearbeiten: {why}")
         for k, fr in r.fields.items():
             flag = "!" if fr.source == "missing" or fr.confidence < 0.7 else " "
             print(f"   {flag} {k:16s} {str(fr.value):24.24s} conf={fr.confidence}")

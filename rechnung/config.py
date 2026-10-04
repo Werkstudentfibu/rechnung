@@ -90,6 +90,15 @@ def category_fuzzy_min() -> float:
         return 0.72
 
 
+def process_timeout() -> float:
+    """Zeitgrenze je Rechnung in Sekunden fuer die komplette Verarbeitung
+    inkl. OCR und KI (guard.py). 0 = ohne Zeitgrenze im selben Prozess."""
+    try:
+        return max(0.0, float(os.environ.get("RECHNUNG_TIMEOUT", "120")))
+    except ValueError:
+        return 120.0
+
+
 def operator() -> str:
     """Wer bedient das Programm gerade – fuer den Audit-Trail."""
     return (os.environ.get("RECHNUNG_OPERATOR")

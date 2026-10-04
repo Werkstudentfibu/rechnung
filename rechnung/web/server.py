@@ -22,6 +22,7 @@ from .. import pdf as pdfmod
 from .. import semantic
 from .. import shadow
 from ..billing import BillingAddress
+from ..guard import Guard
 from ..identify import FIXED_FIELD_TYPES, Supplier, identify, supplier_from_doc
 from ..pipeline import (CONF_MIN, EXTRACT_EINVOICE, EXTRACT_TEMPLATE, MASTER_FIELDS,
                         STATUS_LABELS, invoice_files, journal_rows, journal_totals, origin,
@@ -148,6 +149,18 @@ def _render_png(path: Path, page_index: int) -> bytes:
 def create_app(store: Store, samples: Path) -> FastAPI:
     app = FastAPI(title="Rechnung Training-UI")
     samples = Path(samples)
+    # Zeitgrenze je Rechnung (guard.py). Thread-Modus: die UI muss den KI-
+    # Antwort-Cache mit /api/invoice teilen -- bestaetigt wird, was angezeigt wurde.
+    guard = Guard(store.root, mode="thread")
+
+    def _process(path: Path, use_llm: bool = True):
+        return guard.process(path, use_llm=use_llm)
+
+    def _process_for_confirm(path: Path):
+        res = _process(path)
+        if res.aborted:
+            raise HTTPException(504, res.hold_reasons[0])
+        return res
 
     def _resolve(file: str) -> Path:
         p = (samples / Path(file).name).resolve()
@@ -170,7 +183,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         # beim tatsaechlichen Bestaetigen (/api/confirm).
         out = []
         for p in invoice_files(samples):
-            r = process(p, store, use_llm=False)
+            r = _process(p, use_llm=False)
             out.append(r.to_dict())
         return JSONResponse({
             "results": out,
@@ -292,7 +305,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             # Ohne Template genau das zeigen, was beim Bestaetigen uebernommen
             # wird: Pipeline-Ergebnis inkl. Stufe 2 (KI-Extraktion, falls an),
             # Stammdaten und Korrekturen -- erst sehen, dann bestaetigen (§7c).
-            res = process(path, store)
+            res = _process(path)
             current = {k: {"value": v.value, "raw": v.raw, "confidence": v.confidence,
                            "source": v.source} for k, v in res.fields.items()}
             llm_rejected = res.llm_rejected
@@ -301,7 +314,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         else:
             # Status/Rueckstellgruende/Pruefungen fuer die Anzeige; die KI
             # aendert daran nichts (Konfidenz gedeckelt), also ohne Modell.
-            res = process(path, store, use_llm=False)
+            res = _process(path, use_llm=False)
         for v in current.values():
             v["origin"] = origin(v["source"])
 
@@ -357,7 +370,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         Bei ZUGFeRD/Factur-X wird das PDF trotzdem als Seitenbild gezeigt,
         damit der Mensch beim Bestaetigen sieht, was er bestaetigt; bei
         reinem XML (XRechnung) gibt es keine Seiten."""
-        res = process(path, store)
+        res = _process(path)
         pages = []
         if path.suffix.lower() == ".pdf":
             doc = pdfmod.load(path)
@@ -553,6 +566,10 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             raise HTTPException(404, "Template nicht gefunden")
         path = _resolve(body.file)
         doc = pdfmod.load(path)
+        # Erst verarbeiten (mit Zeitgrenze): eine abgebrochene Rechnung wird
+        # weder bestaetigt noch gezaehlt.
+        res = _process_for_confirm(path)
+        was_secured = tpl.secured
         tpl.confirmations += 1
         store.save_template(tpl)
         # Dieser Klick ist der einzige Weg, wie eine Rechnung "bestaetigt"
@@ -561,8 +578,11 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         # Extraktion aussieht.
         store.mark_confirmed(doc.sha256, _operator())
 
-        # Volle Pipeline -> feste Werte, Positionen, USt-Aufstellung, Pruefungen
-        res = process(path, store)
+        # Volle Pipeline -> feste Werte, Positionen, USt-Aufstellung, Pruefungen.
+        # Hat genau dieser Klick das Template gesichert, aendert sich der
+        # Status (auto) -- dann einmal neu rechnen.
+        if tpl.secured != was_secured:
+            res = _process_for_confirm(path)
         _log_confirmed(path, res, tpl.id, tpl.variant)
         shadow.record(store, res, _operator())
         # Stufe 1: aus den eben bestaetigten Werten das Template ergaenzen/
@@ -579,7 +599,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         path = _resolve(file)
         if einvoice.load(path) is not None:
             return _confirm_einvoice(path, operator)
-        res = process(path, store)
+        res = _process_for_confirm(path)
         if not any(f.source not in ("library", "missing") for f in res.fields.values()):
             raise HTTPException(400, "Keine Werte zum Bestaetigen -- erst Werte eintragen "
                                      "oder Template anlernen")
@@ -594,7 +614,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                              "learned": learned.to_dict()})
 
     def _confirm_einvoice(path: Path, operator: str) -> JSONResponse:
-        res = process(path, store)
+        res = _process_for_confirm(path)
         store.mark_confirmed(res.sha256, operator)
         if not store.seen_sha_template(res.sha256, None):
             _log_confirmed(path, res, None, None, extraction=EXTRACT_EINVOICE)

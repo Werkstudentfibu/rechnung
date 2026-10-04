@@ -98,6 +98,10 @@ class Result:
     shadow: dict | None = None
     # Warum die Rechnung zurueckgestellt ist (Status DEFERRED), fuer den Menschen
     hold_reasons: list[str] = field(default_factory=list)
+    # Verarbeitungsdauer in Sekunden (guard.py) und ggf. Abbruchart
+    # ("zeitgrenze" / "fehler"), sonst leer
+    duration_s: float = 0.0
+    aborted: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -116,6 +120,8 @@ class Result:
             "status": self.status,
             "status_label": STATUS_LABELS.get(self.status, self.status),
             "hold_reasons": self.hold_reasons,
+            "duration_s": self.duration_s,
+            "aborted": self.aborted,
             "overall_confidence": self.overall_confidence,
             "line_items": self.line_items,
             "tax_breakdown": self.tax_breakdown,
@@ -641,9 +647,19 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     return res
 
 
-def scan_folder(folder: str | Path, store: Store) -> list[Result]:
+def scan_folder(folder: str | Path, store: Store, guard=None) -> list[Result]:
+    """Alle Rechnungen eines Ordners verarbeiten -- jede mit Zeitgrenze
+    (guard.py), damit eine haengende Rechnung die Schlange nicht blockiert."""
+    from .guard import Guard
+
     folder = Path(folder)
-    return [process(p, store) for p in invoice_files(folder)]
+    own = guard is None
+    guard = guard or Guard(store.root)
+    try:
+        return [guard.process(p) for p in invoice_files(folder)]
+    finally:
+        if own:
+            guard.close()
 
 
 def invoice_files(folder: str | Path) -> list[Path]:
