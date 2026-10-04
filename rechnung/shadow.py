@@ -88,6 +88,11 @@ def record(store, res, operator: str = "") -> dict:
     if prev is not None and res.sha256:
         return prev
     shadow = res.shadow or {"would_pass": False, "reasons": ["keine Entscheidung"]}
+    # Zurueckgestellt (kein eindeutiger Lieferant/Rechnungsadresse aus der
+    # Bibliothek, IBAN weicht von den Stammdaten ab, ...) zaehlt nie als
+    # "wuerde durchlassen" -- unabhaengig davon, was decide() ergeben hatte.
+    if getattr(res, "status", None) == "zurueckgestellt":
+        shadow = dict(shadow, would_pass=False)
     corrected = corrected_fields(res, store)
     rec = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),

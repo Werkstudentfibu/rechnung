@@ -34,6 +34,9 @@
   .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #ddd; }
   .badge.auto { background: #c9ecd6; } .badge.review { background: #ffe5b4; }
   .badge.unknown_supplier, .badge.no_template { background: #f7d3d3; }
+  .badge.zurueckgestellt { background: #f5222d; color: #fff; }
+  .holdbox { background: #fff1f0; border: 1px solid #ffa39e; color: #a8071a; padding: 6px 8px;
+             margin: 6px 0; border-radius: 4px; font-size: 13px; }
   .badge.scan_no_textlayer { background: #e0d3f7; }
   .badge.library { background: #d3e4f7; }
   .badge.manual { background: #e8d3f7; border: 1px solid #b37feb; color: #531dab; }
@@ -153,7 +156,7 @@ async function loadList() {
     div.className = 'row';
     div.dataset.file = r.file;
     div.innerHTML = `<div>${esc(r.file.split('/').pop())}</div>
-      <span class="badge ${r.status}">${r.status}</span>
+      <span class="badge ${r.status}" title="${esc((r.hold_reasons || []).join('; '))}">${esc((d.status_labels || {})[r.status] || r.status)}</span>
       ${r.supplier_name ? ' ' + esc(r.supplier_name) : ''}
       ${r.billing_address_name ? ' → ' + esc(r.billing_address_name) : ''}
       ${r.overall_confidence ? ` · conf ${r.overall_confidence}` : ''}`;
@@ -222,7 +225,10 @@ function renderInvoice(d) {
     .join('');
 
   const fbox = document.createElement('div'); fbox.id = 'fields';
-  fbox.innerHTML = `
+  const hold = (d.hold_reasons || []).length
+    ? `<div class="holdbox"><b>${esc(d.status_label || 'zurückgestellt – menschlich bearbeiten')}</b><br>
+         ${(d.hold_reasons || []).map(esc).join('<br>')}</div>` : '';
+  fbox.innerHTML = `${hold}
     <div>
       Lieferant-ID <input id="sid" value="${esc(sup.id || '')}" placeholder="z.B. muster-gmbh">
       Name <input id="sname" value="${esc(sup.name || '')}" size="20">

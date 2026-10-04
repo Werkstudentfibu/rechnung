@@ -23,8 +23,9 @@ from .. import semantic
 from .. import shadow
 from ..billing import BillingAddress
 from ..identify import FIXED_FIELD_TYPES, Supplier, identify, supplier_from_doc
-from ..pipeline import (CONF_MIN, EXTRACT_EINVOICE, EXTRACT_TEMPLATE, invoice_files,
-                        journal_rows, journal_totals, origin, process)
+from ..pipeline import (CONF_MIN, EXTRACT_EINVOICE, EXTRACT_TEMPLATE, MASTER_FIELDS,
+                        STATUS_LABELS, invoice_files, journal_rows, journal_totals, origin,
+                        process)
 from ..store import Store
 from ..suggest import similar_suppliers
 from ..template import (STANDARD_FIELDS, Anchor, Column, LineItemSpec, Template,
@@ -173,6 +174,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             out.append(r.to_dict())
         return JSONResponse({
             "results": out,
+            "status_labels": STATUS_LABELS,
             "fields": {k: {"value_type": v[0], "required": v[1]}
                        for k, v in STANDARD_FIELDS.items()},
         })
@@ -233,7 +235,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             for fname, fval in (supplier_obj.fixed_fields or {}).items():
                 if not str(fval).strip():
                     continue
-                if fname in current and current[fname]["source"] != "missing" and current[fname]["raw"]:
+                if (fname not in MASTER_FIELDS and fname in current
+                        and current[fname]["source"] != "missing" and current[fname]["raw"]):
                     continue
                 current[fname] = {"value": fval, "raw": str(fval), "confidence": 0.99, "source": "library"}
             # IBAN/USt-IdNr/Steuernummer/Adresse kommen direkt aus dem Lieferanten-
@@ -245,10 +248,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                 "steuernummer": supplier_obj.creditor_id,
                 "adresse": ", ".join(supplier_obj.address_lines) if supplier_obj.address_lines else "",
             }
+            # Stammdaten haben Vorrang vor dem, was auf der Rechnung steht.
             for fname, fval in master_fields.items():
                 if not fval:
-                    continue
-                if fname in current and current[fname]["source"] != "missing" and current[fname]["raw"]:
                     continue
                 current[fname] = {"value": fval, "raw": fval,
                                   "confidence": 0.99, "source": "library"}
@@ -296,6 +298,10 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             llm_rejected = res.llm_rejected
             extraction = res.extraction
             line_items = res.line_items
+        else:
+            # Status/Rueckstellgruende/Pruefungen fuer die Anzeige; die KI
+            # aendert daran nichts (Konfidenz gedeckelt), also ohne Modell.
+            res = process(path, store, use_llm=False)
         for v in current.values():
             v["origin"] = origin(v["source"])
 
@@ -340,6 +346,10 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "extraction": extraction,
             "llm_rejected": llm_rejected,
             "similar_suppliers": similar,
+            "status": res.status,
+            "status_label": STATUS_LABELS.get(res.status, res.status),
+            "hold_reasons": res.hold_reasons,
+            "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in res.checks],
         })
 
     def _einvoice_view(path: Path) -> dict:
@@ -373,6 +383,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "extraction": EXTRACT_EINVOICE,
             "einvoice": inv,
             "status": res.status,
+            "status_label": STATUS_LABELS.get(res.status, res.status),
+            "hold_reasons": res.hold_reasons,
             "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in res.checks],
             "pages": pages,
             "match": ({"id": res.supplier_id, "name": res.supplier_name,
@@ -426,13 +438,14 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         sup = store.supplier(body.supplier_id)
         if sup is None:
             sup = supplier_from_doc(doc, body.supplier_id, body.supplier_name)
-        else:
-            fresh = supplier_from_doc(doc, sup.id, body.supplier_name or sup.name)
-            sup.ustids = sorted(set(sup.ustids) | set(fresh.ustids))
-            sup.ibans = sorted(set(sup.ibans) | set(fresh.ibans))
-            sup.domains = sorted(set(sup.domains) | set(fresh.domains))
-            sup.fingerprint = sup.fingerprint or fresh.fingerprint
-        store.save_supplier(sup)
+            store.save_supplier(sup)
+        elif not sup.fingerprint:
+            # Bestehende Stammdaten (IBAN/USt-IdNr/Domain) werden beim
+            # Anlernen NICHT aus der Rechnung ergaenzt -- sie sind aus der
+            # Bibliothek vorgegeben. Sonst wuerde eine gefaelschte IBAN auf der
+            # Trainingsrechnung still in die Stammdaten wandern.
+            sup.fingerprint = supplier_from_doc(doc, sup.id, sup.name).fingerprint
+            store.save_supplier(sup)
 
         tid = f"{body.supplier_id}__{body.variant}"
         tpl = store.template(tid) or Template(id=tid, supplier_id=body.supplier_id,

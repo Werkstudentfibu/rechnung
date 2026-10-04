@@ -88,6 +88,18 @@ def find_iban(s: str) -> str | None:
     return fallback
 
 
+def find_ibans(s: str) -> set[str]:
+    """Alle pruefziffernvaliden IBANs im Text -- fuer den Betrugsschutz-
+    Abgleich gegen die Stammdaten (eine zusaetzliche, fremde IBAN neben der
+    hinterlegten darf nicht untergehen, nur weil die erste passt)."""
+    out = set()
+    for m in _IBAN_RE.finditer(s.upper()):
+        cand = re.sub(r"\s+", "", m.group(0))
+        if iban_valid(cand):
+            out.add(cand)
+    return out
+
+
 # Laenderspezifische IBAN-Gesamtlaenge (Auswahl gaengiger DACH/EU-Laender)
 _IBAN_LEN = {
     "DE": 22, "AT": 20, "CH": 21, "LI": 21, "NL": 18, "BE": 16, "FR": 27,

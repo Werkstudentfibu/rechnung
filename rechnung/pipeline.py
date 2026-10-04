@@ -16,22 +16,38 @@ from . import semantic
 from . import shadow
 from .config import jobrouter as _jr_cfg
 from .config import operator as _operator
-from .identify import (DEFAULT_CURRENCY, EXPECTED_RATES, FIXED_FIELD_TYPES, cross_check,
-                       identify, identify_einvoice)
+from .identify import (DEFAULT_CURRENCY, EXPECTED_RATES, FIXED_FIELD_TYPES, IBAN_DEVIATES,
+                       cross_check, extract_identifiers, identify_einvoice,
+                       identify_with_reason)
 from .store import Store
 from .suggest import suggest_category
 from .template import (STANDARD_FIELDS, FieldResult, Template, apply_line_items,
                        apply_template)
-from .textnorm import coerce
+from .textnorm import coerce, compact, find_ibans
 from .validate import Check, run_all
 
 # Status
 AUTO = "auto"                    # kann automatisch weitergeleitet werden
 REVIEW = "review"                # Template da, aber Konfidenz/Prüfung schwach
 NO_TEMPLATE = "no_template"      # Lieferant bekannt, kein Template -> anlernen
-UNKNOWN = "unknown_supplier"    # Lieferant unbekannt -> anlernen
+# Kein eindeutiger Lieferant / keine eindeutige Rechnungsadresse aus der
+# Bibliothek, IBAN weicht von den Stammdaten ab, ... -> ein Mensch muss die
+# Rechnung bearbeiten. Gruende stehen in ``Result.hold_reasons``. Ersetzt das
+# fruehere "unknown_supplier" (UNKNOWN bleibt als Alias fuer alten Code).
+DEFERRED = "zurueckgestellt"
+UNKNOWN = DEFERRED
 SCAN = "scan_no_textlayer"      # kein Textlayer -> OCR nötig (v1 nicht unterstützt)
 UNSUPPORTED = "unsupported_file"  # weder PDF noch lesbare E-Rechnung (z.B. fremdes XML)
+
+# Anzeigetexte fuer die Oberflaeche
+STATUS_LABELS = {
+    AUTO: "auto",
+    REVIEW: "review",
+    NO_TEMPLATE: "keine Vorlage",
+    DEFERRED: "zurückgestellt – menschlich bearbeiten",
+    SCAN: "Scan ohne Text",
+    UNSUPPORTED: "nicht lesbar",
+}
 
 # Woher die Feldwerte stammen (Result.extraction)
 EXTRACT_TEMPLATE = "template"
@@ -80,6 +96,8 @@ class Result:
     # auf dem Stand VOR manuellen Korrekturen (shadow.decide) -- reine
     # Messung, aendert weder Status noch Bestaetigungspflicht.
     shadow: dict | None = None
+    # Warum die Rechnung zurueckgestellt ist (Status DEFERRED), fuer den Menschen
+    hold_reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -96,6 +114,8 @@ class Result:
             "billing_address_id": self.billing_address_id,
             "billing_address_name": self.billing_address_name,
             "status": self.status,
+            "status_label": STATUS_LABELS.get(self.status, self.status),
+            "hold_reasons": self.hold_reasons,
             "overall_confidence": self.overall_confidence,
             "line_items": self.line_items,
             "tax_breakdown": self.tax_breakdown,
@@ -212,17 +232,19 @@ def _inject_library_fields(fields: dict[str, FieldResult], supplier) -> None:
         if not str(fval).strip():
             continue
         cur = fields.get(fname)
-        if cur is not None and cur.source != "missing" and cur.raw:
+        if fname not in MASTER_FIELDS and cur is not None and cur.source != "missing" and cur.raw:
             continue
         vtype = FIXED_FIELD_TYPES.get(fname, "text")
         value, ok = coerce(str(fval), vtype)
         fields[fname] = FieldResult(fname, value, str(fval), 0.99 if ok else 0.6, "library")
 
     # IBAN, USt-IdNr, Steuernummer und Adresse sind Lieferanten-Stammdaten
-    # (Lieferanten-Tab), keine Extraktionsfelder -- die bleiben von Rechnung
-    # zu Rechnung gleich, kommen also direkt aus dem einmal gepflegten
-    # Stammdatensatz statt aus einem Template-Anker und muessen nie pro
-    # Rechnung neu markiert werden.
+    # (Lieferanten-Tab / Abbyy-Import), keine Extraktionsfelder -- die bleiben
+    # von Rechnung zu Rechnung gleich und kommen direkt aus dem einmal
+    # gepflegten Stammdatensatz. Sie haben VORRANG vor dem, was auf der
+    # Rechnung steht (Template, E-Rechnungs-XML, KI): eine abweichende IBAN
+    # auf der Rechnung wird nicht uebernommen, sondern als rote Pruefung
+    # gemeldet (_iban_master_check, Betrugsschutz).
     master_fields = {
         "iban": supplier.ibans[0] if supplier.ibans else "",
         "ustid": supplier.ustids[0] if supplier.ustids else "",
@@ -232,10 +254,71 @@ def _inject_library_fields(fields: dict[str, FieldResult], supplier) -> None:
     for fname, fval in master_fields.items():
         if not fval:
             continue
-        cur = fields.get(fname)
-        if cur is not None and cur.source != "missing" and cur.raw:
-            continue
         fields[fname] = FieldResult(fname, fval, fval, 0.99, "library")
+
+
+# Stammdaten-Felder, bei denen die Bibliothek immer gewinnt
+MASTER_FIELDS = ("iban", "ustid", "steuernummer", "adresse")
+
+
+def _replace_check(checks: list[Check], new: Check) -> list[Check]:
+    return [c for c in checks if c.name != new.name] + [new]
+
+
+def _iban_master_check(supplier, invoice_ibans: set[str], fields: dict) -> Check:
+    """Betrugsschutz: jede IBAN, die auf der Rechnung steht (PDF-Text bzw.
+    E-Rechnungs-XML) oder manuell eingetragen wurde, muss im Stammdatensatz
+    des Lieferanten stehen. Eine einzige fremde IBAN macht die Pruefung rot
+    -- auch wenn daneben die hinterlegte steht."""
+    if supplier is None:
+        return Check("iban-stammdaten", None, "Lieferant nicht aus der Bibliothek erkannt")
+    if not supplier.ibans:
+        return Check("iban-stammdaten", None, "keine IBAN in den Stammdaten hinterlegt")
+    seen = {compact(i).upper() for i in invoice_ibans if i}
+    fr = fields.get("iban")
+    if fr is not None and fr.source == "manual" and fr.raw:
+        seen.add(compact(str(fr.value or fr.raw)).upper())
+    foreign = sorted(seen - set(supplier.ibans))
+    if foreign:
+        return Check("iban-stammdaten", False, f"{IBAN_DEVIATES}: {', '.join(foreign)}")
+    return Check("iban-stammdaten", True,
+                 "ok" if seen else "keine IBAN auf der Rechnung -- Stammdaten-IBAN verwendet")
+
+
+def _billing_check(text: str, store: Store, res: "Result") -> Check:
+    """Rechnungsadresse eindeutig aus der Bibliothek? Setzt bei Treffer
+    ``res.billing_address_*``, sonst einen Rueckstellgrund. Solange (noch)
+    keine Rechnungsadressen gepflegt/importiert sind, ist die Pruefung
+    "nicht pruefbar" statt jede Rechnung zurueckzustellen."""
+    addresses = store.addresses()
+    if not addresses:
+        return Check("rechnungsadresse", None, "keine Rechnungsadressen in der Bibliothek")
+    hit, why = billing.match_text(text, addresses)
+    if hit is None:
+        res.hold_reasons.append(why)
+        return Check("rechnungsadresse", False, why)
+    res.billing_address_id = hit[0].id
+    res.billing_address_name = hit[0].name
+    return Check("rechnungsadresse", True, hit[0].name)
+
+
+def _apply_hold(res: "Result") -> None:
+    """Rueckstellgruende -> Status DEFERRED. Eine zurueckgestellte Rechnung
+    (oder eine mit abweichender IBAN) kann im Schattenbetrieb nie als
+    "wuerde durchlassen" zaehlen."""
+    for c in res.checks:
+        if c.name == "iban-stammdaten" and c.ok is False and IBAN_DEVIATES not in res.hold_reasons:
+            res.hold_reasons.append(IBAN_DEVIATES)
+    if not res.hold_reasons:
+        return
+    res.status = DEFERRED
+    note = "zurueckgestellt: " + "; ".join(res.hold_reasons)
+    if res.shadow is None:
+        res.shadow = {"would_pass": False, "reasons": [note],
+                      "new_supplier": res.supplier_id is None, "values": {}, "sources": {}}
+    else:
+        res.shadow["would_pass"] = False
+        res.shadow["reasons"] = list(res.shadow.get("reasons") or []) + [note]
 
 
 # Felder, die bei einer E-Rechnung gesetzt sein muessen, damit sie ohne
@@ -315,7 +398,13 @@ def _process_einvoice(path: Path, inv, store: Store) -> Result:
         res.supplier_id = supplier.id
         res.supplier_name = supplier.name
     else:
-        res.supplier_name = inv.verkaeufer_name or None
+        # Lieferant nur aus der Bibliothek -- der Verkaeufername im XML ist
+        # ein Hinweis fuer den Menschen, keine Identitaet.
+        named = f" (Rechnung nennt: {inv.verkaeufer_name})" if inv.verkaeufer_name else ""
+        res.hold_reasons.append(f"Lieferant: kein Lieferant aus der Bibliothek passt{named}")
+    pdf_text = _einvoice_pdf_text(path, inv)
+    addr_check = _billing_check("\n".join([inv.kaeufer_name, pdf_text]), store, res)
+    invoice_ibans = set(inv.verkaeufer_iban) | find_ibans(pdf_text)
 
     def put(name: str, value, raw: str | None = None) -> None:
         if value is None or value == "" or value == []:
@@ -361,7 +450,8 @@ def _process_einvoice(path: Path, inv, store: Store) -> Result:
 
     def checks_for(fields):
         cs = run_all(fields, supplier, store.seen_invoice, res.line_items)
-        return [_einvoice_check(c, inv, res.line_items) for c in cs] + [pdf_check]
+        cs = [_einvoice_check(c, inv, res.line_items) for c in cs] + [pdf_check]
+        return _replace_check(cs, _iban_master_check(supplier, invoice_ibans, fields)) + [addr_check]
 
     res.checks = checks_for(res.fields)
     res.shadow = shadow.decide(machine, checks_for(machine) if corrections else res.checks,
@@ -372,7 +462,18 @@ def _process_einvoice(path: Path, inv, store: Store) -> Result:
     checks_ok = all(c.ok is not False for c in res.checks)
     res.status = AUTO if (supplier is not None and checks_ok
                           and res.overall_confidence >= CONF_MIN) else REVIEW
+    _apply_hold(res)
     return res
+
+
+def _einvoice_pdf_text(path: Path, inv) -> str:
+    """Sichtbarer Text einer Hybrid-Rechnung (ZUGFeRD/Factur-X), sonst ''."""
+    if not inv.source.startswith("pdf:"):
+        return ""
+    try:
+        return pdfmod.load(path).text if pdfmod.has_text_layer(path) else ""
+    except Exception:
+        return ""
 
 
 def _apply_corrections(fields: dict[str, FieldResult], corrections: dict,
@@ -393,45 +494,56 @@ def _llm_full(res: Result, doc) -> None:
         cur = res.fields.get(name)
         if cur is None or cur.source == "missing":
             res.fields[name] = fr
-    if res.supplier_id is None and full.supplier.get("name"):
-        res.supplier_name = full.supplier["name"]
+    # Bewusst KEIN res.supplier_name aus der KI: die Lieferanten-Identitaet
+    # kommt ausschliesslich aus der Bibliothek.
     if full.line_items and not res.line_items:
         res.line_items = full.line_items
     if full.fields:
         res.extraction = EXTRACT_LLM
 
 
-def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool) -> None:
+def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
+                        extra_checks: list[Check] | None = None) -> None:
     """Rechnung ohne Template (Lieferant unbekannt oder noch nicht angelernt):
     optional KI-Extraktion (Stufe 2), Korrekturen einmischen und, sobald Werte
     da sind, pruefen. Damit kann ein Mensch die Werte (KI-Vorschlag oder
     eingetippt) pruefen und bestaetigen -- aus genau diesen bestaetigten
     Werten lernt learn.py dann das Template (Stufe 1), statt dass jeder Anker
     von Hand angeklickt werden muss. Der Status bleibt ``no_template``/
-    ``unknown_supplier`` (die KI-Konfidenz ist ohnehin unter CONF_MIN
+    ``zurueckgestellt`` (die KI-Konfidenz ist ohnehin unter CONF_MIN
     gedeckelt)."""
+    extra = list(extra_checks or [])
     if use_llm:
         _llm_full(res, doc)
     machine = dict(res.fields)
     _apply_corrections(res.fields, store.corrections(doc.sha256))
-    res.shadow = shadow.decide(machine, run_all(machine, supplier, store.seen_invoice,
-                                                res.line_items), new_supplier=True)
+    res.shadow = shadow.decide(machine, _all_checks(machine, supplier, store, res.line_items,
+                                                    doc, extra), new_supplier=True)
     if not any(f.source != "library" for f in res.fields.values()):
+        res.checks = extra
         return
     res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
-    res.checks = run_all(res.fields, supplier, store.seen_invoice, res.line_items)
+    res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, extra)
 
 
-def _template_checks(fields, supplier, store: Store, line_items, doc) -> list[Check]:
+def _all_checks(fields, supplier, store: Store, line_items, doc,
+                extra: list[Check] | None = None) -> list[Check]:
+    """Pruefungen fuer PDF-Rechnungen (Template- und Untemplated-Pfad)."""
     checks = run_all(fields, supplier, store.seen_invoice, line_items)
-    # cross_check liest IBAN/USt-IdNr direkt aus dem PDF-Text (nicht nur aus dem
-    # extrahierten Feld). Pro Namen genau einen Check behalten: die entschiedene
-    # Aussage schlaegt das "nicht pruefbar" von run_all.
-    for cc in cross_check(doc, supplier):
-        checks = [c for c in checks if not (c.name == cc["kind"] and c.ok is None)]
-        if not any(c.name == cc["kind"] for c in checks):
-            checks.append(Check(cc["kind"], cc["ok"], cc["detail"]))
-    return checks
+    if supplier is not None:
+        # cross_check liest die USt-IdNr direkt aus dem PDF-Text (nicht nur
+        # aus dem Feld, das ja aus den Stammdaten kommt). Pro Namen genau
+        # einen Check behalten: die entschiedene Aussage schlaegt das "nicht
+        # pruefbar" von run_all. Die IBAN prueft _iban_master_check.
+        for cc in cross_check(doc, supplier):
+            if cc["kind"] == "iban-stammdaten":
+                continue
+            checks = [c for c in checks if not (c.name == cc["kind"] and c.ok is None)]
+            if not any(c.name == cc["kind"] for c in checks):
+                checks.append(Check(cc["kind"], cc["ok"], cc["detail"]))
+    invoice_ibans = extract_identifiers(doc)["ibans"] | find_ibans(doc.text)
+    checks = _replace_check(checks, _iban_master_check(supplier, invoice_ibans, fields))
+    return checks + list(extra or [])
 
 
 def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
@@ -450,10 +562,15 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     doc = pdfmod.load(path)
     res = Result(file=str(path), sha256=doc.sha256)
 
-    match = identify(doc, store.suppliers())
+    # Lieferant und Rechnungsadresse ausschliesslich per Abgleich mit der
+    # Bibliothek. Kein eindeutiger Treffer -> zurueckgestellt; die Extraktion
+    # laeuft trotzdem, damit der Mensch die Werte gleich vor sich hat.
+    match, why = identify_with_reason(doc, store.suppliers())
+    addr_check = _billing_check(doc.text, store, res)
     if not match:
-        res.status = UNKNOWN
-        _finish_untemplated(res, doc, None, store, use_llm)
+        res.hold_reasons.insert(0, f"Lieferant: {why}")
+        _finish_untemplated(res, doc, None, store, use_llm, [addr_check])
+        _apply_hold(res)
         return res
 
     supplier, score = match
@@ -461,16 +578,12 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     res.supplier_name = supplier.name
     res.match_score = score
 
-    addr = billing.detect(doc, store.addresses())
-    if addr:
-        res.billing_address_id = addr[0].id
-        res.billing_address_name = addr[0].name
-
     tpl = _pick_template(doc, store.templates_for(supplier.id), res.billing_address_id)
     if tpl is None:
         res.status = NO_TEMPLATE
         _inject_library_fields(res.fields, supplier)
-        _finish_untemplated(res, doc, supplier, store, use_llm)
+        _finish_untemplated(res, doc, supplier, store, use_llm, [addr_check])
+        _apply_hold(res)
         return res
 
     res.template_id = tpl.id
@@ -510,9 +623,9 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
 
     res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
 
-    res.checks = _template_checks(res.fields, supplier, store, res.line_items, doc)
+    res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, [addr_check])
     res.shadow = shadow.decide(
-        machine, _template_checks(machine, supplier, store, res.line_items, doc)
+        machine, _all_checks(machine, supplier, store, res.line_items, doc, [addr_check])
         if corrections else res.checks, new_supplier=False)
 
     required = [f for f in tpl.fields if f.required]
@@ -524,6 +637,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
         res.fields[f.name].source != "missing" for f in required if f.name in res.fields
     )
     res.status = AUTO if (tpl.secured and checks_ok and conf_ok) else REVIEW
+    _apply_hold(res)
     return res
 
 

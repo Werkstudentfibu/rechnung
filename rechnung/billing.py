@@ -37,17 +37,31 @@ class BillingAddress:
 
 def detect(doc: Document, addresses: list[BillingAddress], min_hits: int = 1):
     """-> (BillingAddress, score) oder None. score = Anteil getroffener match_terms."""
-    text_n = norm(doc.text)
-    best = None
+    return match_text(doc.text, addresses, min_hits)[0]
+
+
+def match_text(text: str, addresses: list[BillingAddress], min_hits: int = 1):
+    """-> ((BillingAddress, score) oder None, Grund).
+
+    Rechnungsadressen sind 1:1 aus der Bibliothek vorgegeben (Abbyy-Import
+    'BusinessUnits'). Passt keine oder passen mehrere gleich gut, gibt es
+    keinen Treffer, sondern einen Grund -- die Rechnung wird zurueckgestellt
+    statt einem Geschaeftsbereich geraten zugeordnet."""
+    text_n = norm(text)
+    scored = []
     for a in addresses:
         terms = [norm(t) for t in a.match_terms if t.strip()]
         if not terms:
             continue
         hits = sum(1 for t in terms if t and t in text_n)
-        score = hits / len(terms)
-        if hits >= min_hits and (best is None or score > best[1]):
-            best = (a, round(score, 3))
-    return best
+        if hits >= min_hits:
+            scored.append((a, round(hits / len(terms), 3)))
+    if not scored:
+        return None, "keine Rechnungsadresse aus der Bibliothek passt"
+    scored.sort(key=lambda x: x[1], reverse=True)
+    if len(scored) > 1 and scored[0][1] == scored[1][1]:
+        return None, (f"Rechnungsadresse mehrdeutig: {scored[0][0].id} / {scored[1][0].id}")
+    return scored[0], ""
 
 
 def suggest_terms(doc: Document, top_fraction: float = 0.45) -> list[str]:

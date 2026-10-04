@@ -11,7 +11,7 @@ from reportlab.pdfgen import canvas
 
 from rechnung import einvoice
 from rechnung.identify import Supplier
-from rechnung.pipeline import (AUTO, EXTRACT_EINVOICE, REVIEW, UNSUPPORTED, finalize,
+from rechnung.pipeline import (AUTO, DEFERRED, EXTRACT_EINVOICE, REVIEW, UNSUPPORTED, finalize,
                                invoice_files, process)
 from rechnung.store import Store
 
@@ -274,13 +274,15 @@ def test_xrechnung_xml_known_supplier_is_auto(tmp_path, store):
     assert r.status == AUTO, [c for c in r.checks if c.ok is False]
 
 
-def test_unknown_supplier_is_review_with_seller_name(tmp_path, store):
+def test_unknown_supplier_is_deferred_with_seller_name_as_hint(tmp_path, store):
+    """Lieferant nur aus der Bibliothek: der Verkaeufername aus dem XML ist
+    nur ein Hinweis im Rueckstellgrund, keine Identitaet."""
     p = tmp_path / "ubl.xml"
     p.write_text(UBL_XML)
     r = process(p, store)
-    assert r.supplier_id is None
-    assert r.supplier_name == "Hosting Nord GmbH"
-    assert r.status == REVIEW
+    assert r.supplier_id is None and r.supplier_name is None
+    assert r.status == DEFERRED
+    assert "Hosting Nord GmbH" in r.hold_reasons[0]
     assert r.fields["netto"].value == 200.0
 
 
@@ -302,8 +304,13 @@ def test_iban_mismatch_vs_master_data_goes_to_review(tmp_path, store):
     p.write_bytes(cii())
     r = process(p, store)
     assert r.supplier_id == "papier"
-    assert any(c.name == "iban-stammdaten" and c.ok is False for c in r.checks)
-    assert r.status == REVIEW
+    chk = next(c for c in r.checks if c.name == "iban-stammdaten")
+    assert chk.ok is False and "IBAN weicht von Stammdaten ab (Betrugsschutz)" in chk.detail
+    assert r.status == DEFERRED
+    # Stammdaten haben Vorrang: die IBAN aus dem XML wird nicht uebernommen
+    assert r.fields["iban"].value == "DE02120300000000202051"
+    assert r.fields["iban"].source == "library"
+    assert r.shadow["would_pass"] is False
 
 
 def test_hybrid_pdf_matching(tmp_path, store):

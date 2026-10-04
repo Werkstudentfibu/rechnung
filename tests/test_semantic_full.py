@@ -232,9 +232,11 @@ def test_pipeline_unknown_supplier_full_extraction(monkeypatch, tmp_path: Path):
     store = Store(tmp_path / "data")
     inv = make_invoice(tmp_path / "a.pdf")
     res = process(inv, store)
-    assert res.status == UNKNOWN                      # bleibt "anlernen"
+    assert res.status == UNKNOWN                      # zurueckgestellt -> Mensch
     assert res.extraction == EXTRACT_LLM
-    assert res.supplier_name == "Muster Handels GmbH"
+    # Lieferanten-Identitaet nie aus der KI, nur aus der Bibliothek
+    assert res.supplier_name is None and res.supplier_id is None
+    assert res.hold_reasons and res.hold_reasons[0].startswith("Lieferant:")
     d = res.to_dict()
     assert d["fields"]["netto"]["origin"] == "llm"
     assert d["fields"]["iban"]["origin"] == "llm"

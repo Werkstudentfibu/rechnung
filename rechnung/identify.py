@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 
 from .pdf import Document
-from .textnorm import find_domains, find_iban, find_ustids, norm
+from .textnorm import find_domains, find_iban, find_ibans, find_ustids, norm
 
 # Stammdaten-Felder, die als "fester Wert" pro Lieferant hinterlegt werden koennen
 # (Name -> value_type). Werden von der Pipeline in die Extraktion gemischt, statt
@@ -28,6 +28,11 @@ EXPECTED_RATES: dict[str, list[float]] = {
     "CHF": [8.1, 2.6, 0.0],
 }
 DEFAULT_CURRENCY = "EUR"
+
+# Pruefungs-Grund, wenn auf der Rechnung eine andere IBAN steht als im
+# Lieferanten-Stammdatensatz -- klassisches Betrugsmuster (geaenderte
+# Bankverbindung). Wortgleich in Pruefung, Rueckstellgrund und Fehlerbericht.
+IBAN_DEVIATES = "IBAN weicht von Stammdaten ab (Betrugsschutz)"
 
 
 @dataclass
@@ -121,16 +126,29 @@ def _jaccard(a: set, b: set) -> float:
 
 def identify(doc: Document, suppliers: list[Supplier], threshold: float = 0.5,
             min_margin: float = 0.15):
-    """-> (Supplier, score) oder None.
+    """-> (Supplier, score) oder None. Kurzform von ``identify_with_reason``."""
+    return identify_with_reason(doc, suppliers, threshold, min_margin)[0]
+
+
+def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: float = 0.5,
+                         min_margin: float = 0.15):
+    """-> ((Supplier, score) oder None, Grund).
+
+    Einzige Quelle fuer die Lieferanten-Identitaet ist die Bibliothek
+    (Abbyy-Import, Lieferanten-Tab) -- erkannt wird nur per Abgleich, nie
+    angelegt oder per KI abgeleitet. Kein eindeutiger Treffer -> ``None`` und
+    ein Grund fuer den Menschen (Rechnung wird zurueckgestellt).
 
     Bei zu knappem Abstand zum zweitbesten Treffer (< ``min_margin``) wird
     lieber "kein sicherer Treffer" zurückgegeben statt eine mehrdeutige
     Zuordnung zu raten -- verhindert eine stille Verwechslung zwischen zwei
     Lieferanten mit ähnlichem Kopf-Layout (z.B. dieselbe Buchhaltungssoftware).
     Ein exakter Treffer auf USt-IdNr./IBAN gilt als eindeutig genug und
-    überspringt die Margin-Prüfung.
+    überspringt die Margin-Prüfung -- ausser USt-IdNr/IBAN zeigen auf
+    verschiedene Lieferanten (dann mehrdeutig).
     """
     ids = extract_identifiers(doc)
+    ids["ibans"] = ids["ibans"] | find_ibans(doc.text)
     text_n = norm(doc.text)
     scored: list[tuple[Supplier, float, bool]] = []
     for s in suppliers:
@@ -147,16 +165,21 @@ def identify(doc: Document, suppliers: list[Supplier], threshold: float = 0.5,
         score += 0.3 * _jaccard(ids["fingerprint"], set(s.fingerprint))
         scored.append((s, round(score, 3), hard_hit))
     if not scored:
-        return None
+        return None, "Bibliothek ist leer -- kein Lieferant hinterlegt"
+    hard = [x for x in scored if x[2]]
+    if len(hard) > 1:
+        names = ", ".join(sorted(x[0].id for x in hard))
+        return None, f"mehrdeutig: USt-IdNr/IBAN passen zu mehreren Lieferanten ({names})"
     scored.sort(key=lambda x: x[1], reverse=True)
     best_s, best_score, best_hard = scored[0]
     if best_score < threshold:
-        return None
+        return None, "kein Lieferant aus der Bibliothek passt"
     if len(scored) > 1 and not best_hard:
-        second_score = scored[1][1]
+        second_s, second_score, _ = scored[1]
         if (best_score - second_score) < min_margin:
-            return None
-    return best_s, best_score
+            return None, (f"mehrdeutig: {best_s.id} / {second_s.id} "
+                          f"(Score {best_score} vs. {second_score})")
+    return (best_s, best_score), ""
 
 
 def cross_check(doc: Document, supplier: Supplier) -> list[dict]:
@@ -165,10 +188,10 @@ def cross_check(doc: Document, supplier: Supplier) -> list[dict]:
     ids = extract_identifiers(doc)
     out = []
     if supplier.ibans:
-        found = ids["ibans"]
-        ok = (not found) or bool(found & set(supplier.ibans))
-        out.append({"kind": "iban-stammdaten", "ok": ok,
-                    "detail": ",".join(sorted(found - set(supplier.ibans))) or "ok"})
+        found = ids["ibans"] | find_ibans(doc.text)
+        foreign = sorted(found - set(supplier.ibans))
+        out.append({"kind": "iban-stammdaten", "ok": not foreign,
+                    "detail": (f"{IBAN_DEVIATES}: {', '.join(foreign)}" if foreign else "ok")})
     if supplier.ustids:
         found = ids["ustids"]
         ok = (not found) or bool(found & set(supplier.ustids))
