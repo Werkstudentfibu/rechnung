@@ -15,6 +15,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .ocr import IMAGE_SUFFIXES
+
 
 def _b(name: str, default: bool = False) -> bool:
     v = os.environ.get(name)
@@ -35,9 +37,14 @@ class ImapConfig:
     done_folder: str = os.environ.get("RECHNUNG_IMAP_DONE_FOLDER", "")
     # nur Anhaenge mit diesen Endungen (kommagetrennt). .xml fuer reine
     # E-Rechnungen (XRechnung); ZUGFeRD steckt im PDF und braucht das nicht.
+    # Bild-Endungen (Scans als Foto/TIFF) laufen in der Pipeline automatisch
+    # durch die Texterkennung (ocr.py), bevor sie wie jede andere Rechnung
+    # verarbeitet werden.
     extensions: tuple[str, ...] = tuple(
         e.strip().lower()
-        for e in os.environ.get("RECHNUNG_IMAP_EXTENSIONS", ".pdf,.xml").split(",")
+        for e in os.environ.get(
+            "RECHNUNG_IMAP_EXTENSIONS", ".pdf,.xml," + ",".join(IMAGE_SUFFIXES)
+        ).split(",")
         if e.strip()
     )
 

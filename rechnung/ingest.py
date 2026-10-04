@@ -1,7 +1,10 @@
-"""IONOS-Postfach abholen: neue Mails -> PDF-Anhaenge in den Inbox-Ordner.
+"""IONOS-Postfach abholen: neue Mails -> Rechnungs-Anhaenge in den Inbox-Ordner.
 
 Nutzt nur die Standardbibliothek (imaplib/email). Standardmaessig passiert
 nichts – erst mit gesetzten ``RECHNUNG_IMAP_*``-Variablen (siehe config.py).
+Geholt werden PDF/XML sowie Bild-Anhaenge (jpg/png/tiff, siehe
+``ImapConfig.extensions``) -- Fotos/Scans ohne Textebene laufen in der
+Pipeline automatisch durch die Texterkennung (ocr.py).
 
 Ablauf ``fetch``:
 1. Verbinden, ``source_folder`` waehlen.

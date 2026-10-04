@@ -109,8 +109,43 @@ Bestätigungspflicht oben gilt uneingeschränkt weiter, bis das explizit
 | `auto` | gesichertes Template, Konfidenz + Prüfungen ok → hohe Zuversicht, braucht aber trotzdem Bestätigung |
 | `review` | Template vorhanden, aber Konfidenz/Prüfung schwach → manuell ansehen |
 | `no_template` | Lieferant bekannt, noch kein Template → anlernen |
-| `unknown_supplier` | Lieferant nicht erkannt → anlernen |
-| `scan_no_textlayer` | kein Textlayer (Scan) → OCR nötig, v1 nicht unterstützt |
+| `zurückgestellt – menschlich bearbeiten` | kein eindeutiger Lieferant/keine eindeutige Rechnungsadresse aus der Bibliothek, IBAN weicht von den Stammdaten ab, OCR nicht verfügbar/fehlgeschlagen, Zeitgrenze überschritten → ein Mensch muss ran, Gründe stehen in `hold_reasons` |
+
+`scan_no_textlayer` ist historisch und wird nicht mehr vergeben – Scans laufen
+seit der Texterkennung (siehe unten) automatisch durch.
+
+## Texterkennung für Scans (OCR)
+
+PDFs ohne Textebene sowie Bild-Anhänge (`.jpg`, `.jpeg`, `.png`, `.tif`,
+`.tiff`) laufen automatisch durch **Tesseract** (Sprache `deu`, rein lokal,
+kein Netzwerkzugriff) und danach normal durch dieselbe Pipeline wie jede
+andere Rechnung. Das Original bleibt unverändert (Archiv/Hash/Korrekturen
+hängen immer am Original); die erkannte Textebene liegt als Arbeitskopie
+unter `data/ocr/<sha>.pdf`.
+
+- **Tesseract ist eine Voraussetzung, keine Python-Abhängigkeit** – siehe
+  `build.md` für die Installation. Ist es nicht installiert (oder fehlt das
+  deutsche Sprachpaket `deu`), degradiert das Programm sauber: die Rechnung
+  wird zurückgestellt (Grund „OCR nicht verfügbar“), nichts stürzt ab.
+- Jede OCR-Rechnung bekommt eine Konfidenz (mittlere Wortkonfidenz). Liegt sie
+  unter der Schwelle (`RECHNUNG_OCR_MIN_CONF`, Standard 80) oder steckt ein
+  unsicher erkanntes Wort in einem gelesenen Feld, ist die Prüfung
+  `ocr-konfidenz` rot bzw. das Feld fällt unter die Mindestkonfidenz – nie
+  `auto`, nie „würde durchlassen“ im Schattenbetrieb.
+- Felder, deren Wert aus der Texterkennung stammt, sind im Ergebnis zusätzlich
+  mit `via: "ocr"` markiert (Stammdaten/manuelle Korrekturen nicht).
+- Konfigurierbar über `RECHNUNG_TESSERACT`, `RECHNUNG_OCR_MIN_CONF`,
+  `RECHNUNG_OCR_WORD_MIN_CONF` (siehe `rechnung.env.example`).
+
+## Zeitgrenze pro Rechnung
+
+Jede Rechnung bekommt für die komplette Verarbeitung (inkl. OCR und KI)
+höchstens `RECHNUNG_TIMEOUT` Sekunden (Standard 120, `0` = keine Grenze).
+Eine hängende Rechnung (z.B. ein in einem C-Parser feststeckendes PDF) wird
+nach Ablauf hart abgebrochen und zurückgestellt – die Verarbeitung der
+übrigen Warteschlange blockiert das nicht (`rechnung scan`/`app`/`web`
+verarbeiten dafür jede Rechnung in einem eigenen Arbeitsprozess bzw.
+Hintergrund-Thread, siehe `rechnung/guard.py`).
 
 ## Leichte Vorschlags-Hilfen (kein ML-Modell)
 
@@ -142,5 +177,5 @@ Es ist kein Cloud-Dienst eingebaut. KI-Werte sind in der Konfidenz gedeckelt
 
 ## Nicht in v1
 
-OCR für Scans · IONOS-IMAP-Abholung · JobRouter-REST-Übergabe (beide inzwischen
-in v1.1 nachgezogen). Siehe `SPEC-v1.md` §7.
+OCR für Scans · IONOS-IMAP-Abholung · JobRouter-REST-Übergabe (alle drei
+inzwischen nachgezogen, siehe `SPEC-v1.md` §7i–§7n).

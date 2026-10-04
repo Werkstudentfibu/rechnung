@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from email.message import EmailMessage
 
-from rechnung.config import JobRouterConfig
+from rechnung.config import ImapConfig, JobRouterConfig
 from rechnung.ingest import attachments_from_bytes
 from rechnung.jobrouter import enqueue, push_queue
 
@@ -21,6 +21,16 @@ def _mail(*, attachments: list[tuple[str, bytes, str]]) -> bytes:
     return msg.as_bytes()
 
 
+def test_imap_default_extensions_include_images(monkeypatch):
+    for var in ("RECHNUNG_IMAP_EXTENSIONS", "RECHNUNG_IMAP_HOST", "RECHNUNG_IMAP_USER",
+                "RECHNUNG_IMAP_PASSWORD"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = ImapConfig()
+    assert ".pdf" in cfg.extensions and ".xml" in cfg.extensions
+    for suf in (".jpg", ".jpeg", ".png", ".tif", ".tiff"):
+        assert suf in cfg.extensions
+
+
 def test_attachments_pdf_only():
     raw = _mail(attachments=[
         ("rechnung.pdf", b"%PDF-1.4 fake", "application/pdf"),
@@ -31,6 +41,15 @@ def test_attachments_pdf_only():
     assert atts[0].content.startswith(b"%PDF")
     assert atts[0].from_addr.endswith("muster-gmbh.de>")
     assert "RE-2026-00042" in atts[0].subject
+
+
+def test_attachments_picks_up_scanned_image():
+    raw = _mail(attachments=[
+        ("rechnung.jpg", b"\xff\xd8\xff fake-jpeg", "image/jpeg"),
+        ("sonstiges.docx", b"PK fake", "application/vnd.openxmlformats"),
+    ])
+    atts = attachments_from_bytes(raw, ImapConfig().extensions)
+    assert [a.filename for a in atts] == ["rechnung.jpg"]
 
 
 def test_attachments_skip_empty():

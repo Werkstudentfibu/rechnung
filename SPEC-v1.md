@@ -41,7 +41,12 @@ Volumens). Einmal-Lieferanten bleiben vorerst manuell.
 - `review` – Template vorhanden, aber Konfidenz/Prüfung schwach → Mensch schaut drauf.
 - `no_template` – Lieferant bekannt, noch kein Template → anlernen.
 - `unknown_supplier` – Lieferant nicht erkannt → anlernen.
-- `scan_no_textlayer` – kein Textlayer → OCR nötig, v1 nicht unterstützt.
+- `scan_no_textlayer` – historisch, wird seit §7n nicht mehr vergeben (Scans
+  laufen automatisch durch die Texterkennung).
+- `zurueckgestellt` – kein/mehrdeutiger Lieferant oder keine/mehrdeutige
+  Rechnungsadresse aus der Bibliothek, IBAN weicht von den Stammdaten ab, OCR
+  nicht verfuegbar/fehlgeschlagen, Zeitgrenze ueberschritten → Mensch muss ran
+  (§7l/§7m/§7n).
 
 ## 4. Daten & Speicherorte
 
@@ -345,6 +350,84 @@ verglichen (`data/shadow.jsonl`, append-only): Korrektur = abweichender
 manueller Wert oder an dieser Rechnung trainierter Anker (Audit
 `template_trained`). Auswertung je Lieferant: `rechnung schatten`,
 `GET /api/shadow`. **Reine Messung** -- §7c gilt unveraendert.
+
+## 7l. Bibliothek als einzige Quelle fuer Lieferant/Rechnungsadresse (2026-10-04)
+
+Umsetzung einer Auftraggeber-Entscheidung: Lieferanten und Rechnungsadressen
+sind **1:1 aus der Bibliothek** vorgegeben (Abbyy-Import). Das Programm
+erkennt nur per Abgleich gegen die hinterlegten Stammdaten -- es legt nie von
+selbst einen Lieferanten an und leitet die Identitaet nie aus KI-Vorschlaegen
+oder dem Verkaeufernamen einer E-Rechnung ab (die manuelle "+ Neuer
+Lieferant"-Erfassung im Training-UI, §7h, bleibt unveraendert: ein Mensch
+pflegt die Bibliothek, das Programm erfindet nichts).
+
+- **Status `zurueckgestellt` – menschlich bearbeiten** (ersetzt das fruehere
+  `unknown_supplier`; `UNKNOWN` bleibt im Code als Alias) greift, sobald
+  `identify_with_reason()` bzw. `billing.match_text()` keinen oder einen
+  mehrdeutigen Treffer liefert -- Grund steht in `Result.hold_reasons`
+  (`identify.py`, `billing.py`). Die Extraktion laeuft trotzdem durch, damit
+  der Mensch die gelesenen Werte gleich vor sich hat.
+- **Stammdaten haben Vorrang.** IBAN, USt-IdNr, Steuernummer und Adresse
+  kommen immer aus dem Lieferanten-/Adress-Datensatz (`library`), nie aus der
+  Rechnung, der E-Rechnungs-XML oder einem KI-Vorschlag. Das automatische
+  Anlernen (§7i) uebernimmt diese Felder entsprechend nicht mehr aus der
+  Rechnung in bestehende Stammdaten.
+- **Betrugsschutz:** steht auf der Rechnung eine IBAN, die nicht in den
+  Lieferanten-Stammdaten hinterlegt ist, ist die Pruefung `iban-stammdaten`
+  rot mit dem Grund "IBAN weicht von Stammdaten ab (Betrugsschutz)"
+  (`identify.IBAN_DEVIATES`) -- die Rechnung geht **immer** an den Menschen
+  und zaehlt im Schattenbetrieb nie als "wuerde durchlassen". Dieselbe Logik
+  gilt fuer eine unbekannte/mehrdeutige Rechnungsadresse.
+- Bewusst **keine** Auto-Freigabe pro Lieferant und **keine** automatische
+  Dokumentklassifikation -- jede Datei, die im Postfach ankommt, wird wie
+  eine Rechnung behandelt (§7c/§9 gelten unveraendert).
+
+## 7m. Zeitgrenze pro Rechnung (2026-10-04)
+
+`rechnung/guard.py`. Jede Rechnung bekommt fuer die komplette Verarbeitung
+(Lieferant/Vorlage-Erkennung, OCR, KI, Pruefungen) hoechstens
+`RECHNUNG_TIMEOUT` Sekunden (Standard 120, konfigurierbar, `0` = aus).
+
+- Zwei Betriebsarten: ein eigener Arbeitsprozess je Rechnung fuer Stapellaeufe
+  (`rechnung scan`, Nachtlauf) -- bei Zeitueberschreitung hart beendet und fuer
+  die naechste Rechnung neu gestartet, auch eine in einem C-Parser
+  haengenbleibende Rechnung blockiert die Schlange damit nie; ein
+  Hintergrund-Thread im selben Prozess fuer das Training-UI (teilt den
+  KI-Antwort-Cache mit `/api/invoice`, §7j).
+- Bei Abbruch: Status `zurueckgestellt`, Grund ("Zeitgrenze ... ueberschritten"
+  bzw. "Verarbeitungsfehler: ...") in `Result.hold_reasons`, Audit-Eintrag
+  `verarbeitung_abgebrochen` mit Dauer. Zaehlt im Schattenbetrieb nie als
+  "wuerde durchlassen".
+
+## 7n. Texterkennung fuer Scans (OCR) (2026-10-04)
+
+`rechnung/ocr.py`. PDFs ohne Textebene sowie Bild-Anhaenge (`.jpg`, `.jpeg`,
+`.png`, `.tif`, `.tiff`, auch aus der IONOS-Abholung, §7a) werden per
+**Tesseract** (Sprache `deu`) in ein PDF mit Textebene gewandelt und laufen
+danach ganz normal durch dieselbe Pipeline -- kein separater Pfad, keine
+Dokumentklassifikation. Rein lokal: Tesseract ist ein eigenes Programm auf
+demselben Rechner, es geht nichts ins Netz.
+
+- **Voraussetzung, keine Python-Abhaengigkeit.** Tesseract muss separat
+  installiert sein (siehe `build.md`). Ist es nicht installiert oder fehlt
+  das deutsche Sprachpaket, degradiert das Programm sauber: die Rechnung wird
+  mit dem Grund "OCR nicht verfuegbar" zurueckgestellt statt abzustuerzen.
+- Das Original bleibt unveraendert -- Archiv, sha256, Korrekturen und
+  Bestaetigung haengen immer am Original. Die erkannte Textebene liegt als
+  Arbeitskopie unter `data/ocr/<sha>.pdf` (+ `.json` mit den Konfidenzen) und
+  wird pro Original nur einmal erzeugt (Cache).
+- **Konfidenz-Herabstufung:** liegt die mittlere Wortkonfidenz unter
+  `RECHNUNG_OCR_MIN_CONF` (Standard 80) ist die Pruefung `ocr-konfidenz` rot;
+  enthaelt ein gelesenes Feld ein Wort unter `RECHNUNG_OCR_WORD_MIN_CONF`
+  (Standard 60), faellt dessen Feldkonfidenz unter `CONF_MIN`. Beides: nie
+  `auto`, nie "wuerde durchlassen" im Schattenbetrieb (§7k).
+  Felder, deren Wert aus der Texterkennung stammt, sind im Ergebnis
+  zusaetzlich mit `via: "ocr"` markiert.
+- Die Zeitgrenze (§7m) gilt fuer OCR mit -- eine haengende Texterkennung wird
+  wie jede andere Rechnung abgebrochen und zurueckgestellt.
+- Der fruehere Status `scan_no_textlayer` ("v1 nicht unterstuetzt", §3) wird
+  dadurch nicht mehr vergeben, bleibt aber als Konstante/UI-Darstellung
+  bestehen.
 
 ## 8. Offene Punkte für v1.1
 

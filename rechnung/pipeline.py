@@ -37,7 +37,8 @@ NO_TEMPLATE = "no_template"      # Lieferant bekannt, kein Template -> anlernen
 # fruehere "unknown_supplier" (UNKNOWN bleibt als Alias fuer alten Code).
 DEFERRED = "zurueckgestellt"
 UNKNOWN = DEFERRED
-SCAN = "scan_no_textlayer"      # kein Textlayer -> OCR nötig (v1 nicht unterstützt)
+SCAN = "scan_no_textlayer"      # historisch, wird nicht mehr vergeben -- Scans
+                                 # laufen seit Stufe 3 automatisch durch ocr.py
 UNSUPPORTED = "unsupported_file"  # weder PDF noch lesbare E-Rechnung (z.B. fremdes XML)
 
 # Anzeigetexte fuer die Oberflaeche
