@@ -112,6 +112,15 @@ def tagesbericht(store, samples=None, tag: str | None = None) -> dict:
     events = [e for e in store.events()
              if e.get("type") == eventlog.TYPE_PROCESSED and (e.get("ts") or "").startswith(tag)]
     an_mensch = sum(1 for e in events if e.get("status") != "auto")
+    # Ordner "Menschliche Bearbeitung" (§7u) und autonome Uebernahmen (§7v)
+    abgelegt = sum(1 for e in store.events()
+                   if e.get("type") == eventlog.TYPE_HUMAN
+                   and e.get("aktion") == eventlog.HUMAN_PLACED
+                   and (e.get("ts") or "").startswith(tag))
+    autonom = sum(1 for a in store.audit_log()
+                  if a.get("action") == "finalize"
+                  and (a.get("detail") or {}).get("freigabe") == "autonom"
+                  and (a.get("ts") or "").startswith(tag))
     durations = [e["duration_s"] for e in events if e.get("duration_s")]
     totals = shadow.stats(store)["totals"]
     gesamt = totals.get("rechnungen") or 0
@@ -120,6 +129,8 @@ def tagesbericht(store, samples=None, tag: str | None = None) -> dict:
         "tag": tag,
         "verarbeitet": len(events),
         "an_mensch": an_mensch,
+        "menschlich_abgelegt": abgelegt,
+        "autonom_uebernommen": autonom,
         "fehlerquote": round(fehler / gesamt, 3) if gesamt else None,
         "dauer": _duration_stats(durations),
         "rueckstand": _rueckstand(store, samples),

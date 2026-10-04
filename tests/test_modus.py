@@ -231,6 +231,17 @@ def test_nightly_report_contains_progress(tmp_path: Path):
     assert b["menschlich_offen"] == 0
 
 
+def test_daily_report_counts_human_and_autonomous(tmp_path: Path):
+    from rechnung.nightly import tagesbericht
+
+    store, samples = _setup(tmp_path)
+    modus.set_mode(store, modus.AUTONOM, "aaron")
+    dispatch(process(_safe_invoice(samples), store), store)
+    dispatch(process(_safe_invoice(samples, n=44, iban=FOREIGN_IBAN), store), store)
+    tb = tagesbericht(store)
+    assert tb["autonom_uebernommen"] == 1 and tb["menschlich_abgelegt"] == 1
+
+
 def test_api_modus_is_read_only(tmp_path: Path):
     from fastapi.testclient import TestClient
 

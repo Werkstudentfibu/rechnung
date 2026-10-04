@@ -243,7 +243,9 @@ Vorlage/Variante gelernt ist (eigene Id `<lieferant>__<variante>__v2`, ...).
 `rechnung nacht [--json]`: holt JobRouter-Rückmeldungen und spielt sie als
 Korrekturen ein, listet als veraltet markierte Vorlagen (§Layoutwechsel
 erkennen) auf, schreibt Fehlerbericht + Tagesbericht (verarbeitet, an
-Mensch, Fehlerquote, Dauer-Verteilung, Rückstand) als Datei unter
+Mensch, in den Ordner „Menschliche Bearbeitung“ gelegt, autonom übernommen,
+Fehlerquote, Dauer-Verteilung, Rückstand) sowie Betriebsmodus und
+Fortschritt Testphase → Autonomie (`betrieb`) als Datei unter
 `data/berichte/<datum>_<zeit>.json` und führt Gesundheitschecks aus (IONOS
 erreichbar, staut sich die JobRouter-Warteschlange, genug Plattenplatz).
 

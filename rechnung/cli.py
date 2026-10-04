@@ -325,6 +325,8 @@ def _cmd_nacht(args) -> int:
     print(f"Nachtlauf abgeschlossen ({bericht['dauer_s']:.1f} s) -> {bericht['datei']}")
     print(f"  heute verarbeitet: {tb['verarbeitet']}, an Mensch: {tb['an_mensch']}, "
           f"Fehlerquote: {tb['fehlerquote']}, Rueckstand: {tb['rueckstand']}")
+    print(f"  in Ordner Menschliche Bearbeitung gelegt: {tb['menschlich_abgelegt']}, "
+          f"autonom uebernommen: {tb['autonom_uebernommen']}")
     print(f"  JobRouter-Rueckmeldungen abgeholt: {bericht['jobrouter_feedback']['abgeholt']}")
     print(f"  {bericht['betrieb']['text']}")
     print(f"  Ordner Menschliche Bearbeitung: {bericht['betrieb']['menschlich_offen']} offen")

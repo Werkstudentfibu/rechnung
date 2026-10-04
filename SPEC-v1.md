@@ -1,6 +1,6 @@
 # SPEC v1 – Template-basierte Rechnungsextraktion
 
-Stand: 2026-09-10. Diese Spec beschreibt **v1** – bewusst klein gehalten, damit
+Stand: 2026-09-10, ergaenzt bis 2026-10-04 (§7u-§7w). Diese Spec beschreibt **v1** – bewusst klein gehalten, damit
 das Werkzeug auf jedem Firmen-Laptop ohne Installation, ohne Admin-Rechte und
 ohne Netzwerkzugriff läuft und von der IT abgenommen werden kann.
 
