@@ -94,6 +94,7 @@ class Store:
         self._corrections = self.root / "corrections"
         self._categories = self.root / "categories.json"
         self._confirmations_log = self.root / "confirmations.jsonl"
+        self._shadow = self.root / "shadow.jsonl"
         self._processed_cache: list[dict] | None = None
 
     # ---- Lieferanten --------------------------------------------------
@@ -273,6 +274,15 @@ class Store:
         if not sha:
             return False
         return any(r.get("sha256") == sha for r in _read_jsonl_safe(self._confirmations_log))
+
+    # ---- Schattenbetrieb (shadow.py): "haette durchgelassen?" vs. Mensch --
+    # Reine Messung, append-only wie audit -- beeinflusst keine Entscheidung.
+    def shadow_append(self, rec: dict) -> None:
+        with self._shadow.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    def shadow_log(self) -> list[dict]:
+        return _read_jsonl_safe(self._shadow)
 
     # ---- Kategorie-Lerntabelle (Positionstext -> Kategorie) ---------
     # Gilt lieferantenuebergreifend: einmal gelernte Zuordnungen ("Porto" ->

@@ -13,6 +13,7 @@ from . import einvoice
 from . import jobrouter
 from . import pdf as pdfmod
 from . import semantic
+from . import shadow
 from .config import jobrouter as _jr_cfg
 from .config import operator as _operator
 from .identify import (DEFAULT_CURRENCY, EXPECTED_RATES, FIXED_FIELD_TYPES, cross_check,
@@ -75,6 +76,10 @@ class Result:
     # KI-Vorschlaege, die NICHT im PDF-Text belegt waren (Feld -> Grund) --
     # verworfen, aber sichtbar, damit der Mensch weiss, was das Modell meinte.
     llm_rejected: dict[str, str] = field(default_factory=dict)
+    # Schattenbetrieb: haette die Maschine allein durchgelassen? Entschieden
+    # auf dem Stand VOR manuellen Korrekturen (shadow.decide) -- reine
+    # Messung, aendert weder Status noch Bestaetigungspflicht.
+    shadow: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -100,6 +105,8 @@ class Result:
                 for k, v in self.fields.items()
             },
             "llm_rejected": self.llm_rejected,
+            "shadow": ({k: v for k, v in self.shadow.items() if k != "values"}
+                       if self.shadow else None),
             "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in self.checks],
         }
 
@@ -344,13 +351,21 @@ def _process_einvoice(path: Path, inv, store: Store) -> Result:
     if supplier is not None:
         _inject_library_fields(res.fields, supplier)
 
-    _apply_corrections(res.fields, store.corrections(res.sha256))
+    machine = dict(res.fields)
+    corrections = store.corrections(res.sha256)
+    _apply_corrections(res.fields, corrections)
 
     res.line_items = [dict(p) for p in inv.positionen]
     res.tax_breakdown = _tax_breakdown(res.fields, [])
-    res.checks = run_all(res.fields, supplier, store.seen_invoice, res.line_items)
-    res.checks = [_einvoice_check(c, inv, res.line_items) for c in res.checks]
-    res.checks.append(_check_pdf_matches_xml(path, inv))
+    pdf_check = _check_pdf_matches_xml(path, inv)
+
+    def checks_for(fields):
+        cs = run_all(fields, supplier, store.seen_invoice, res.line_items)
+        return [_einvoice_check(c, inv, res.line_items) for c in cs] + [pdf_check]
+
+    res.checks = checks_for(res.fields)
+    res.shadow = shadow.decide(machine, checks_for(machine) if corrections else res.checks,
+                               new_supplier=supplier is None)
 
     present = [n for n in _EINVOICE_REQUIRED if n in res.fields]
     res.overall_confidence = 1.0 if len(present) == len(_EINVOICE_REQUIRED) else 0.5
@@ -397,11 +412,26 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool)
     gedeckelt)."""
     if use_llm:
         _llm_full(res, doc)
+    machine = dict(res.fields)
     _apply_corrections(res.fields, store.corrections(doc.sha256))
+    res.shadow = shadow.decide(machine, run_all(machine, supplier, store.seen_invoice,
+                                                res.line_items), new_supplier=True)
     if not any(f.source != "library" for f in res.fields.values()):
         return
     res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
     res.checks = run_all(res.fields, supplier, store.seen_invoice, res.line_items)
+
+
+def _template_checks(fields, supplier, store: Store, line_items, doc) -> list[Check]:
+    checks = run_all(fields, supplier, store.seen_invoice, line_items)
+    # cross_check liest IBAN/USt-IdNr direkt aus dem PDF-Text (nicht nur aus dem
+    # extrahierten Feld). Pro Namen genau einen Check behalten: die entschiedene
+    # Aussage schlaegt das "nicht pruefbar" von run_all.
+    for cc in cross_check(doc, supplier):
+        checks = [c for c in checks if not (c.name == cc["kind"] and c.ok is None)]
+        if not any(c.name == cc["kind"] for c in checks):
+            checks.append(Check(cc["kind"], cc["ok"], cc["detail"]))
+    return checks
 
 
 def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
@@ -470,8 +500,9 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
                 res.fields[name] = fr
 
     # Manuelle Korrekturen fuer genau diese Rechnung (sha256) gewinnen immer.
-    _apply_corrections(res.fields, store.corrections(doc.sha256),
-                       {f.name: f.value_type for f in tpl.fields})
+    machine = dict(res.fields)
+    corrections = store.corrections(doc.sha256)
+    _apply_corrections(res.fields, corrections, {f.name: f.value_type for f in tpl.fields})
 
     if tpl.line_items:
         res.line_items = apply_line_items(doc, tpl.line_items)
@@ -479,15 +510,10 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
 
     res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
 
-    res.checks = run_all(res.fields, supplier, store.seen_invoice, res.line_items)
-    # cross_check liest IBAN/USt-IdNr direkt aus dem PDF-Text (nicht nur aus dem
-    # extrahierten Feld). Pro Namen genau einen Check behalten: die entschiedene
-    # Aussage schlaegt das "nicht pruefbar" von run_all.
-    for cc in cross_check(doc, supplier):
-        res.checks = [c for c in res.checks
-                      if not (c.name == cc["kind"] and c.ok is None)]
-        if not any(c.name == cc["kind"] for c in res.checks):
-            res.checks.append(Check(cc["kind"], cc["ok"], cc["detail"]))
+    res.checks = _template_checks(res.fields, supplier, store, res.line_items, doc)
+    res.shadow = shadow.decide(
+        machine, _template_checks(machine, supplier, store, res.line_items, doc)
+        if corrections else res.checks, new_supplier=False)
 
     required = [f for f in tpl.fields if f.required]
     req_conf = [res.fields[f.name].confidence for f in required if f.name in res.fields]

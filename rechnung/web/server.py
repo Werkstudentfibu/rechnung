@@ -20,6 +20,7 @@ from .. import einvoice
 from .. import learn
 from .. import pdf as pdfmod
 from .. import semantic
+from .. import shadow
 from ..billing import BillingAddress
 from ..identify import FIXED_FIELD_TYPES, Supplier, identify, supplier_from_doc
 from ..pipeline import (CONF_MIN, EXTRACT_EINVOICE, EXTRACT_TEMPLATE, invoice_files,
@@ -481,6 +482,13 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             tpl.line_items = None
 
         store.save_template(tpl)
+        if specs:
+            # Fuer den Schattenbetrieb: an genau dieser Rechnung hat ein Mensch
+            # Anker gesetzt -- der spaetere maschinelle Stand ist dann kein
+            # eigener Verdienst der Maschine (shadow.corrected_fields).
+            from ..config import operator as _op
+            store.audit("template_trained", {"sha256": doc.sha256, "template_id": tid,
+                                              "fields": [sp.name for sp in specs]}, _op())
         items = apply_line_items(doc, tpl.line_items) if tpl.line_items else []
         return JSONResponse({"template_id": tid, "fields": len(specs),
                              "line_items": items,
@@ -543,6 +551,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         # Volle Pipeline -> feste Werte, Positionen, USt-Aufstellung, Pruefungen
         res = process(path, store)
         _log_confirmed(path, res, tpl.id, tpl.variant)
+        shadow.record(store, res, _operator())
         # Stufe 1: aus den eben bestaetigten Werten das Template ergaenzen/
         # praezisieren (gesicherte Templates werden nur ergaenzt).
         learned = learn.learn_from_confirmed(store, res, doc, _operator())
@@ -565,6 +574,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if not store.seen_sha_template(res.sha256, res.template_id):
             _log_confirmed(path, res, res.template_id, res.template_variant,
                            extraction=res.extraction)
+        shadow.record(store, res, operator)
         learned = learn.learn_from_confirmed(store, res, pdfmod.load(path), operator)
         return JSONResponse({"confirmed": True, "status": res.status,
                              "confirmations": 0, "secured": False,
@@ -575,6 +585,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         store.mark_confirmed(res.sha256, operator)
         if not store.seen_sha_template(res.sha256, None):
             _log_confirmed(path, res, None, None, extraction=EXTRACT_EINVOICE)
+        shadow.record(store, res, operator)
         return JSONResponse({"confirmed": True, "extraction": EXTRACT_EINVOICE,
                              "status": res.status})
 
@@ -712,6 +723,13 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         return JSONResponse({"ok": True})
 
     # ---- Buchungsjournal -----------------------------------------
+    @app.get("/api/shadow")
+    def shadow_stats() -> JSONResponse:
+        """Schattenbetrieb je Lieferant: Rechnungen / wuerde durchlassen /
+        davon ohne Korrektur / Fehlentscheidungen. Reine Auswertung -- die
+        Bestaetigungspflicht bleibt unveraendert."""
+        return JSONResponse(shadow.stats(store))
+
     @app.get("/api/journal")
     def journal() -> JSONResponse:
         rows = journal_rows(store)

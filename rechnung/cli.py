@@ -1,4 +1,4 @@
-"""Kommandozeile: fetch / scan / suppliers / templates / journal / push / web / app / demo."""
+"""Kommandozeile: fetch / scan / suppliers / templates / journal / schatten / push / web / app / demo."""
 
 from __future__ import annotations
 
@@ -150,6 +150,33 @@ def _cmd_journal(args) -> int:
     return 0
 
 
+def _cmd_shadow(args) -> int:
+    """Schattenbetrieb: haette das Programm allein richtig entschieden?"""
+    from .shadow import stats
+
+    data = stats(Store(args.data))
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return 0
+    if not data["rows"]:
+        print("Noch keine bestaetigten Rechnungen im Schattenbetrieb.")
+        return 0
+    cols = [("lieferant", "Lieferant", 34), ("rechnungen", "Rechnungen", 10),
+            ("wuerde_durchlassen", "wuerde durchl.", 14),
+            ("ohne_korrektur", "ohne Korrektur", 14),
+            ("fehlentscheidungen", "Fehlentsch.", 11)]
+    print(" | ".join(f"{h:>{w}.{w}s}" if k != "lieferant" else f"{h:<{w}.{w}s}"
+                     for k, h, w in cols))
+    print("-" * 95)
+    for r in data["rows"] + [dict(data["totals"], lieferant="Summe")]:
+        label = r["lieferant"] if not r.get("name") else f"{r['lieferant']} ({r['name']})"
+        print(" | ".join(f"{label:<{w}.{w}s}" if k == "lieferant" else f"{r[k]:>{w}d}"
+                         for k, _h, w in cols))
+    print("\nFehlentscheidung = haette durchgelassen, Mensch hat aber korrigiert. "
+          "Nur Messung -- jede Rechnung braucht weiterhin den Bestaetigungs-Klick.")
+    return 0
+
+
 def _cmd_web(args) -> int:
     import uvicorn
 
@@ -274,6 +301,11 @@ def main(argv=None) -> int:
     j = sub.add_parser("journal", help="Buchungsjournal (Netto/USt je Steuersatz)")
     j.add_argument("--json", action="store_true")
     j.set_defaults(func=_cmd_journal)
+
+    sh = sub.add_parser("schatten",
+                        help="Schattenbetrieb: wuerde-durchlassen vs. Korrekturen je Lieferant")
+    sh.add_argument("--json", action="store_true")
+    sh.set_defaults(func=_cmd_shadow)
 
     w = sub.add_parser("web", help="Lokale Training-UI im Browser starten (Entwicklung/Linux)")
     w.add_argument("--port", type=int, default=8000)
