@@ -272,6 +272,17 @@ function renderInvoice(d) {
   }
   fbox.appendChild(tbl);
 
+  // KI-Vorschlaege, die NICHT im PDF-Text belegt waren -- verworfen, aber
+  // sichtbar (Halluzinations-Schutz, Stufe 2).
+  const rej = Object.entries(d.llm_rejected || {});
+  if (rej.length) {
+    const rbox = document.createElement('div'); rbox.className = 'box';
+    rbox.innerHTML = `<h4>Verworfene KI-Vorschläge</h4>
+      <div class="hint">Nicht im PDF-Text gefunden – nicht übernommen:</div>` +
+      rej.map(([f, why]) => `<div class="hint">${esc(f)}: ${esc(why)}</div>`).join('');
+    fbox.appendChild(rbox);
+  }
+
   if ((STATE.similar || []).length) {
     const simBox = document.createElement('div'); simBox.className = 'box';
     simBox.innerHTML = `<h4>Ähnliche bekannte Lieferanten</h4>

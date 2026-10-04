@@ -220,9 +220,14 @@ def compact(s) -> str:
 
 def _amount_of(raw: str) -> float | None:
     t = raw.strip().rstrip(":;")
+    orig = t
     for _ in range(2):
         t = _CURRENCY_RE.sub("", t).strip()
     if not t or not _AMOUNT_FULL_RE.fullmatch(t):
+        return None
+    # Ganze Zahl ohne Nachkommastellen nur mit Prozent-/Waehrungszeichen
+    # ("19%", "1190 EUR") -- sonst waere jede Hausnummer/PLZ ein "Betrag".
+    if not re.search(r"[.,]\d", t) and t == orig:
         return None
     return parse_amount(t)
 

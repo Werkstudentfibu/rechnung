@@ -22,8 +22,8 @@ from .. import pdf as pdfmod
 from .. import semantic
 from ..billing import BillingAddress
 from ..identify import FIXED_FIELD_TYPES, Supplier, identify, supplier_from_doc
-from ..pipeline import (CONF_MIN, EXTRACT_EINVOICE, invoice_files, journal_rows,
-                        journal_totals, process)
+from ..pipeline import (CONF_MIN, EXTRACT_EINVOICE, EXTRACT_TEMPLATE, invoice_files,
+                        journal_rows, journal_totals, origin, process)
 from ..store import Store
 from ..suggest import similar_suppliers
 from ..template import (STANDARD_FIELDS, Anchor, Column, LineItemSpec, Template,
@@ -207,6 +207,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         tpl_line_items = None
         line_items: list[dict] = []
         supplier_obj = None
+        llm_rejected: dict[str, str] = {}
+        extraction = EXTRACT_TEMPLATE
         if match:
             sup, _ = match
             supplier_obj = store.supplier(sup.id) or sup
@@ -264,7 +266,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                 ]
                 if gaps:
                     hints = {n: v["raw"] for n, v in current.items() if v["source"] != "missing"}
-                    for fname, fr in semantic.extract(doc.text, gaps, hints).items():
+                    for fname, fr in semantic.extract(doc.text, gaps, hints,
+                                                      llm_rejected).items():
                         cur = current.get(fname)
                         if cur is None or cur["source"] == "missing" or fr.confidence > cur["confidence"]:
                             current[fname] = {"value": fr.value, "raw": fr.raw,
@@ -281,6 +284,19 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         # Vorlage lernt (learn.py).
         for fname, fval in store.corrections(doc.sha256).items():
             current[fname] = {"value": fval, "raw": str(fval), "confidence": 1.0, "source": "manual"}
+
+        if tid is None:
+            # Ohne Template genau das zeigen, was beim Bestaetigen uebernommen
+            # wird: Pipeline-Ergebnis inkl. Stufe 2 (KI-Extraktion, falls an),
+            # Stammdaten und Korrekturen -- erst sehen, dann bestaetigen (§7c).
+            res = process(path, store)
+            current = {k: {"value": v.value, "raw": v.raw, "confidence": v.confidence,
+                           "source": v.source} for k, v in res.fields.items()}
+            llm_rejected = res.llm_rejected
+            extraction = res.extraction
+            line_items = res.line_items
+        for v in current.values():
+            v["origin"] = origin(v["source"])
 
         # Kein Template fuer diesen Lieferanten (oder Lieferant unbekannt):
         # aehnliche bekannte Lieferanten mit Template als Anlern-Starthilfe
@@ -320,6 +336,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                                   "score": addr_match[1]} if addr_match else None),
             "suggested_terms": billing.suggest_terms(doc),
             "current": current,
+            "extraction": extraction,
+            "llm_rejected": llm_rejected,
             "similar_suppliers": similar,
         })
 
@@ -372,7 +390,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "detected_address": None,
             "suggested_terms": None,
             "current": {k: {"value": v.value, "raw": v.raw, "confidence": v.confidence,
-                            "source": v.source} for k, v in res.fields.items()},
+                            "source": v.source, "origin": origin(v.source)}
+                        for k, v in res.fields.items()},
             "similar_suppliers": [],
         }
 

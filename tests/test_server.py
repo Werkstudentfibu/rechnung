@@ -209,7 +209,7 @@ def test_invoice_endpoint_surfaces_semantic_fallback(tmp_path: Path, monkeypatch
     ]
     store.save_template(tpl)
 
-    def fake_extract(text, field_names, hints):
+    def fake_extract(text, field_names, hints, rejected=None):
         assert "bestellnummer" in field_names
         return {"bestellnummer": FieldResult("bestellnummer", "PO-42", "PO-42", 0.6, "llm")}
 

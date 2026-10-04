@@ -35,6 +35,17 @@ UNSUPPORTED = "unsupported_file"  # weder PDF noch lesbare E-Rechnung (z.B. frem
 # Woher die Feldwerte stammen (Result.extraction)
 EXTRACT_TEMPLATE = "template"
 EXTRACT_EINVOICE = "einvoice"
+EXTRACT_LLM = "llm"              # Stufe 2: KI-Extraktion ohne Template
+
+# Herkunft je Feld, vereinheitlicht fuer Anzeige/Auswertung (FieldResult.source
+# ist feiner: template-anchor/template-abs).
+ORIGINS = ("einvoice", "template", "llm", "library", "manual")
+
+
+def origin(source: str) -> str | None:
+    if source == "missing":
+        return None
+    return "template" if source.startswith("template") else source
 
 INVOICE_SUFFIXES = (".pdf", ".xml")
 
@@ -61,6 +72,9 @@ class Result:
     overall_confidence: float = 0.0
     extraction: str = EXTRACT_TEMPLATE
     einvoice: dict | None = None     # Rohdaten der E-Rechnung (Stufe 0), sonst None
+    # KI-Vorschlaege, die NICHT im PDF-Text belegt waren (Feld -> Grund) --
+    # verworfen, aber sichtbar, damit der Mensch weiss, was das Modell meinte.
+    llm_rejected: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -82,9 +96,10 @@ class Result:
             "tax_breakdown": self.tax_breakdown,
             "fields": {
                 k: {"value": v.value, "raw": v.raw, "confidence": v.confidence,
-                    "source": v.source}
+                    "source": v.source, "origin": origin(v.source)}
                 for k, v in self.fields.items()
             },
+            "llm_rejected": self.llm_rejected,
             "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in self.checks],
         }
 
@@ -353,13 +368,35 @@ def _apply_corrections(fields: dict[str, FieldResult], corrections: dict,
         fields[fname] = FieldResult(fname, value if ok else fval, str(fval), 1.0, "manual")
 
 
-def _finish_untemplated(res: Result, doc, supplier, store: Store) -> None:
+def _llm_full(res: Result, doc) -> None:
+    """Stufe 2: komplette KI-Extraktion, wenn es (noch) kein Template gibt.
+    Fuellt nur, was nicht schon da ist -- Stammdaten aus dem gepflegten
+    Lieferanten-Datensatz (``library``) gewinnen gegen das Modell."""
+    full = semantic.extract_full(doc.text)
+    res.llm_rejected.update(full.rejected)
+    for name, fr in full.fields.items():
+        cur = res.fields.get(name)
+        if cur is None or cur.source == "missing":
+            res.fields[name] = fr
+    if res.supplier_id is None and full.supplier.get("name"):
+        res.supplier_name = full.supplier["name"]
+    if full.line_items and not res.line_items:
+        res.line_items = full.line_items
+    if full.fields:
+        res.extraction = EXTRACT_LLM
+
+
+def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool) -> None:
     """Rechnung ohne Template (Lieferant unbekannt oder noch nicht angelernt):
-    Korrekturen trotzdem einmischen und, sobald Werte da sind, pruefen. Damit
-    kann ein Mensch die Werte direkt eintippen und bestaetigen -- aus genau
-    diesen bestaetigten Werten lernt learn.py dann das Template (Stufe 1),
-    statt dass jeder Anker von Hand angeklickt werden muss. Der Status bleibt
-    ``no_template``/``unknown_supplier``."""
+    optional KI-Extraktion (Stufe 2), Korrekturen einmischen und, sobald Werte
+    da sind, pruefen. Damit kann ein Mensch die Werte (KI-Vorschlag oder
+    eingetippt) pruefen und bestaetigen -- aus genau diesen bestaetigten
+    Werten lernt learn.py dann das Template (Stufe 1), statt dass jeder Anker
+    von Hand angeklickt werden muss. Der Status bleibt ``no_template``/
+    ``unknown_supplier`` (die KI-Konfidenz ist ohnehin unter CONF_MIN
+    gedeckelt)."""
+    if use_llm:
+        _llm_full(res, doc)
     _apply_corrections(res.fields, store.corrections(doc.sha256))
     if not any(f.source != "library" for f in res.fields.values()):
         return
@@ -386,7 +423,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     match = identify(doc, store.suppliers())
     if not match:
         res.status = UNKNOWN
-        _finish_untemplated(res, doc, None, store)
+        _finish_untemplated(res, doc, None, store, use_llm)
         return res
 
     supplier, score = match
@@ -403,7 +440,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     if tpl is None:
         res.status = NO_TEMPLATE
         _inject_library_fields(res.fields, supplier)
-        _finish_untemplated(res, doc, supplier, store)
+        _finish_untemplated(res, doc, supplier, store, use_llm)
         return res
 
     res.template_id = tpl.id
@@ -427,7 +464,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     ]
     if gaps and use_llm:
         hints = {n: r.raw for n, r in res.fields.items() if r.source != "missing"}
-        for name, fr in semantic.extract(doc.text, gaps, hints).items():
+        for name, fr in semantic.extract(doc.text, gaps, hints, res.llm_rejected).items():
             cur = res.fields.get(name)
             if cur is None or cur.source == "missing" or fr.confidence > cur.confidence:
                 res.fields[name] = fr

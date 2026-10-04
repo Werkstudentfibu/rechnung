@@ -107,8 +107,23 @@ class LlmConfig:
     auf einem Laptop, groesseres sobald Server-Hardware feststeht.
     """
     enabled: bool = _b("RECHNUNG_LLM_ENABLED", False)
+    # "ollama" (lokales Ollama, /api/generate) oder "openai" (beliebiger
+    # OpenAI-kompatibler Endpoint auf eigener Hardware, z.B. vLLM oder
+    # llama.cpp-Server: /chat/completions). Bewusst KEIN fest eingebauter
+    # Cloud-Anbieter -- die URL zeigt immer auf einen selbst betriebenen Dienst.
+    backend: str = os.environ.get("RECHNUNG_LLM_BACKEND", "ollama").strip().lower()
+    # Ollama: http://127.0.0.1:11434 -- OpenAI-kompatibel: Basis inkl. /v1,
+    # z.B. http://llm-server.intern:8000/v1
     base_url: str = os.environ.get("RECHNUNG_LLM_URL", "http://127.0.0.1:11434").rstrip("/")
     model: str = os.environ.get("RECHNUNG_LLM_MODEL", "qwen2.5:3b-instruct")
+    # nur fuer "openai", falls der interne Server einen Schluessel verlangt
+    api_key: str = os.environ.get("RECHNUNG_LLM_API_KEY", "")
+    # Stufe 2: ohne Template (unbekannter Lieferant / noch nicht angelernt)
+    # die komplette Rechnung auslesen statt nur einzelne Luecken zu fuellen.
+    # Greift nur, wenn ``enabled`` an ist.
+    full_extraction: bool = _b("RECHNUNG_LLM_FULL", True)
+    # Positionen mit auslesen lassen (laengere Antwort, langsamer)
+    line_items: bool = _b("RECHNUNG_LLM_LINE_ITEMS", False)
     num_ctx: int = int(os.environ.get("RECHNUNG_LLM_CTX", "4096"))
     timeout: int = int(os.environ.get("RECHNUNG_LLM_TIMEOUT", "30"))
     # Konfidenz-Deckel: ein LLM-Treffer soll nie allein auf 'auto' hochfahren

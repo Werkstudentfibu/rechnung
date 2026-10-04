@@ -50,7 +50,7 @@ def test_semantic_fallback_disabled_by_default_no_change(tmp_path: Path):
 def test_semantic_fallback_fills_gap(tmp_path: Path, monkeypatch):
     store, inv = _basic_setup(tmp_path)
 
-    def fake_extract(text, field_names, hints):
+    def fake_extract(text, field_names, hints, rejected=None):
         assert "bestellnummer" in field_names
         assert "netto" not in field_names  # Template hat das schon stark geliefert
         return {"bestellnummer": FieldResult("bestellnummer", "PO-42", "PO-42", 0.6, "llm")}
@@ -66,7 +66,7 @@ def test_semantic_fallback_fills_gap(tmp_path: Path, monkeypatch):
 def test_semantic_fallback_never_beats_stronger_template_field(tmp_path: Path, monkeypatch):
     store, inv = _basic_setup(tmp_path)
 
-    def fake_extract(text, field_names, hints):
+    def fake_extract(text, field_names, hints, rejected=None):
         # versucht (fehlerhaft) auch ein bereits stark erkanntes Feld zu ueberschreiben
         return {"netto": FieldResult("netto", 999.0, "999", 0.6, "llm")}
 

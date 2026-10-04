@@ -91,3 +91,13 @@ def sample_dir(tmp_path: Path) -> Path:
 @pytest.fixture
 def data_dir(tmp_path: Path) -> Path:
     return tmp_path / "data"
+
+
+@pytest.fixture(autouse=True)
+def _clear_llm_cache():
+    """semantic.py cached Modellantworten je Prompt im Prozess -- zwischen
+    Tests mit unterschiedlich gemockten Antworten darf nichts haengen bleiben."""
+    from rechnung import semantic
+    semantic._resp_cache.clear()
+    yield
+    semantic._resp_cache.clear()
