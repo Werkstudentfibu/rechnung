@@ -49,11 +49,9 @@ class Document:
         return [w for p in self.pages for w in p.words]
 
 
-def load(path: str | Path) -> Document:
-    path = Path(path)
-    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+def _load_pages(src) -> list[Page]:
     pages: list[Page] = []
-    with pdfplumber.open(path) as pdf:
+    with pdfplumber.open(src) as pdf:
         for i, p in enumerate(pdf.pages):
             words = [
                 Word(w["text"], float(w["x0"]), float(w["x1"]),
@@ -61,7 +59,24 @@ def load(path: str | Path) -> Document:
                 for w in p.extract_words(keep_blank_chars=False)
             ]
             pages.append(Page(i, float(p.width), float(p.height), words))
-    return Document(path, pages, sha)
+    return pages
+
+
+def load(path: str | Path) -> Document:
+    path = Path(path)
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    return Document(path, _load_pages(path), sha)
+
+
+def load_bytes(content: bytes) -> Document:
+    """Wie ``load``, aber ohne den Umweg ueber die Platte -- fuer den
+    Dateinamen/Dokumenttitel-Check beim Postfach-Abholen (ingest.py,
+    Postfach-Baustein 8), wo noch keine Datei existiert. ``Document.path``
+    bleibt leer."""
+    import io
+
+    sha = hashlib.sha256(content).hexdigest()
+    return Document(Path(""), _load_pages(io.BytesIO(content)), sha)
 
 
 def has_text_layer(path: str | Path) -> bool:

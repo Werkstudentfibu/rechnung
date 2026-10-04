@@ -8,6 +8,7 @@ from pathlib import Path
 import hashlib
 import re
 
+from . import anlagen
 from . import belegart
 from . import billing
 from . import dubletten
@@ -136,6 +137,9 @@ class Result:
     # Schweizer QR-Zahlteil (swissqr.py), falls auf der Rechnung gefunden,
     # sonst None -- rein informativ fuer die Oberflaeche
     qr: dict | None = None
+    # Andere beschriftete Mail-Anhaenge derselben Mail, die an diesen Beleg
+    # gehaengt sind (anlagen.py, Postfach-Baustein 8): [{dateiname, art}]
+    anlagen: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -160,6 +164,7 @@ class Result:
             "sammel": self.sammel,
             "dublette": self.dublette,
             "qr": self.qr,
+            "anlagen": self.anlagen,
             "duration_s": self.duration_s,
             "aborted": self.aborted,
             "stufenzeiten": self.stufenzeiten,
@@ -514,6 +519,7 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
     timer = timer or StageTimer()
     res = Result(file=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                  extraction=EXTRACT_EINVOICE, einvoice=inv.to_dict())
+    res.anlagen = anlagen.info(store, res.sha256)
 
     with timer.stage("lieferant"):
         match = identify_einvoice(inv, store.suppliers())
@@ -775,6 +781,11 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     # -- teures Seiten-Rendern nicht bei jeder gewoehnlichen Rechnung.
     qr_obj = swissqr.read(path) if swissqr.likely(doc.text) else None
     res.qr = qr_obj.to_dict() if qr_obj else None
+
+    # Andere beschriftete Anhaenge derselben Mail (anlagen.py, Postfach-
+    # Baustein 8), falls beim Postfach-Abholen welche an diesen Beleg
+    # (sha256 der Originaldatei) gehaengt wurden.
+    res.anlagen = anlagen.info(store, doc.sha256)
 
     # Sammel-PDF (split.py): Teile tragen den Verweis aufs Original. Ein PDF
     # mit (moeglicherweise) mehreren Rechnungen wird nie als eine verarbeitet.

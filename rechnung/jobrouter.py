@@ -96,6 +96,9 @@ def payload_from_result(res: dict, cfg: JobRouterConfig | None = None) -> dict:
         "hints": list(res.get("hinweise") or []),
         # Teil eines aufgeteilten Sammel-PDFs: Verweis aufs Original
         "originalSha256": (res.get("sammel") or {}).get("original_sha256"),
+        # Andere beschriftete Anhaenge derselben Mail (AGB, Lieferschein, ...
+        # -- anlagen.py, Postfach-Baustein 8), als Anlage mitgegeben
+        "attachments": res.get("anlagen") or [],
     }
 
 

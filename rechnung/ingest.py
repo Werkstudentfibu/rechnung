@@ -20,6 +20,17 @@ Ablauf ``fetch``:
    "nur Link im Mailtext", "Rechnung im Mailtext", "Mail verschluesselt")
    samt der Mail selbst als ``.eml`` (eine Rechnung im Mailtext zusaetzlich
    als lesbares PDF).
+
+   Anhaenge sind beschriftet (Postfach-Baustein 8): nur Beleg-Anhaenge
+   (Rechnung/Gutschrift/Rechnungskorrektur/Storno/Mahnung/Abschlags-/
+   Schlussrechnung, ``belegart.BELEGARTEN``) werden als eigene Rechnung
+   verarbeitet -- erst am Dateinamen, dann am Dokumenttitel der ersten
+   Seite erkannt. Andere beschriftete Anhaenge derselben Mail (AGB,
+   Lieferschein, Auftragsbestaetigung, ..., ``belegart.ANLAGEN``) werden
+   NICHT verarbeitet, sondern als Anlage an jeden Beleg dieser Mail
+   gehaengt (``anlagen.py``). Kein einziger erkannter Beleg in der Mail
+   oder ein gar nicht zuzuordnender Anhang -> "Menschliche Bearbeitung",
+   nie stillschweigend verworfen.
 5. Erst DANACH ``\\Seen`` setzen bzw. – falls ``done_folder`` gesetzt –
    dorthin kopieren + im Quellordner loeschen. Scheitert Schritt 4 (z.B.
    Platte voll), bleibt die Mail ungelesen und kommt beim naechsten Lauf
@@ -33,6 +44,7 @@ from __future__ import annotations
 
 import email
 import email.header
+import hashlib
 import html
 import imaplib
 import io
@@ -52,6 +64,8 @@ _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 # Gruende fuer den Ordner "Menschliche Bearbeitung" (wortgleich in Begleit-
 # datei, Fehlerbericht und Tests)
 MAIL_OHNE_ANHANG = "Mail ohne Rechnungsanhang"
+MAIL_OHNE_BELEG_ANHANG = "Mail ohne erkannten Beleg-Anhang"
+ANHANG_NICHT_ZUZUORDNEN = "Anhang nicht zuzuordnen (weder Belegart noch bekannte Beschriftung)"
 MAIL_NUR_LINK = "nur Link im Mailtext"
 MAIL_TEXT_RECHNUNG = "Rechnung im Mailtext (kein Anhang)"
 MAIL_VERSCHLUESSELT = "Mail verschluesselt (S/MIME/PGP)"
@@ -227,6 +241,38 @@ class MailOutcome:
     from_addr: str = ""
     subject: str = ""
     message_id: str = ""
+    # Andere beschriftete Anhaenge DERSELBEN Mail (AGB, Lieferschein, ...) --
+    # kein eigener Beleg, sondern an jeden Beleg dieser Mail gehaengt
+    # (Postfach-Baustein 8): (Dateiname, Inhalt, Anlagenart)
+    anlagen: list[tuple[str, bytes, str]] = field(default_factory=list)
+
+
+def _classify_attachment(att: Attachment) -> tuple[str, str | None, str]:
+    """-> ("beleg"|"anlage"|"unklar", Art, Grund). Erst der Dateiname
+    (``belegart.aus_dateiname``), dann -- nur bei PDFs -- der Dokumenttitel
+    der ersten Seite (Postfach-Baustein 8). Nur woertliche Treffer, keine
+    KI-Klassifikation."""
+    from . import belegart, dubletten
+
+    art, anlage_art, grund = belegart.aus_dateiname(att.filename)
+    if art:
+        return "beleg", art, ""
+    if anlage_art:
+        return "anlage", anlage_art, ""
+    if not grund and att.filename.lower().endswith(".pdf"):
+        try:
+            from .pdf import load_bytes
+            title = dubletten.title_text(load_bytes(att.content))
+        except Exception:  # noqa: BLE001 -- kaputtes PDF faellt der Pipeline auf
+            title = ""
+        if title:
+            art2, why2 = belegart.aus_titel(title)
+            if art2:
+                return "beleg", art2, ""
+            anlage2 = belegart.anlage_aus_titel(title)
+            if anlage2:
+                return "anlage", anlage2, ""
+    return "unklar", None, f"{ANHANG_NICHT_ZUZUORDNEN}: {att.filename}"
 
 
 def analyse_mail(raw: bytes, extensions: tuple[str, ...] = (".pdf",)) -> MailOutcome:
@@ -251,6 +297,34 @@ def analyse_mail(raw: bytes, extensions: tuple[str, ...] = (".pdf",)) -> MailOut
         if att.filename.lower().endswith(".pdf") and _pdf_locked(att.content):
             out.attachments.remove(att)
             out.human_items.append((att.filename, att.content, ANHANG_PDF_PASSWORT))
+
+    if out.attachments:
+        # Beschriftung auswaehlen (Postfach-Baustein 8): nur Beleg-Anhaenge
+        # (Rechnung/Gutschrift/...) werden als eigene Rechnung verarbeitet;
+        # andere beschriftete Anhaenge (AGB, Lieferschein, ...) haengen als
+        # Anlage am Beleg dieser Mail; unzuordenbare gehen einzeln an den
+        # Menschen. Kein einziger erkannter Beleg -> die ganze Mail.
+        beleg, anlage, unklar = [], [], []
+        for att in out.attachments:
+            kind, art, grund = _classify_attachment(att)
+            if kind == "beleg":
+                beleg.append(att)
+            elif kind == "anlage":
+                anlage.append((att.filename, att.content, art))
+            else:
+                unklar.append((att, grund))
+        if not beleg:
+            out.attachments = []
+            teile = sorted({a for _n, _c, a in anlage})
+            zusatz = f" (nur: {', '.join(teile)})" if teile else \
+                " (nicht zuzuordnen)" if unklar else ""
+            out.human_reason = MAIL_OHNE_BELEG_ANHANG + zusatz
+            return out
+        out.attachments = beleg
+        out.anlagen = anlage
+        for att, grund in unklar:
+            out.human_items.append((att.filename, att.content, grund))
+
     if out.attachments or out.human_items:
         return out
     out.ignored = [_safe_name(f) for _p, f, is_att in _parts(msg)
@@ -382,6 +456,7 @@ def handle_mail(raw: bytes, cfg: ImapConfig, dest: Path, store=None,
     """Eine Mail verarbeiten -> ``{"saved": [...], "human": [...]}``. Wirft
     nur bei echten Fehlern (Platte voll ...) -- dann darf die Mail NICHT als
     gelesen markiert werden."""
+    from . import anlagen as anlagen_mod
     from . import human
     from .store import Store
 
@@ -392,9 +467,13 @@ def handle_mail(raw: bytes, cfg: ImapConfig, dest: Path, store=None,
                 "message_id": out.message_id, "original": "postfach"}
     for att in out.attachments:
         if dry_run:
-            saved.append(f"(dry) {att.filename} <- {att.from_addr}")
+            saved.append(f"(dry) {att.filename} <- {att.from_addr}"
+                        + (f" (+{len(out.anlagen)} Anlage(n))" if out.anlagen else ""))
             continue
         saved.append(str(_save(att, dest)))
+        if out.anlagen:
+            store = store or Store(data_dir())
+            anlagen_mod.save(store, hashlib.sha256(att.content).hexdigest(), out.anlagen)
     for name, content, why in out.human_items:
         if dry_run:
             to_human.append(f"(dry) {name}: {why}")
