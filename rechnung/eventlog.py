@@ -63,6 +63,7 @@ def record(store, res, operator: str = "") -> dict:
         "stages": _stages(res),
         "status": res.status,
         "hold_reasons": list(res.hold_reasons or []),
+        "hinweise": list(res.hinweise or []),
         "duration_s": res.duration_s,
         "aborted": res.aborted,
         "stufenzeiten": dict(res.stufenzeiten or {}),

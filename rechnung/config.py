@@ -130,6 +130,26 @@ def process_timeout() -> float:
         return 120.0
 
 
+def gegencheck_min() -> int:
+    """Ab wie vielen Bestaetigungen eine Vorlage als eingespielt genug gilt,
+    dass der Gegencheck (semantic.py zusaetzlich gegen die Vorlage lesen
+    lassen, Postfach-Baustein 10) fuer sie entfaellt (``GEGENCHECK_MIN``,
+    Standard 5)."""
+    try:
+        return max(0, int(os.environ.get("RECHNUNG_GEGENCHECK_MIN", "5")))
+    except ValueError:
+        return 5
+
+
+def gegencheck_autonom() -> bool:
+    """Im Betriebsmodus autonom ist der Gegencheck per Schalter aus
+    (Standard) -- ein zusaetzlicher Modellaufruf je Rechnung kostet Zeit,
+    ohne dass im autonomen Modus noch zwingend ein Mensch zwischen Vorlage
+    und KI entscheiden muesste. In der Testphase ist der Gegencheck immer
+    aktiv (solange die Vorlage noch unter ``gegencheck_min()`` liegt)."""
+    return _b("RECHNUNG_GEGENCHECK_AUTONOM", False)
+
+
 def iban_mode() -> str:
     """Was passiert, wenn die IBAN auf der Rechnung von den Stammdaten
     abweicht (``RECHNUNG_IBAN_ABWEICHUNG``)? ``mensch`` (Standard): die

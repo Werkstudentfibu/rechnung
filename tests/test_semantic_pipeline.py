@@ -26,7 +26,12 @@ def _basic_setup(tmp_path: Path):
     sup = supplier_from_doc(doc, "muster", "Muster Handels GmbH")
     store.save_supplier(sup)
 
-    t = Template(id="muster__standard", supplier_id="muster", secured_at=1, confirmations=1)
+    # confirmations >= GEGENCHECK_MIN (Standard 5): der Gegencheck (Postfach-
+    # Baustein 10) ist hier nicht Gegenstand -- diese Tests pruefen die
+    # gezielten KI-Anfragen fuer Luecken (Effizienz-Baustein 1/2), ein
+    # zweiter, unabhaengiger semantic.extract()-Aufruf wuerde die strengen
+    # field_names-Erwartungen der Mocks hier stoeren.
+    t = Template(id="muster__standard", supplier_id="muster", secured_at=1, confirmations=5)
     t.fields = [
         FieldSpec("rechnungsnummer", "number", True, anchor=Anchor("rechnungsnummer", 0), rel=(60, -4, 240, 12)),
         FieldSpec("netto", "amount", True, anchor=Anchor("nettobetrag", 0), rel=(120, -4, 340, 12)),

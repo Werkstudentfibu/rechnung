@@ -648,6 +648,100 @@ def _llm_full(res: Result, doc) -> None:
         res.extraction = EXTRACT_LLM
 
 
+# Grobe Schaetzung, was eine zusaetzliche gezielte KI-Anfrage kostet (SPEC
+# Effizienz-Baustein 1: ein lokales Kleinmodell, keine lange Antwort) --
+# der Gegencheck (Postfach-Baustein 10) laeuft nur an, wenn danach noch
+# Luft bis zur 120-s-Zeitgrenze bleibt.
+GEGENCHECK_BUDGET_MARGIN = 15.0
+
+
+def _gegencheck_active(tpl: Template, store: Store) -> bool:
+    from . import modus
+    from .config import gegencheck_autonom, gegencheck_min
+
+    if tpl.confirmations >= gegencheck_min():
+        return False
+    return gegencheck_autonom() if modus.is_autonomous(store) else True
+
+
+def _gegencheck_felder(tpl: Template, fields: dict) -> list[str]:
+    """Pflichtfelder + von der Vorlage gelernte Felder, die aktuell einen
+    Wert haben (keine manuelle Korrektur -- die ist schon vom Menschen
+    bestaetigt, dagegen gibt es nichts gegenzupruefen)."""
+    tpl_names = {f.name for f in tpl.fields}
+    return sorted(
+        n for n, (_vtype, required) in STANDARD_FIELDS.items()
+        if (required or n in tpl_names)
+        and fields.get(n) is not None and fields[n].source not in ("missing", "manual")
+    )
+
+
+def _gegencheck_mismatch(name: str, vorlage, ki) -> bool:
+    vtype = STANDARD_FIELDS.get(name, ("text", False))[0]
+    if vtype == "amount":
+        a, b = _to_amount(vorlage), _to_amount(ki)
+        return a is None or b is None or abs(a - b) > 0.02
+    if vtype == "date":
+        return str(vorlage) != str(ki)
+    return compact(str(vorlage)) != compact(str(ki))
+
+
+def _item_total(it: dict) -> float | None:
+    v = it.get("netto") or it.get("summe") or it.get("betrag") or it.get("gesamt") \
+        or it.get("gesamtpreis")
+    return _to_amount(v)
+
+
+def _gegencheck(res: "Result", doc, tpl: Template, store: Store, timer: StageTimer,
+                use_llm: bool) -> None:
+    """Postfach-Baustein 10: solange eine Vorlage noch unter
+    ``config.gegencheck_min()`` Bestaetigungen hat, liest zusaetzlich die
+    KI gezielt dieselbe Rechnung (Beleg-Pflicht wie bei jeder KI-Antwort,
+    ``semantic._check_value``) -- komplett unabhaengig von der Vorlage,
+    deshalb OHNE Hinweise/bereits gelesene Werte im Prompt. Weichen Vorlage
+    und KI bei einem Pflichtfeld, einem Betrag oder der Positionssumme ab,
+    geht die Rechnung mit beiden Werten nebeneinander (im Rueckstellgrund)
+    an den Menschen -- seine Korrektur fliesst wie jede andere in die
+    Vorlage (bestehender Stale-/Layoutwechsel-Mechanismus, SPEC §7p). Nur
+    wenn das Zeitbudget noch reicht, sonst wird der Gegencheck
+    uebersprungen und als Hinweis vermerkt (geht mit ins
+    Ereignisprotokoll, eventlog.record). Aktiv in der Testphase; im
+    autonomen Modus per Schalter (``config.gegencheck_autonom``, Standard
+    aus)."""
+    from .config import process_timeout
+
+    if not use_llm or not _gegencheck_active(tpl, store):
+        return
+    budget = process_timeout()
+    if budget and sum(timer.times.values()) + GEGENCHECK_BUDGET_MARGIN > budget:
+        res.hinweise.append("Gegencheck uebersprungen (Zeitbudget fuer diese Rechnung "
+                            "reicht nicht mehr)")
+        return
+    namen = _gegencheck_felder(tpl, res.fields)
+    hat_positionen = bool(tpl.line_items and res.line_items)
+    if not namen and not hat_positionen:
+        return
+    with timer.stage("ki"):
+        ki_fields = semantic.extract(extraction_text(doc), namen, {}, res.llm_rejected)
+    abweichungen = []
+    for name in namen:
+        fr_ki = ki_fields.get(name)
+        fr_vorlage = res.fields.get(name)
+        if fr_ki is None or fr_vorlage is None:
+            continue
+        if _gegencheck_mismatch(name, fr_vorlage.value, fr_ki.value):
+            abweichungen.append(f"{name} (Vorlage: {fr_vorlage.value!r}, KI: {fr_ki.value!r})")
+    if hat_positionen:
+        vorlage_summe = round(sum(_item_total(it) or 0.0 for it in res.line_items), 2)
+        fr_ki_netto = ki_fields.get("netto")
+        ki_netto = _to_amount(fr_ki_netto.value) if fr_ki_netto is not None else None
+        if ki_netto is not None and abs(vorlage_summe - ki_netto) > 0.02:
+            abweichungen.append(f"Positionssumme (Vorlage: {vorlage_summe!r}, KI netto: "
+                                f"{ki_netto!r})")
+    if abweichungen:
+        res.hold_reasons.append("Gegencheck Vorlage/KI weicht ab: " + "; ".join(abweichungen))
+
+
 def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
                         extra_checks: list[Check] | None = None,
                         timer: StageTimer | None = None,
@@ -890,6 +984,8 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
         with timer.stage("vorlage"):
             res.line_items = apply_line_items(doc, tpl.line_items)
         _suggest_categories(res.line_items, tpl, store)
+
+    _gegencheck(res, doc, tpl, store, timer, use_llm)
 
     with timer.stage("pruefungen"):
         res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
