@@ -15,6 +15,7 @@ from . import ocr
 from . import pdf as pdfmod
 from . import semantic
 from . import shadow
+from .timing import StageTimer
 from .config import jobrouter as _jr_cfg
 from .config import operator as _operator
 from .identify import (DEFAULT_CURRENCY, EXPECTED_RATES, FIXED_FIELD_TYPES, IBAN_DEVIATES,
@@ -104,6 +105,9 @@ class Result:
     # ("zeitgrenze" / "fehler"), sonst leer
     duration_s: float = 0.0
     aborted: str = ""
+    # Dauer je Stufe in Sekunden (timing.py, SPEC Effizienz-Baustein 0):
+    # laden, ocr, erechnung, lieferant, vorlage, ki, pruefungen
+    stufenzeiten: dict[str, float] = field(default_factory=dict)
     # Texterkennung (ocr.py), falls der Text per OCR statt aus einer
     # Textebene stammt -- dann tragen alle gelesenen Felder ``via: ocr``.
     ocr: dict | None = None
@@ -134,6 +138,7 @@ class Result:
             "verteilung": self.verteilung,
             "duration_s": self.duration_s,
             "aborted": self.aborted,
+            "stufenzeiten": self.stufenzeiten,
             "overall_confidence": self.overall_confidence,
             "line_items": self.line_items,
             "tax_breakdown": self.tax_breakdown,
@@ -464,30 +469,32 @@ def _einvoice_check(c: Check, inv, line_items: list[dict]) -> Check:
     return c
 
 
-def _process_einvoice(path: Path, inv, store: Store) -> Result:
+def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = None) -> Result:
     """Stufe 0: Werte direkt aus dem XML, kein Template, keine KI.
 
     Konfidenz 1.0 je vorhandenem Feld -- der Wert ist nicht geraten, sondern
     vom Absender strukturiert geliefert. Die Plausibilitaetspruefungen laufen
     trotzdem (ein Absender kann auch falsch rechnen), und bestaetigt werden
     muss wie jede andere Rechnung auch (§7b)."""
+    timer = timer or StageTimer()
     res = Result(file=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                  extraction=EXTRACT_EINVOICE, einvoice=inv.to_dict())
 
-    match = identify_einvoice(inv, store.suppliers())
-    supplier = None
-    if match:
-        supplier, res.match_score = match
-        res.supplier_id = supplier.id
-        res.supplier_name = supplier.name
-    else:
-        # Lieferant nur aus der Bibliothek -- der Verkaeufername im XML ist
-        # ein Hinweis fuer den Menschen, keine Identitaet.
-        named = f" (Rechnung nennt: {inv.verkaeufer_name})" if inv.verkaeufer_name else ""
-        res.hold_reasons.append(f"Lieferant: kein Lieferant aus der Bibliothek passt{named}")
-    pdf_text = _einvoice_pdf_text(path, inv)
-    addr_check = _billing_check("\n".join([inv.kaeufer_name, pdf_text]), store, res)
-    invoice_ibans = set(inv.verkaeufer_iban) | find_ibans(pdf_text)
+    with timer.stage("lieferant"):
+        match = identify_einvoice(inv, store.suppliers())
+        supplier = None
+        if match:
+            supplier, res.match_score = match
+            res.supplier_id = supplier.id
+            res.supplier_name = supplier.name
+        else:
+            # Lieferant nur aus der Bibliothek -- der Verkaeufername im XML ist
+            # ein Hinweis fuer den Menschen, keine Identitaet.
+            named = f" (Rechnung nennt: {inv.verkaeufer_name})" if inv.verkaeufer_name else ""
+            res.hold_reasons.append(f"Lieferant: kein Lieferant aus der Bibliothek passt{named}")
+        pdf_text = _einvoice_pdf_text(path, inv)
+        addr_check = _billing_check("\n".join([inv.kaeufer_name, pdf_text]), store, res)
+        invoice_ibans = set(inv.verkaeufer_iban) | find_ibans(pdf_text)
 
     def put(name: str, value, raw: str | None = None) -> None:
         if value is None or value == "" or value == []:
@@ -495,50 +502,52 @@ def _process_einvoice(path: Path, inv, store: Store) -> Result:
         res.fields[name] = FieldResult(name, value, raw if raw is not None else str(value),
                                        1.0, EXTRACT_EINVOICE)
 
-    put("rechnungsnummer", inv.rechnungsnummer)
-    put("rechnungsdatum", inv.rechnungsdatum)
-    put("netto", inv.netto)
-    put("ust_betrag", inv.ust_betrag)
-    put("brutto", inv.brutto)
-    rates = {t["satz"] for t in inv.steuern if t.get("satz") is not None}
-    if len(rates) == 1:
-        put("ust_satz", rates.pop())
-    put("bestellnummer", inv.bestellnummer)
-    put("faelligkeit", inv.faelligkeit)
-    put("zahlbetrag", inv.zahlbetrag)
-    put("waehrung", inv.waehrung)
-    put("leitweg_id", inv.leitweg_id)
-    put("zahlungsbedingungen", inv.zahlungsbedingungen)
-    if inv.is_credit_note:
-        put("belegart", "Gutschrift", inv.type_code)
-    # Stammdaten aus dem XML selbst; der Abgleich mit dem gepflegten
-    # Lieferanten-Datensatz passiert in den Pruefungen (iban-/ustid-stammdaten).
-    put("iban", inv.verkaeufer_iban[0] if inv.verkaeufer_iban else "")
-    put("ustid", inv.verkaeufer_ustid)
-    put("steuernummer", inv.verkaeufer_steuernummer)
-    put("adresse", ", ".join(inv.verkaeufer_adresse))
-    if inv.steuern:
-        put("ust_aufstellung", [{"satz": t["satz"], "netto": t["netto"], "ust": t["ust"]}
-                                for t in inv.steuern], "")
-    if supplier is not None:
-        _inject_library_fields(res.fields, supplier)
+    with timer.stage("erechnung"):
+        put("rechnungsnummer", inv.rechnungsnummer)
+        put("rechnungsdatum", inv.rechnungsdatum)
+        put("netto", inv.netto)
+        put("ust_betrag", inv.ust_betrag)
+        put("brutto", inv.brutto)
+        rates = {t["satz"] for t in inv.steuern if t.get("satz") is not None}
+        if len(rates) == 1:
+            put("ust_satz", rates.pop())
+        put("bestellnummer", inv.bestellnummer)
+        put("faelligkeit", inv.faelligkeit)
+        put("zahlbetrag", inv.zahlbetrag)
+        put("waehrung", inv.waehrung)
+        put("leitweg_id", inv.leitweg_id)
+        put("zahlungsbedingungen", inv.zahlungsbedingungen)
+        if inv.is_credit_note:
+            put("belegart", "Gutschrift", inv.type_code)
+        # Stammdaten aus dem XML selbst; der Abgleich mit dem gepflegten
+        # Lieferanten-Datensatz passiert in den Pruefungen (iban-/ustid-stammdaten).
+        put("iban", inv.verkaeufer_iban[0] if inv.verkaeufer_iban else "")
+        put("ustid", inv.verkaeufer_ustid)
+        put("steuernummer", inv.verkaeufer_steuernummer)
+        put("adresse", ", ".join(inv.verkaeufer_adresse))
+        if inv.steuern:
+            put("ust_aufstellung", [{"satz": t["satz"], "netto": t["netto"], "ust": t["ust"]}
+                                    for t in inv.steuern], "")
+        if supplier is not None:
+            _inject_library_fields(res.fields, supplier)
 
     machine = dict(res.fields)
     corrections = store.corrections(res.sha256)
     _apply_corrections(res.fields, corrections)
 
-    res.line_items = [dict(p) for p in inv.positionen]
-    res.tax_breakdown = _tax_breakdown(res.fields, [])
-    pdf_check = _check_pdf_matches_xml(path, inv)
+    with timer.stage("pruefungen"):
+        res.line_items = [dict(p) for p in inv.positionen]
+        res.tax_breakdown = _tax_breakdown(res.fields, [])
+        pdf_check = _check_pdf_matches_xml(path, inv)
 
-    def checks_for(fields):
-        cs = run_all(fields, supplier, store.seen_invoice, res.line_items)
-        cs = [_einvoice_check(c, inv, res.line_items) for c in cs] + [pdf_check]
-        return _replace_check(cs, _iban_master_check(supplier, invoice_ibans, fields)) + [addr_check]
+        def checks_for(fields):
+            cs = run_all(fields, supplier, store.seen_invoice, res.line_items)
+            cs = [_einvoice_check(c, inv, res.line_items) for c in cs] + [pdf_check]
+            return _replace_check(cs, _iban_master_check(supplier, invoice_ibans, fields)) + [addr_check]
 
-    res.checks = checks_for(res.fields)
-    res.shadow = shadow.decide(machine, checks_for(machine) if corrections else res.checks,
-                               new_supplier=supplier is None)
+        res.checks = checks_for(res.fields)
+        res.shadow = shadow.decide(machine, checks_for(machine) if corrections else res.checks,
+                                   new_supplier=supplier is None)
 
     present = [n for n in _EINVOICE_REQUIRED if n in res.fields]
     res.overall_confidence = 1.0 if len(present) == len(_EINVOICE_REQUIRED) else 0.5
@@ -546,6 +555,7 @@ def _process_einvoice(path: Path, inv, store: Store) -> Result:
     res.status = AUTO if (supplier is not None and checks_ok
                           and res.overall_confidence >= CONF_MIN) else REVIEW
     _apply_hold(res)
+    res.stufenzeiten = timer.times
     return res
 
 
@@ -586,7 +596,8 @@ def _llm_full(res: Result, doc) -> None:
 
 
 def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
-                        extra_checks: list[Check] | None = None) -> None:
+                        extra_checks: list[Check] | None = None,
+                        timer: StageTimer | None = None) -> None:
     """Rechnung ohne Template (Lieferant unbekannt oder noch nicht angelernt):
     optional KI-Extraktion (Stufe 2), Korrekturen einmischen und, sobald Werte
     da sind, pruefen. Damit kann ein Mensch die Werte (KI-Vorschlag oder
@@ -595,18 +606,21 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
     von Hand angeklickt werden muss. Der Status bleibt ``no_template``/
     ``zurueckgestellt`` (die KI-Konfidenz ist ohnehin unter CONF_MIN
     gedeckelt)."""
+    timer = timer or StageTimer()
     extra = list(extra_checks or [])
     if use_llm:
-        _llm_full(res, doc)
+        with timer.stage("ki"):
+            _llm_full(res, doc)
     machine = dict(res.fields)
     _apply_corrections(res.fields, store.corrections(doc.sha256))
-    res.shadow = shadow.decide(machine, _all_checks(machine, supplier, store, res.line_items,
-                                                    doc, extra), new_supplier=True)
-    if not any(f.source != "library" for f in res.fields.values()):
-        res.checks = extra
-        return
-    res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
-    res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, extra)
+    with timer.stage("pruefungen"):
+        res.shadow = shadow.decide(machine, _all_checks(machine, supplier, store, res.line_items,
+                                                        doc, extra), new_supplier=True)
+        if not any(f.source != "library" for f in res.fields.values()):
+            res.checks = extra
+            return
+        res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
+        res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, extra)
 
 
 def _all_checks(fields, supplier, store: Store, line_items, doc,
@@ -631,33 +645,47 @@ def _all_checks(fields, supplier, store: Store, line_items, doc,
 
 def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     path = Path(path)
+    timer = StageTimer()
     # Stufe 0: E-Rechnung (eigenes XML oder in ein PDF eingebettet). Hat
     # Vorrang vor allem anderen -- dort steht nichts, was geraten werden muss.
-    inv = einvoice.load(path)
+    with timer.stage("erechnung"):
+        inv = einvoice.load(path)
     if inv is not None:
-        return _process_einvoice(path, inv, store)
+        res = _process_einvoice(path, inv, store, timer)
+        res.stufenzeiten = timer.times
+        return res
     if path.suffix.lower() not in (".pdf",) + ocr.IMAGE_SUFFIXES:
         return Result(file=str(path), status=UNSUPPORTED)
 
     # Scans/Bilder: Texterkennung (lokal, Tesseract), danach normal weiter.
-    doc, o = load_document(path, store)
+    with timer.stage("laden"):
+        doc, o = load_document(path, store)
+    if o is not None and o.seconds:
+        # bereits von ocr.ensure_text gemessen (Cache-Treffer: aus den Meta-
+        # daten der ersten Erkennung, nicht die aktuelle -- sehr schnelle --
+        # Cache-Lesezeit) -- eigene Zeile im Bericht statt im "laden"-Anteil
+        # versteckt, da OCR das mit Abstand teuerste Teilstueck ist.
+        timer.add("ocr", o.seconds)
     if doc is None:
         res = Result(file=str(path), sha256=o.sha256, status=DEFERRED,
                      hold_reasons=[o.error], ocr=o.to_dict())
         _apply_hold(res)
+        res.stufenzeiten = timer.times
         return res
     res = Result(file=str(path), sha256=doc.sha256)
 
     # Lieferant und Rechnungsadresse ausschliesslich per Abgleich mit der
     # Bibliothek. Kein eindeutiger Treffer -> zurueckgestellt; die Extraktion
     # laeuft trotzdem, damit der Mensch die Werte gleich vor sich hat.
-    match, why = identify_with_reason(doc, store.suppliers())
-    addr_check = _billing_check(doc.text, store, res)
+    with timer.stage("lieferant"):
+        match, why = identify_with_reason(doc, store.suppliers())
+        addr_check = _billing_check(doc.text, store, res)
     if not match:
         res.hold_reasons.insert(0, f"Lieferant: {why}")
-        _finish_untemplated(res, doc, None, store, use_llm, [addr_check])
+        _finish_untemplated(res, doc, None, store, use_llm, [addr_check], timer)
         _ocr_adjust(res, o)
         _apply_hold(res)
+        res.stufenzeiten = timer.times
         return res
 
     supplier, score = match
@@ -670,21 +698,24 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     # KI-Stufe/Handeingabe, bis aus der naechsten Bestaetigung eine neue
     # Vorlage/Variante gelernt ist. Die veraltete Vorlage bleibt gespeichert
     # (Audit/Nachvollziehbarkeit), wird nur nicht mehr ausgewaehlt.
-    active_templates = [t for t in store.templates_for(supplier.id) if not t.stale]
-    tpl = _pick_template(doc, active_templates, res.billing_address_id)
+    with timer.stage("vorlage"):
+        active_templates = [t for t in store.templates_for(supplier.id) if not t.stale]
+        tpl = _pick_template(doc, active_templates, res.billing_address_id)
     if tpl is None:
         res.status = NO_TEMPLATE
         _inject_library_fields(res.fields, supplier)
-        _finish_untemplated(res, doc, supplier, store, use_llm, [addr_check])
+        _finish_untemplated(res, doc, supplier, store, use_llm, [addr_check], timer)
         _ocr_adjust(res, o)
         _apply_hold(res)
+        res.stufenzeiten = timer.times
         return res
 
     res.template_id = tpl.id
     res.template_variant = tpl.variant
     tpl.confirmations = max(tpl.confirmations, store.distinct_confirmations(tpl.id))
     res.template_secured = tpl.secured
-    res.fields = apply_template(doc, tpl)
+    with timer.stage("vorlage"):
+        res.fields = apply_template(doc, tpl)
     _inject_library_fields(res.fields, supplier)
 
     # Semantischer Fallback (§7f, optional/aus per Default): fuer Felder, die
@@ -700,11 +731,12 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
         or res.fields[name].confidence < CONF_MIN
     ]
     if gaps and use_llm:
-        hints = {n: r.raw for n, r in res.fields.items() if r.source != "missing"}
-        for name, fr in semantic.extract(doc.text, gaps, hints, res.llm_rejected).items():
-            cur = res.fields.get(name)
-            if cur is None or cur.source == "missing" or fr.confidence > cur.confidence:
-                res.fields[name] = fr
+        with timer.stage("ki"):
+            hints = {n: r.raw for n, r in res.fields.items() if r.source != "missing"}
+            for name, fr in semantic.extract(doc.text, gaps, hints, res.llm_rejected).items():
+                cur = res.fields.get(name)
+                if cur is None or cur.source == "missing" or fr.confidence > cur.confidence:
+                    res.fields[name] = fr
 
     # Manuelle Korrekturen fuer genau diese Rechnung (sha256) gewinnen immer.
     machine = dict(res.fields)
@@ -712,15 +744,17 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     _apply_corrections(res.fields, corrections, {f.name: f.value_type for f in tpl.fields})
 
     if tpl.line_items:
-        res.line_items = apply_line_items(doc, tpl.line_items)
+        with timer.stage("vorlage"):
+            res.line_items = apply_line_items(doc, tpl.line_items)
         _suggest_categories(res.line_items, tpl, store)
 
-    res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
+    with timer.stage("pruefungen"):
+        res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
 
-    res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, [addr_check])
-    res.shadow = shadow.decide(
-        machine, _all_checks(machine, supplier, store, res.line_items, doc, [addr_check])
-        if corrections else res.checks, new_supplier=False)
+        res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, [addr_check])
+        res.shadow = shadow.decide(
+            machine, _all_checks(machine, supplier, store, res.line_items, doc, [addr_check])
+            if corrections else res.checks, new_supplier=False)
 
     required = [f for f in tpl.fields if f.required]
     req_conf = [res.fields[f.name].confidence for f in required if f.name in res.fields]
@@ -733,6 +767,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     res.status = AUTO if (tpl.secured and checks_ok and conf_ok) else REVIEW
     _ocr_adjust(res, o)
     _apply_hold(res)
+    res.stufenzeiten = timer.times
     return res
 
 

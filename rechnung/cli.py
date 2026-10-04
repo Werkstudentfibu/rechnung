@@ -130,6 +130,31 @@ def _cmd_scan(args) -> int:
     return 0
 
 
+def _cmd_messen(args) -> int:
+    """Stufenzeiten messen (Trockenlauf, nichts wird gespeichert/eingereiht)."""
+    from .messen import messen, verteilung
+
+    store = Store(args.data)
+    results = messen(args.samples, store)
+    if args.json:
+        print(json.dumps({"dateien": [r.to_dict() for r in results],
+                          "verteilung": verteilung(results)}, indent=2, ensure_ascii=False))
+        return 0
+    if not results:
+        print(f"Keine Rechnungen in {args.samples}")
+        return 0
+    for r in results:
+        stufen = " ".join(f"{k}={v:.2f}s" for k, v in (r.stufenzeiten or {}).items())
+        print(f"{Path(r.file).name:40.40s} gesamt={r.duration_s:.2f}s  {stufen}")
+    print("\nVerteilung je Stufe (Median/P90/Max, n=Anzahl):")
+    for name, d in verteilung(results).items():
+        if not d:
+            continue
+        print(f"  {name:12s} median={d['median']:.2f}s p90={d['p90']:.2f}s "
+              f"max={d['max']:.2f}s (n={d['anzahl']})")
+    return 0
+
+
 def _cmd_suppliers(args) -> int:
     store = Store(args.data)
     for s in store.suppliers():
@@ -327,6 +352,10 @@ def _cmd_nacht(args) -> int:
           f"Fehlerquote: {tb['fehlerquote']}, Rueckstand: {tb['rueckstand']}")
     print(f"  in Ordner Menschliche Bearbeitung gelegt: {tb['menschlich_abgelegt']}, "
           f"autonom uebernommen: {tb['autonom_uebernommen']}")
+    for name, d in tb.get("dauer_je_stufe", {}).items():
+        if d:
+            print(f"  Stufe {name:12s} median={d['median']:.2f}s p90={d['p90']:.2f}s "
+                  f"max={d['max']:.2f}s (n={d['anzahl']})")
     print(f"  JobRouter-Rueckmeldungen abgeholt: {bericht['jobrouter_feedback']['abgeholt']}")
     print(f"  {bericht['betrieb']['text']}")
     print(f"  Ordner Menschliche Bearbeitung: {bericht['betrieb']['menschlich_offen']} offen")
@@ -454,6 +483,11 @@ def main(argv=None) -> int:
                         help="JobRouter: Erreichbarkeit/Anmeldung pruefen, ohne eine Rechnung anzulegen")
     jt.add_argument("--json", action="store_true")
     jt.set_defaults(func=_cmd_jobrouter_test)
+
+    me = sub.add_parser("messen",
+                        help="Stufenzeiten messen (Trockenlauf, nichts wird gespeichert/eingereiht)")
+    me.add_argument("--json", action="store_true")
+    me.set_defaults(func=_cmd_messen)
 
     sub.add_parser("suppliers", help="Bekannte Lieferanten").set_defaults(func=_cmd_suppliers)
     sub.add_parser("templates", help="Gespeicherte Templates").set_defaults(func=_cmd_templates)

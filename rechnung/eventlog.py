@@ -65,6 +65,7 @@ def record(store, res, operator: str = "") -> dict:
         "hold_reasons": list(res.hold_reasons or []),
         "duration_s": res.duration_s,
         "aborted": res.aborted,
+        "stufenzeiten": dict(res.stufenzeiten or {}),
         "fields": {
             name: {"origin": _origin(fr.source), "confidence": fr.confidence}
             for name, fr in (res.fields or {}).items()

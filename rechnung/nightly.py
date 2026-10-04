@@ -17,12 +17,12 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-import statistics
 import time
 from pathlib import Path
 
 from . import eventlog, human, jobrouter, lock, modus, shadow
 from .config import imap as _imap_cfg
+from .timing import distribution as _distribution
 
 # Schwellen fuer die Gesundheitschecks -- bewusst grosszuegig geschaetzt
 # (noch keine echten Betriebsdaten zur Kalibrierung), siehe SPEC-v1.md.
@@ -74,12 +74,15 @@ def health_checks(store) -> dict:
     return {"ionos": _check_ionos(), "queue": _check_queue(store), "platte": _check_disk(store)}
 
 
-def _duration_stats(durations: list[float]) -> dict:
-    if not durations:
-        return {}
-    s = sorted(durations)
-    return {"anzahl": len(s), "min": round(s[0], 2), "max": round(s[-1], 2),
-            "median": round(statistics.median(s), 2), "mittel": round(sum(s) / len(s), 2)}
+def _stufen_verteilung(events: list[dict]) -> dict:
+    """Median/P90/Max je Verarbeitungsstufe (timing.py, SPEC Effizienz-
+    Baustein 0) -- Grundlage, um zu sehen, wo die Zeit tatsaechlich hingeht,
+    bevor weitere Effizienz-Massnahmen bewertet werden."""
+    stufen: dict[str, list[float]] = {}
+    for e in events:
+        for name, sek in (e.get("stufenzeiten") or {}).items():
+            stufen.setdefault(name, []).append(sek)
+    return {name: _distribution(werte) for name, werte in stufen.items()}
 
 
 def _rueckstand(store, samples) -> int:
@@ -132,7 +135,10 @@ def tagesbericht(store, samples=None, tag: str | None = None) -> dict:
         "menschlich_abgelegt": abgelegt,
         "autonom_uebernommen": autonom,
         "fehlerquote": round(fehler / gesamt, 3) if gesamt else None,
-        "dauer": _duration_stats(durations),
+        # Median/P90/Max gesamt und je Verarbeitungsstufe (SPEC Effizienz-
+        # Baustein 0) -- Grundlage fuer alle weiteren Effizienz-Massnahmen.
+        "dauer": _distribution(durations),
+        "dauer_je_stufe": _stufen_verteilung(events),
         "rueckstand": _rueckstand(store, samples),
     }
 
