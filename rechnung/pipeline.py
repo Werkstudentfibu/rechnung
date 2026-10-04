@@ -8,6 +8,7 @@ from pathlib import Path
 import hashlib
 import re
 
+from . import belegart
 from . import billing
 from . import dubletten
 from . import einvoice
@@ -545,8 +546,9 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
         put("waehrung", inv.waehrung)
         put("leitweg_id", inv.leitweg_id)
         put("zahlungsbedingungen", inv.zahlungsbedingungen)
-        if inv.is_credit_note:
-            put("belegart", "Gutschrift", inv.type_code)
+        # Belegart aus dem Typcode (381 Gutschrift, 384 Korrektur, ...)
+        belegart.apply(res.fields, text=pdf_text, type_code=inv.type_code,
+                       hinweise=res.hinweise)
         # Stammdaten aus dem XML selbst; der Abgleich mit dem gepflegten
         # Lieferanten-Datensatz passiert in den Pruefungen (iban-/ustid-stammdaten).
         put("iban", inv.verkaeufer_iban[0] if inv.verkaeufer_iban else "")
@@ -576,6 +578,8 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
             cs = _replace_check(cs, dubletten.check(
                 fields, supplier.id if supplier is not None else None, store, res.sha256,
                 text=pdf_text)[0])
+            for bc in belegart.checks(fields, title=pdf_text[:dubletten.TITLE_CHARS]):
+                cs = _replace_check(cs, bc)
             return _replace_check(cs, _iban_master_check(supplier, invoice_ibans, fields)) + [addr_check]
 
         res.checks = checks_for(res.fields)
@@ -650,13 +654,16 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
     # Faelligkeit/Skonto per Textregel -- nach den Korrekturen, damit eine
     # relative Frist ein vom Menschen eingetragenes Rechnungsdatum nutzt
     zahlung.apply(res.fields, doc.text, res.hinweise)
+    belegart.apply(res.fields, doc, hinweise=res.hinweise)
     with timer.stage("pruefungen"):
         res.shadow = shadow.decide(machine, _all_checks(machine, supplier, store, res.line_items,
                                                         doc, extra), new_supplier=True)
         # nur Stammdaten bzw. Zahlungsbedingungen per Textregel: noch nichts
         # Pruefbares extrahiert
         if not any(f.source not in ("library", zahlung.SOURCE) for f in res.fields.values()):
-            res.checks = extra
+            # Belegart unklar ist auch ohne Werte ein Grund fuer den Menschen
+            res.checks = extra + [c for c in belegart.checks(res.fields, doc)
+                                  if c.name == "belegart"]
             return
         res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
         res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, extra)
@@ -682,7 +689,21 @@ def _all_checks(fields, supplier, store: Store, line_items, doc,
     checks = _replace_check(checks, _iban_master_check(supplier, invoice_ibans, fields))
     checks = _replace_check(checks, dubletten.check(
         fields, supplier.id if supplier is not None else None, store, doc.sha256, doc)[0])
+    for bc in belegart.checks(fields, doc):
+        checks = _replace_check(checks, bc)
+    checks = [_credit_check(c, fields) for c in checks]
     return checks + list(extra or [])
+
+
+def _credit_check(c: Check, fields: dict) -> Check:
+    """Gutschrift/Storno: negative Betraege sind richtig, solange die Summen
+    aufgehen (wie bei der E-Rechnung, _einvoice_check)."""
+    if c.name != "betraege-plausibel" or c.ok is not False or not belegart.is_credit(fields):
+        return c
+    vals = [belegart._amount(fields, k) for k in ("netto", "ust_betrag", "brutto")]
+    if None not in vals and all(v <= 0 for v in vals) and abs(vals[0] + vals[1] - vals[2]) <= 0.02:
+        return Check(c.name, True, f"{fields['belegart'].value}, negative Betraege zulaessig")
+    return c
 
 
 def _set_dublette(res: "Result", store: Store, doc=None, text: str = "") -> None:
@@ -818,6 +839,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     _apply_corrections(res.fields, corrections, {f.name: f.value_type for f in tpl.fields})
     # Faelligkeit/Skonto: was Vorlage/Mensch nicht liefern, per Regel aus dem Text
     zahlung.apply(res.fields, doc.text, res.hinweise)
+    belegart.apply(res.fields, doc, hinweise=res.hinweise)
 
     if tpl.line_items and o is not None and o.partial:
         # Langer Scan, Positionsseiten noch ohne Texterkennung: keine halbe
@@ -1016,9 +1038,11 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
             "sammel": res.sammel,
             "rechnungsnummer": _fv(res.fields, "rechnungsnummer"),
             "rechnungsdatum": _fv(res.fields, "rechnungsdatum"),
-            "netto": _fv(res.fields, "netto"),
-            "ust_betrag": _fv(res.fields, "ust_betrag"),
-            "brutto": _fv(res.fields, "brutto"),
+            "belegart": _fv(res.fields, "belegart"),
+            **{k: v for k, v in belegart.signed(
+                {"belegart": _fv(res.fields, "belegart"), "netto": _fv(res.fields, "netto"),
+                 "ust_betrag": _fv(res.fields, "ust_betrag"),
+                 "brutto": _fv(res.fields, "brutto")}).items() if k != "belegart"},
             "tax_breakdown": res.tax_breakdown,
             "line_items": res.line_items,
         })
@@ -1029,7 +1053,7 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
             "rechnungsnummer": _fv(res.fields, "rechnungsnummer"),
         }, op)
 
-    out = {k: v.value for k, v in res.fields.items()}
+    out = belegart.signed({k: v.value for k, v in res.fields.items()})
     out["_positionen"] = res.line_items
     out["_ust_aufstellung"] = res.tax_breakdown
     if res.billing_address_name:

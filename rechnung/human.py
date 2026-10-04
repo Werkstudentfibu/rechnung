@@ -70,6 +70,8 @@ _CHECK_FIELDS = {
     "ust-aufstellung-summe": ("ust_aufstellung",),
     "positionen-summe": ("netto",),
     "pdf-xml-abgleich": ("rechnungsnummer", "brutto"),
+    "belegart": ("belegart",),
+    "vorzeichen": ("netto", "ust_betrag", "brutto"),
 }
 
 # Quellen, deren Konfidenz nicht "gelesen" ist (Stammdaten/Mensch/fehlt)

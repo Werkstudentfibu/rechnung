@@ -64,8 +64,11 @@ def payload_from_result(res: dict, cfg: JobRouterConfig | None = None) -> dict:
     Code -- die echten Werte kommen spaeter vom JobRouter-Admin des Kunden."""
     cfg = cfg or _jr_cfg()
     fields = res.get("fields", {})
-    flat_fields = {k: (v.get("value") if isinstance(v, dict) else v)
-                  for k, v in fields.items()}
+    from .belegart import signed
+
+    # Gutschrift/Storno: Betraege einheitlich negativ (belegart.py)
+    flat_fields = signed({k: (v.get("value") if isinstance(v, dict) else v)
+                          for k, v in fields.items()})
     warnings = list(res.get("warnungen") or [])
     if warnings:
         # Deutlich sichtbar fuer den Menschen, der in JobRouter freigibt --

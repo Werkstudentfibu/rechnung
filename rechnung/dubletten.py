@@ -103,7 +103,9 @@ def find(fields: dict, supplier_id: str | None, processed: list[dict], sha256: s
                 return why, r
     brutto = _amount(_value(fields, "brutto"))
     datum = _value(fields, "rechnungsdatum")
-    if brutto is not None and datum:
+    # Gutschrift/Storno/Korrektur haben oft Betrag+Datum der Ursprungsrechnung
+    korrektur = _value(fields, "belegart") in ("Gutschrift", "Storno", "Rechnungskorrektur")
+    if brutto is not None and datum and not korrektur:
         for r in mine:
             if _amount(r.get("brutto")) == brutto and r.get("rechnungsdatum") == datum:
                 return f"gleicher Lieferant, Bruttobetrag {brutto:.2f} und Datum {datum}", r
