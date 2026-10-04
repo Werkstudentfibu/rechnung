@@ -22,6 +22,7 @@ rechnung suppliers                  # bekannte Lieferanten
 rechnung templates                  # gespeicherte Templates
 rechnung schatten                   # Schattenbetrieb: haette das Programm allein richtig gelegen?
 rechnung fehlerbericht              # haeufigste wiederkehrende Fehler/Korrekturen
+rechnung nacht                      # Nachtlauf: JobRouter, Layoutwechsel, Berichte, Gesundheit
 ```
 
 `app` und `web` sind dieselbe Oberfläche (gleicher FastAPI-Code) – `app`
@@ -167,6 +168,34 @@ Rechnungen in Folge ein Pflichtfeld nicht oder geht eine Kernprüfung
 aber nicht mehr angewendet: die nächsten Rechnungen laufen über die
 KI-Stufe/Handeingabe, bis aus der nächsten Bestätigung automatisch eine neue
 Vorlage/Variante gelernt ist (eigene Id `<lieferant>__<variante>__v2`, ...).
+
+## Nachtlauf
+
+`rechnung nacht [--json]`: holt JobRouter-Rückmeldungen und spielt sie als
+Korrekturen ein, listet als veraltet markierte Vorlagen (§Layoutwechsel
+erkennen) auf, schreibt Fehlerbericht + Tagesbericht (verarbeitet, an
+Mensch, Fehlerquote, Dauer-Verteilung, Rückstand) als Datei unter
+`data/berichte/<datum>_<zeit>.json` und führt Gesundheitschecks aus (IONOS
+erreichbar, staut sich die JobRouter-Warteschlange, genug Plattenplatz).
+
+Läuft exklusiv über eine Lock-Datei (`data/nacht.lock`, `rechnung/lock.py`):
+die laufende Abholung (`rechnung fetch`) und jede Stapellauf-Verarbeitung
+(`rechnung scan`, Training-UI) pausiert für die Dauer des Nachtlaufs --
+eine Verzögerung dabei ist beabsichtigt und unkritisch. Ein zweiter
+gleichzeitig gestarteter Nachtlauf bricht sofort mit einer Fehlermeldung ab,
+statt parallel zu laufen.
+
+**Zeitsteuerung** (Beispiel: jede Nacht um 2:30 Uhr):
+
+Linux/macOS (`crontab -e`):
+```
+30 2 * * * cd /pfad/zum/programm && .venv/bin/rechnung --data ./data --samples ./samples nacht >> data/nacht.log 2>&1
+```
+
+Windows (Aufgabenplanung, PowerShell-Einzeiler für `schtasks`):
+```
+schtasks /Create /TN "Rechnung Nachtlauf" /TR "C:\Pfad\zum\Programm\.venv\Scripts\rechnung.exe --data .\data --samples .\samples nacht" /SC DAILY /ST 02:30
+```
 
 ## Rückmeldung aus JobRouter
 

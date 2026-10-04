@@ -211,6 +211,33 @@ def _cmd_fehlerbericht(args) -> int:
     return 0
 
 
+def _cmd_nacht(args) -> int:
+    """Nachtlauf: JobRouter-Rueckmeldungen holen, Layoutwechsel pruefen,
+    Fehlerbericht + Tagesbericht schreiben, Gesundheitschecks. Pausiert die
+    laufende Abholung/Verarbeitung waehrend der Dauer (Lock-Datei)."""
+    from .nightly import run_nightly
+
+    store = Store(args.data)
+    try:
+        bericht = run_nightly(store, args.samples)
+    except RuntimeError as e:
+        print(f"Fehler: {e}")
+        return 1
+    if args.json:
+        print(json.dumps(bericht, indent=2, ensure_ascii=False))
+        return 0
+    tb = bericht["tagesbericht"]
+    print(f"Nachtlauf abgeschlossen ({bericht['dauer_s']:.1f} s) -> {bericht['datei']}")
+    print(f"  heute verarbeitet: {tb['verarbeitet']}, an Mensch: {tb['an_mensch']}, "
+          f"Fehlerquote: {tb['fehlerquote']}, Rueckstand: {tb['rueckstand']}")
+    print(f"  JobRouter-Rueckmeldungen abgeholt: {bericht['jobrouter_feedback']['abgeholt']}")
+    print(f"  veraltete Vorlagen: {len(bericht['layoutwechsel']['veraltete_vorlagen'])}")
+    for name, h in bericht["gesundheit"].items():
+        mark = {True: "ok", False: "FAIL", None: "-"}[h["ok"]]
+        print(f"  [{mark:4s}] {name}: {h['detail']}")
+    return 0
+
+
 def _cmd_web(args) -> int:
     import uvicorn
 
@@ -346,6 +373,11 @@ def main(argv=None) -> int:
     fb.add_argument("--seit", help="nur Ereignisse ab diesem Datum (YYYY-MM-DD)")
     fb.add_argument("--json", action="store_true")
     fb.set_defaults(func=_cmd_fehlerbericht)
+
+    na = sub.add_parser("nacht",
+                        help="Nachtlauf: JobRouter-Rueckmeldungen, Layoutwechsel, Berichte, Gesundheitschecks")
+    na.add_argument("--json", action="store_true")
+    na.set_defaults(func=_cmd_nacht)
 
     w = sub.add_parser("web", help="Lokale Training-UI im Browser starten (Entwicklung/Linux)")
     w.add_argument("--port", type=int, default=8000)

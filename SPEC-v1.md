@@ -58,6 +58,8 @@ data/
   templates/<id>.json     Feld-Definitionen
   processed.jsonl         Verarbeitungs-Log (Dublettenprüfung, Audit)
   events.jsonl            Ereignisprotokoll (§7o): je Verarbeitung/Korrektur ein Eintrag
+  berichte/<datum>_<zeit>.json  Nachtlauf-Berichte (§7r)
+  nacht.lock              Lock-Datei waehrend eines laufenden Nachtlaufs (§7r)
   out/<rechnung>.json|csv Extraktionsergebnis
 ```
 
@@ -515,6 +517,37 @@ sonst derselbe Weg wie eine manuelle Korrektur im Training-UI:
 - Neu-Lernen der Vorlage (`learn.learn_from_confirmed`) auf Basis der
   korrigierten Werte -- kann z.B. eine Vorlage praezisieren oder (bei einer
   bereits als veraltet markierten, §7p) eine neue Version anstossen.
+
+## 7r. Nachtlauf (2026-10-04)
+
+`rechnung/nightly.py` (`run_nightly`, CLI `rechnung nacht [--json]`).
+Fasst die unbeaufsichtigten Wartungsschritte in einem Lauf zusammen:
+
+1. JobRouter-Rueckmeldungen holen und einspielen (§7q:
+   `jobrouter.fetch_feedback`/`apply_feedback`).
+2. Layoutwechsel pruefen (§7p): als veraltet markierte Vorlagen auflisten
+   (`Template.stale`) -- neu gelernt wird dabei ggf. schon ueber die gerade
+   eingespielten Rueckmeldungen, ein eigener Scan-Schritt laeuft im
+   Nachtlauf bewusst nicht (siehe Punkt 4).
+3. Fehlerbericht (§7o, `eventlog.report`) + Tagesbericht
+   (`nightly.tagesbericht`: verarbeitet, an Mensch, Fehlerquote,
+   Dauer-Verteilung, Rueckstand unbestaetigter Dateien im Sample-Ordner) als
+   JSON unter `data/berichte/<datum>_<zeit>.json`.
+4. Gesundheitschecks (`nightly.health_checks`): IONOS-Anmeldung moeglich
+   (`None`, wenn `RECHNUNG_IMAP_*` nicht gesetzt ist), JobRouter-
+   Warteschlange (`data/queue/*.json`) nicht zu lang, genug freier
+   Plattenplatz (Schwellen `QUEUE_WARN`/`DISK_WARN_MB`/`DISK_WARN_PCT` --
+   grobe Schaetzungen ohne echte Betriebsdaten, siehe §7d-Vorbild).
+
+**Lock-Datei** (`rechnung/lock.py`, `data/nacht.lock`): `run_nightly` laeuft
+exklusiv -- ein zweiter gleichzeitiger Aufruf bricht sofort mit
+`RuntimeError` ab. `ingest.fetch` und `guard.Guard.process` (also jede
+Stapellauf-Verarbeitung: `rechnung scan`, Training-UI) pruefen die
+Lock-Datei zu Beginn und pausieren, solange sie besteht -- eine Verzoegerung
+ist dabei ausdruecklich in Ordnung. Ohne bestehende Lock-Datei (Normalfall)
+entsteht kein Mehraufwand (ein Datei-Existenz-Check). Ein Sicherheitsnetz
+(`MAX_WAIT_S`, 6 Stunden) verhindert ein ewiges Haengen, falls eine
+Lock-Datei nach einem Absturz liegen bleibt.
 
 ## 8. Offene Punkte für v1.1
 

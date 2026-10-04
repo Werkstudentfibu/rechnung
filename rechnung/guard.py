@@ -130,8 +130,13 @@ class Guard:
 
     # ---- Verarbeitung --------------------------------------------------
     def process(self, path, use_llm: bool = True):
+        from . import lock
         from .store import Store
 
+        # Nachtlauf-Lock (lock.py, SPEC §7r): laeuft gerade ``rechnung
+        # nacht``, pausiert die Verarbeitung, statt parallel auf denselben
+        # Daten zu schreiben. Ohne Lock-Datei (Normalfall) kein Zeitverlust.
+        lock.wait_until_unlocked(self.data_root)
         t0 = time.monotonic()
         with self._lock:
             if self.timeout <= 0:

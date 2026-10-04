@@ -28,7 +28,8 @@ from dataclasses import dataclass
 from email.message import Message
 from pathlib import Path
 
-from .config import ImapConfig, inbox_dir
+from . import lock
+from .config import ImapConfig, data_dir, inbox_dir
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -124,6 +125,9 @@ def fetch(cfg: ImapConfig | None = None, dest: Path | None = None,
     if not cfg.configured:
         return FetchResult([], 0, dry_run, "IMAP nicht konfiguriert (RECHNUNG_IMAP_*)")
 
+    # Nachtlauf-Lock (lock.py, SPEC §7r): laeuft gerade ``rechnung nacht``,
+    # pausiert die Abholung, statt parallel auf denselben Daten zu schreiben.
+    lock.wait_until_unlocked(data_dir())
     M = imaplib.IMAP4_SSL(cfg.host, cfg.port) if cfg.ssl else imaplib.IMAP4(cfg.host, cfg.port)
     saved: list[str] = []
     mails = 0
