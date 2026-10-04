@@ -91,7 +91,7 @@ def test_pipeline_liest_felder_und_rest_folgt_im_hintergrund(lang, tmp_path):
     assert res.fields["brutto"].value == pytest.approx(soll["brutto"])
     assert res.ocr["teilweise"] is True
     assert res.line_items == []
-    assert any("Positionen erst nach vollstaendiger Texterkennung" in w for w in res.warnings)
+    assert any("Positionen erst nach vollstaendiger Texterkennung" in w for w in res.hinweise)
     # Zeitmessung mit Seitenzahl im Ereignisprotokoll
     ev = eventlog.record(store, res)
     assert ev["seiten"] == 15 and "ocr" in ev["stufenzeiten"]

@@ -17,6 +17,7 @@ from . import pdf as pdfmod
 from . import semantic
 from . import shadow
 from . import split
+from . import zahlung
 from .timing import StageTimer
 from .config import jobrouter as _jr_cfg
 from .config import operator as _operator
@@ -61,7 +62,7 @@ EXTRACT_LLM = "llm"              # Stufe 2: KI-Extraktion ohne Template
 
 # Herkunft je Feld, vereinheitlicht fuer Anzeige/Auswertung (FieldResult.source
 # ist feiner: template-anchor/template-abs).
-ORIGINS = ("einvoice", "template", "llm", "library", "manual")
+ORIGINS = ("einvoice", "template", "llm", "library", "manual", "text")
 
 
 def origin(source: str) -> str | None:
@@ -125,6 +126,10 @@ class Result:
     seiten: int = 0
     # Dublettenverdacht (dubletten.py): Verweis auf die Ur-Rechnung
     dublette: dict | None = None
+    # Hinweise fuer den Menschen, die nichts blockieren (z.B. "Skonto
+    # gestaffelt -- leer gelassen", Positionen folgen nach OCR) -- gehen mit
+    # nach JobRouter (``hints``), anders als ``warnings`` ohne "ACHTUNG"
+    hinweise: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -144,6 +149,7 @@ class Result:
             "status_label": STATUS_LABELS.get(self.status, self.status),
             "hold_reasons": self.hold_reasons,
             "warnungen": self.warnings,
+            "hinweise": self.hinweise,
             "verteilung": self.verteilung,
             "sammel": self.sammel,
             "dublette": self.dublette,
@@ -556,6 +562,8 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
     machine = dict(res.fields)
     corrections = store.corrections(res.sha256)
     _apply_corrections(res.fields, corrections)
+    # Skonto steht im XML nur als Text (XRechnung: #SKONTO#TAGE=..#PROZENT=..#)
+    zahlung.apply(res.fields, inv.zahlungsbedingungen or "", res.hinweise)
 
     with timer.stage("pruefungen"):
         res.line_items = [dict(p) for p in inv.positionen]
@@ -639,10 +647,15 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
             _llm_full(res, doc)
     machine = dict(res.fields)
     _apply_corrections(res.fields, store.corrections(doc.sha256))
+    # Faelligkeit/Skonto per Textregel -- nach den Korrekturen, damit eine
+    # relative Frist ein vom Menschen eingetragenes Rechnungsdatum nutzt
+    zahlung.apply(res.fields, doc.text, res.hinweise)
     with timer.stage("pruefungen"):
         res.shadow = shadow.decide(machine, _all_checks(machine, supplier, store, res.line_items,
                                                         doc, extra), new_supplier=True)
-        if not any(f.source != "library" for f in res.fields.values()):
+        # nur Stammdaten bzw. Zahlungsbedingungen per Textregel: noch nichts
+        # Pruefbares extrahiert
+        if not any(f.source not in ("library", zahlung.SOURCE) for f in res.fields.values()):
             res.checks = extra
             return
         res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
@@ -803,12 +816,14 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     machine = dict(res.fields)
     corrections = store.corrections(doc.sha256)
     _apply_corrections(res.fields, corrections, {f.name: f.value_type for f in tpl.fields})
+    # Faelligkeit/Skonto: was Vorlage/Mensch nicht liefern, per Regel aus dem Text
+    zahlung.apply(res.fields, doc.text, res.hinweise)
 
     if tpl.line_items and o is not None and o.partial:
         # Langer Scan, Positionsseiten noch ohne Texterkennung: keine halbe
         # Tabelle lesen (die Positionssumme waere falsch rot) -- die Positionen
         # kommen, sobald complete_pending den Rest erkannt hat.
-        res.warnings.append("Positionen erst nach vollstaendiger Texterkennung "
+        res.hinweise.append("Positionen erst nach vollstaendiger Texterkennung "
                             f"(Seiten {', '.join(str(i + 1) for i in o.missing_pages)})")
     elif tpl.line_items:
         with timer.stage("vorlage"):

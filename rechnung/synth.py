@@ -84,7 +84,8 @@ def make_invoice(path: str | Path, *, lieferant="Muster Handels GmbH",
                  ustid="DE123456789", iban="DE89370400440532013000",
                  domain="muster-handel.de", rechnungsnr="RE-2026-00042",
                  datum="14.02.2026", netto=1000.00, satz=19, waehrung="EUR",
-                 layout="a", items: list[dict] | None = None) -> Path:
+                 layout="a", items: list[dict] | None = None,
+                 zahlungstext: str | None = None) -> Path:
     path = Path(path)
     custom_items = items is not None
     if items is None:
@@ -153,7 +154,12 @@ def make_invoice(path: str | Path, *, lieferant="Muster Handels GmbH",
         ty -= 7 * mm
 
     c.setFont("Helvetica", 9)
-    c.drawString(20 * mm, 30 * mm, f"Zahlbar bis 28.02.2026 auf IBAN {iban}")
+    if zahlungstext is not None:
+        # eigene Zahlungsbedingungen (Faelligkeit/Skonto-Tests), IBAN darunter
+        c.drawString(20 * mm, 36 * mm, zahlungstext)
+        c.drawString(20 * mm, 30 * mm, f"Bankverbindung IBAN {iban}")
+    else:
+        c.drawString(20 * mm, 30 * mm, f"Zahlbar bis 28.02.2026 auf IBAN {iban}")
     c.showPage()
     c.save()
     return path

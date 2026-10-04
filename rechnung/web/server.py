@@ -659,7 +659,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if einvoice.load(path) is not None:
             return _confirm_einvoice(path, operator)
         res = _process_for_confirm(path)
-        if not any(f.source not in ("library", "missing") for f in res.fields.values()):
+        if not any(f.source not in ("library", "missing", "text") for f in res.fields.values()):
             raise HTTPException(400, "Keine Werte zum Bestaetigen -- erst Werte eintragen "
                                      "oder Template anlernen")
         store.mark_confirmed(res.sha256, operator)

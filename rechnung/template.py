@@ -34,6 +34,11 @@ STANDARD_FIELDS: dict[str, tuple[str, bool]] = {
     "bestellnummer": ("number", False),
     "ust_aufstellung": ("taxblock", False),
     "kostenstelle": ("text", False),
+    # Zahlungsbedingungen (Postfach-Baustein 5) -- lernbar wie jedes Feld;
+    # ohne Vorlage liest zahlung.py sie per Regel aus dem Text.
+    "faelligkeit": ("date", False),
+    "skonto_prozent": ("amount", False),
+    "skonto_frist": ("date", False),
 }
 
 

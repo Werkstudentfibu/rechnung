@@ -266,7 +266,8 @@ def test_pipeline_scan_without_llm(monkeypatch, tmp_path: Path):
     calls = _mock(monkeypatch, GOOD)
     store = Store(tmp_path / "data")
     res = process(make_invoice(tmp_path / "a.pdf"), store, use_llm=False)
-    assert calls == [] and res.fields == {}
+    # ohne KI nur, was die Textregel fuer Zahlungsbedingungen findet (zahlung.py)
+    assert calls == [] and {k for k, f in res.fields.items() if f.source != "text"} == set()
 
 
 def test_origin_mapping():

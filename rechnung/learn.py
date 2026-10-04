@@ -60,6 +60,10 @@ _LABEL_HINTS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "bestellnummer": (("bestellnummer", "bestellnr", "bestellung", "auftragsnummer",
                        "auftrag", "order", "po"), ("ihre", "nr", "referenz")),
     "kostenstelle": (("kostenstelle", "kst"), ()),
+    "faelligkeit": (("faellig", "faelligkeit", "faelligkeitsdatum", "zahlbar", "zahlungsziel",
+                     "due"), ("bis", "spaetestens")),
+    "skonto_prozent": (("skonto", "skontosatz"), ("abzueglich", "abzgl")),
+    "skonto_frist": (("skontofrist", "skonto"), ("bis",)),
 }
 
 _ABOVE_LINES = 3.0  # wie weit oberhalb (in Zeilenhoehen) ein Label stehen darf
@@ -221,7 +225,10 @@ def confirmed_values(fields: dict[str, FieldResult]) -> dict[str, object]:
     out = {}
     for name, fr in fields.items():
         vtype = STANDARD_FIELDS.get(name, ("",))[0]
-        if vtype not in LEARNABLE_TYPES or fr.source in ("missing", "library"):
+        # "text": per Regel aus dem Text gelesen (zahlung.py) -- die Regel
+        # findet den Wert auch kuenftig selbst; gelernt wird, was der Mensch
+        # korrigiert hat bzw. was Vorlage/KI geliefert haben.
+        if vtype not in LEARNABLE_TYPES or fr.source in ("missing", "library", "text"):
             continue
         if fr.value is None or fr.value == "":
             continue
