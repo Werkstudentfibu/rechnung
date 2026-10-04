@@ -76,6 +76,8 @@
   <button id="nav-categories" onclick="show('categories')">Kategorien</button>
   <button id="nav-journal" onclick="show('journal')">Journal</button>
   <span id="stats" class="hint" style="color:#eaf5ef"></span>
+  <span id="modus" class="hint" style="color:#eaf5ef; margin-left:auto"
+        title="Umschalten nur per Befehl: rechnung modus autonom|testphase --operator NAME"></span>
 </header>
 
 <main>
@@ -162,6 +164,7 @@ async function loadList() {
   $('#stats').textContent = `${d.results.length} PDF · ${auto} auto`;
   api('/api/menschlich').then(h =>
     $('#human-count').textContent = h.offen.length ? `(${h.offen.length})` : '');
+  loadModus();
   LIST_FILES = d.results.map(r => r.file);
   const list = $('#list'); list.innerHTML = '';
   for (const r of d.results) {
@@ -741,6 +744,17 @@ document.addEventListener('keydown', (ev) => {
   ev.preventDefault();
   confirmTpl();
 });
+
+/* ================= Betriebsmodus ================= */
+async function loadModus() {
+  const m = await api('/api/modus');
+  const prog = `${m.in_folge}/${m.ziel_in_folge} sicher in Folge · ` +
+    `${m.lieferanten_in_folge}/${m.ziel_lieferanten} Lieferanten` +
+    (m.erreicht ? ' · Richtwert erreicht' : '');
+  $('#modus').textContent = m.modus === 'autonom'
+    ? `AUTONOM (sichere Rechnungen ohne Klick an JobRouter) · ${prog}`
+    : `Testphase · ${prog}`;
+}
 
 /* ================= Menschliche Bearbeitung ================= */
 async function loadHuman() {

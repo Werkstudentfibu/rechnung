@@ -66,6 +66,11 @@ def payload_from_result(res: dict, cfg: JobRouterConfig | None = None) -> dict:
     fields = res.get("fields", {})
     flat_fields = {k: (v.get("value") if isinstance(v, dict) else v)
                   for k, v in fields.items()}
+    warnings = list(res.get("warnungen") or [])
+    if warnings:
+        # Deutlich sichtbar fuer den Menschen, der in JobRouter freigibt --
+        # als eigenes Feld (per Mapping einem JobRouter-Feld zuordenbar).
+        flat_fields["warnung"] = "; ".join(warnings)
     return {
         "process": {"name": cfg.process, "version": cfg.process_version, "step": cfg.step},
         "user": cfg.user,
@@ -82,6 +87,9 @@ def payload_from_result(res: dict, cfg: JobRouterConfig | None = None) -> dict:
         "taxBreakdown": res.get("tax_breakdown", []),
         "lineItems": res.get("line_items", []),
         "checks": {c["name"]: c["ok"] for c in res.get("checks", [])},
+        # "mensch" (Bestaetigungs-Klick) oder "autonom" (SPEC §7v)
+        "approval": res.get("freigabe") or "mensch",
+        "warnings": warnings,
     }
 
 
@@ -396,6 +404,7 @@ def apply_feedback(store, feedback: list[Feedback], operator: str = "jobrouter")
         learned = None
         if fb.fields:
             shadow.record_feedback_correction(store, fb.sha256, list(fb.fields), operator)
+            _maybe_fall_back(store, fb, operator)
             archived = _find_archived(store.root, fb.sha256)
             if archived is not None:
                 doc, o = load_document(archived, store)
@@ -405,6 +414,19 @@ def apply_feedback(store, feedback: list[Feedback], operator: str = "jobrouter")
         out.append({"sha256": fb.sha256, "status": fb.status,
                    "fields": list(fb.fields), "learned": learned})
     return out
+
+
+def _maybe_fall_back(store, fb: Feedback, operator: str) -> None:
+    """Optional (``RECHNUNG_AUTONOM_RUECKFALL=1``, Standard aus): eine
+    JobRouter-Korrektur im autonomen Modus schaltet zurueck in die
+    Testphase. Ohne die Einstellung landet der Fehler nur im Fehlerprotokoll/
+    Fehlerbericht und loest Neu-Lernen aus (SPEC §7v)."""
+    from . import modus
+
+    if modus.is_autonomous(store) and modus.rueckfall_aktiv():
+        modus.set_mode(store, modus.TESTPHASE, operator,
+                       grund=f"Rueckfall: JobRouter-Korrektur {fb.file or fb.sha256[:12]} "
+                             f"({', '.join(sorted(fb.fields))})")
 
 
 def _find_archived(data_root: str | Path, sha256: str | None) -> Path | None:

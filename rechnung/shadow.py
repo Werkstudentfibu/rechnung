@@ -22,28 +22,41 @@ from .human import file_name
 from .template import STANDARD_FIELDS, FieldResult
 
 REQUIRED = tuple(n for n, (_t, req) in STANDARD_FIELDS.items() if req)
+# = pipeline.CONF_MIN (hier dupliziert, pipeline importiert shadow)
+UNSURE_BELOW = 0.7
 
 
 def decide(fields: dict[str, FieldResult], checks: list, new_supplier: bool) -> dict:
-    """Wuerde die Maschine allein durchlassen? Alle drei Bedingungen:
+    """Wuerde die Maschine allein durchlassen? Alle vier Bedingungen:
     1. alle Pflichtfelder vorhanden,
     2. keine Pruefung rot (``ok is False``; "nicht pruefbar" zaehlt nicht rot),
     3. bei neuem Lieferanten (unbekannt/ohne Template) kein Pflichtfeld nur
        aus der KI-Extraktion -- dort gibt es noch nichts, woran sich das
        Modell bewaehrt haette.
     """
+    from .config import iban_mode
+
     reasons = []
     present = {n: f for n, f in fields.items()
                if f.source != "missing" and f.value not in (None, "")}
     missing = [n for n in REQUIRED if n not in present]
     if missing:
         reasons.append("fehlt: " + ", ".join(missing))
-    red = [c.name for c in checks if c.ok is False]
+    # Bei RECHNUNG_IBAN_ABWEICHUNG=warnen laeuft eine abweichende IBAN mit
+    # Warnfeld durch (pipeline._apply_hold) -- dann auch hier nicht rot.
+    ignored = {"iban-stammdaten"} if iban_mode() == "warnen" else set()
+    red = [c.name for c in checks if c.ok is False and c.name not in ignored]
     if red:
         reasons.append("Pruefung rot: " + ", ".join(red))
     llm_only = [n for n in REQUIRED if n in present and present[n].source == "llm"]
     if new_supplier and llm_only:
         reasons.append("neuer Lieferant, nur KI: " + ", ".join(llm_only))
+    # 4. kein gelesenes Pflichtfeld unter der Mindestkonfidenz -- dieselbe
+    #    Grenze, ab der human.py die Rechnung zum Menschen gibt.
+    unsure = [n for n in REQUIRED if n in present and present[n].source not in
+              ("library", "manual") and present[n].confidence < UNSURE_BELOW]
+    if unsure:
+        reasons.append("unsicher: " + ", ".join(unsure))
     return {
         "would_pass": not reasons,
         "reasons": reasons,

@@ -136,7 +136,10 @@ oder Gewichte — bleiben deterministisch, ohne neue Abhängigkeit, auditierbar:
   Rechnungen bestätigt werden, bevor es auf `auto` springen kann — keine
   Abkürzung bei der Vertrauens-Schwelle.
 
-## 7c. Bestätigungspflicht (v1.2) -- gilt für JEDE Rechnung, immer
+## 7c. Bestätigungspflicht (v1.2) -- gilt für JEDE Rechnung in der Testphase
+
+*Seit §7v gilt dieser Abschnitt im Betriebsmodus `testphase` (Standard). Im
+Modus `autonom` duerfen sichere Rechnungen ohne Klick uebernommen werden.*
 
 `finalize()` (Archivierung, Audit-Log, Journal, JobRouter-Einreihung) verweigert
 jede Rechnung, die nicht zuvor im Training-UI per "Extraktion bestätigen"
@@ -661,6 +664,55 @@ abgelegt, Audit `menschlich_abgelegt`/`menschlich_erledigt`, Ereignis
 `type: "menschlich"` (`aktion: abgelegt|erledigt`) in `events.jsonl`;
 der Fehlerbericht zaehlt die Ablagen je Art und Lieferant (`menschlich`).
 
+## 7v. Betriebsmodus Testphase -> Autonomie (2026-10-04) -- ergaenzt §7c/§9
+
+`rechnung/modus.py`. Vorgabe des Auftraggebers: bewusst schlank, keine
+strengen Zusatzsicherungen -- jede Rechnung wird in JobRouter ohnehin noch
+einmal von einem Menschen freigegeben (zweite Freigabe als Sicherung).
+
+- Modus programmweit in `<data>/betriebsmodus.json` (`testphase` Standard,
+  `autonom`); ohne/mit kaputter Datei immer `testphase`.
+- Umschalten ausschliesslich ueber `rechnung modus autonom|testphase
+  --operator NAME [--grund TEXT]` (`modus.set_mode`, Operator Pflicht) mit
+  Audit `betriebsmodus` (alt, neu, Grund, Richtwert erreicht?, Stand der
+  Folge). Kein automatisches Umschalten. `GET /api/modus` ist nur lesend.
+- `modus.fortschritt()` auf Basis des Schattenbetriebs (§7k, je Rechnung
+  erste Entscheidung, spaetere JobRouter-Korrektur beruecksichtigt):
+  sicher + ohne Korrektur verlaengert die Folge, eine Fehlentscheidung setzt
+  sie zurueck, unsichere (zum Menschen) zaehlen nicht und unterbrechen
+  nicht. Richtwert `RECHNUNG_TESTPHASE_IN_FOLGE` (50) und
+  `RECHNUNG_TESTPHASE_LIEFERANTEN` (10 verschiedene Lieferanten in der
+  Folge), kein Mindestzeitraum. Anzeige: Kopfzeile Training-UI,
+  `rechnung modus`, Nachtbericht `betrieb` (inkl. offene Rechnungen im
+  Ordner §7u).
+- `shadow.decide` bekommt als 4. Bedingung "kein gelesenes Pflichtfeld unter
+  0,7" -- damit sind "wuerde durchlassen" (Messung) und `human.gruende`
+  (Ordner) dieselbe Grenze.
+- `pipeline.dispatch` im Modus `autonom`: sichere Rechnung (`human.gruende`
+  leer) -> `finalize(..., autonomous=True)` ohne Bestaetigungs-Klick,
+  `shadow.record` mit Operator `autonom`. `finalize` laesst das nur zu,
+  wenn der Modus `autonom` ist UND die Rechnung sicher ist (sonst
+  `not_autonomous` bzw. `unsicher`); vermerkt `freigabe: autonom|mensch` in
+  Journal, Audit, Ausgabe und JobRouter-Nutzlast (`approval`). Unsichere
+  Rechnungen gehen in beiden Modi in den Ordner (§7u).
+- Bekannt gewordene Fehler: `jobrouter.apply_feedback` wie §7q (Korrektur,
+  Ereignisprotokoll, Schattenbetrieb, Neu-Lernen). `learn.learn_from_confirmed`
+  akzeptiert dafuer neben dem Klick auch eine autonome Uebernahme
+  (`store.seen_sha`).
+- Optional, Standard aus: `RECHNUNG_AUTONOM_STICHPROBE` (0-100 %, deterministisch
+  ueber den sha256 -- dieselbe Rechnung wird immer gleich entschieden; Grund
+  `stichprobe` im Ordner) und `RECHNUNG_AUTONOM_RUECKFALL=1` (JobRouter-
+  Korrektur im Modus `autonom` -> zurueck in `testphase`, Operator
+  `jobrouter`, Audit mit Grund).
+- IBAN-Abweichung von den Stammdaten (`RECHNUNG_IBAN_ABWEICHUNG`):
+  `mensch` (Standard, wie §7l: zurueckgestellt) oder `warnen`: kein
+  Rueckstellgrund, die rote Pruefung `iban-stammdaten` bleibt sichtbar,
+  zaehlt aber weder fuer `human.gruende` noch fuer `shadow.decide`; dafuer
+  `Result.warnings` ("ACHTUNG IBAN weicht von den Stammdaten ab: ... -- vor
+  Zahlung pruefen!") -> Ausgabe `warnung`, Audit, JobRouter-Feld `warnung`
+  (ueber das Mapping zuordenbar) + Liste `warnings`. Das IBAN-Feld bleibt die
+  Stammdaten-IBAN.
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).
@@ -668,13 +720,11 @@ der Fehlerbericht zaehlt die Ablagen je Art und Lieferant (`menschlich`).
 - Konfigurierbare Konfidenz-Schwelle je Feld statt global 0,7.
 - Umgang mit mehrseitigen Rechnungen mit Seitenumbruch in der Betragstabelle.
 
-## 9. Langfristige Perspektive (nicht v1, nicht zugesagt)
+## 9. Langfristige Perspektive
 
-Ziel ist, schrittweise auf eine Automatisierung ohne manuellen Bestätigungs-
-klick hinzuarbeiten (§7c) – aber erst, wenn die Fehlerquote im laufenden
-Testbetrieb (echte Rechnungen, mehrere Lieferanten, längerer Zeitraum)
-nachweislich niedrig genug dafür ist. Es gibt aktuell keine Metrik/Schwelle,
-ab der das greifen würde – die müsste erst aus den gesammelten
-Bestätigungs-/Korrekturdaten hergeleitet werden. Bis dahin gilt §7c
-uneingeschränkt, und jede Änderung daran braucht eine eigene, spätere
-Rücksprache mit der IT (siehe `IT-FREIGABE.md`).
+Die Automatisierung ohne manuellen Bestätigungsklick ist seit §7v als
+Betriebsmodus `autonom` umgesetzt; der Richtwert (§7v) ist eine
+konfigurierbare Orientierung, kein automatischer Schalter. Vor dem Einsatz
+von `autonom` mit echten Rechnungen ist die IT erneut einzubinden -- der
+Entwurf dafuer liegt in `IT-FREIGABE-ENTWURF-v2.md`; `IT-FREIGABE.md`
+beschreibt weiterhin den bisherigen Stand.

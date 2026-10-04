@@ -376,7 +376,10 @@ def learn_from_confirmed(store, res, doc: Document, operator: str = "") -> Learn
     """Einstieg fuer den Bestaetigungs-Pfad: lernt aus ``res`` (Ergebnis von
     ``pipeline.process()`` NACH dem Bestaetigungs-Klick, inkl. Korrekturen)
     und speichert bei Erfolg mit Audit-Eintrag ``template_learned``."""
-    if not res.sha256 or not store.is_confirmed(res.sha256):
+    # Bestaetigt = Klick im Training-UI ODER im autonomen Modus ohne Klick
+    # uebernommen (processed-Eintrag, SPEC §7v) -- eine spaetere JobRouter-
+    # Korrektur einer autonom durchgelaufenen Rechnung soll neu lernen.
+    if not res.sha256 or not (store.is_confirmed(res.sha256) or store.seen_sha(res.sha256)):
         return LearnOutcome(reason="nicht bestaetigt")
     if res.extraction == "einvoice":
         return LearnOutcome(reason="E-Rechnung (kein Layout noetig)")

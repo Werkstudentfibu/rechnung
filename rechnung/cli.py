@@ -1,4 +1,4 @@
-"""Kommandozeile: fetch / scan / suppliers / templates / journal / schatten / push / web / app / demo."""
+"""Kommandozeile: fetch / scan / suppliers / templates / journal / schatten / modus / push / web / app / demo."""
 
 from __future__ import annotations
 
@@ -111,8 +111,16 @@ def _cmd_scan(args) -> int:
         if r.supplier_name:
             head += f" {r.supplier_name} (score {r.match_score})"
         print(head + f"  [{r.duration_s:.1f} s]")
-        for why in r.hold_reasons:
-            print(f"   >> menschlich bearbeiten: {why}")
+        akt = (r.verteilung or {}).get("aktion")
+        if akt == "mensch":
+            for g in r.verteilung.get("gruende") or []:
+                print(f"   >> Ordner Menschliche Bearbeitung: {g['grund']}")
+        elif akt == "autonom":
+            fin = r.verteilung.get("finalize") or {}
+            print("   >> autonom uebernommen" + (" + JobRouter-Warteschlange"
+                                                  if fin.get("queued") else ""))
+        for w in r.warnings:
+            print(f"   !! {w}")
         for k, fr in r.fields.items():
             flag = "!" if fr.source == "missing" or fr.confidence < 0.7 else " "
             print(f"   {flag} {k:16s} {str(fr.value):24.24s} conf={fr.confidence}")
@@ -243,6 +251,39 @@ def _cmd_fehlerbericht(args) -> int:
     return 0
 
 
+def _cmd_modus(args) -> int:
+    """Betriebsmodus anzeigen bzw. ausdruecklich umschalten (Audit)."""
+    from . import modus
+
+    store = Store(args.data)
+    if args.modus:
+        if not args.operator:
+            print("Fehler: Umschalten nur mit --operator NAME (wird im Audit-Log vermerkt).")
+            return 2
+        before = modus.fortschritt(store)
+        res = modus.set_mode(store, args.modus, args.operator, args.grund or "")
+        if args.json:
+            print(json.dumps(res, indent=2, ensure_ascii=False))
+            return 0
+        print(f"Betriebsmodus: {res['alt']} -> {res['modus']} (durch {res['operator']})")
+        if args.modus == modus.AUTONOM and not before["erreicht"]:
+            print("Hinweis: Richtwert der Testphase noch nicht erreicht -- "
+                  + modus.text(before))
+        return 0
+    fp = modus.fortschritt(store)
+    if args.json:
+        print(json.dumps(fp, indent=2, ensure_ascii=False))
+        return 0
+    print(modus.text(fp))
+    if fp.get("modus_seit"):
+        print(f"  seit {fp['modus_seit']} (durch {fp['modus_operator']})")
+    if fp["letzte_fehlentscheidung"]:
+        lf = fp["letzte_fehlentscheidung"]
+        print(f"  letzte Fehlentscheidung: {lf['datei']} ({lf['lieferant']}), "
+              f"korrigiert: {', '.join(lf['korrigiert'])}")
+    return 0
+
+
 def _cmd_menschlich(args) -> int:
     """Ordner "Menschliche Bearbeitung": offene Rechnungen mit Gruenden."""
     from .human import human_dir, offen
@@ -285,6 +326,8 @@ def _cmd_nacht(args) -> int:
     print(f"  heute verarbeitet: {tb['verarbeitet']}, an Mensch: {tb['an_mensch']}, "
           f"Fehlerquote: {tb['fehlerquote']}, Rueckstand: {tb['rueckstand']}")
     print(f"  JobRouter-Rueckmeldungen abgeholt: {bericht['jobrouter_feedback']['abgeholt']}")
+    print(f"  {bericht['betrieb']['text']}")
+    print(f"  Ordner Menschliche Bearbeitung: {bericht['betrieb']['menschlich_offen']} offen")
     print(f"  veraltete Vorlagen: {len(bericht['layoutwechsel']['veraltete_vorlagen'])}")
     for name, h in bericht["gesundheit"].items():
         mark = {True: "ok", False: "FAIL", None: "-"}[h["ok"]]
@@ -437,6 +480,15 @@ def main(argv=None) -> int:
     fb.add_argument("--seit", help="nur Ereignisse ab diesem Datum (YYYY-MM-DD)")
     fb.add_argument("--json", action="store_true")
     fb.set_defaults(func=_cmd_fehlerbericht)
+
+    mo = sub.add_parser("modus",
+                        help="Betriebsmodus (testphase/autonom) anzeigen oder umschalten")
+    mo.add_argument("modus", nargs="?", choices=["testphase", "autonom"],
+                    help="neuer Modus (ohne Angabe: nur anzeigen)")
+    mo.add_argument("--operator", help="wer schaltet um (Pflicht beim Umschalten, Audit)")
+    mo.add_argument("--grund", help="optionaler Vermerk fuer das Audit-Log")
+    mo.add_argument("--json", action="store_true")
+    mo.set_defaults(func=_cmd_modus)
 
     me = sub.add_parser("menschlich",
                         help="Ordner 'Menschliche Bearbeitung': offene Rechnungen mit Gruenden")

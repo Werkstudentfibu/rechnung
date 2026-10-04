@@ -21,7 +21,7 @@ import statistics
 import time
 from pathlib import Path
 
-from . import eventlog, jobrouter, lock, shadow
+from . import eventlog, human, jobrouter, lock, modus, shadow
 from .config import imap as _imap_cfg
 
 # Schwellen fuer die Gesundheitschecks -- bewusst grosszuegig geschaetzt
@@ -126,6 +126,13 @@ def tagesbericht(store, samples=None, tag: str | None = None) -> dict:
     }
 
 
+def betrieb(store) -> dict:
+    """Betriebsmodus + Fortschritt Testphase -> Autonomie (modus.py) und wie
+    viele Rechnungen im Ordner "Menschliche Bearbeitung" warten."""
+    fp = modus.fortschritt(store)
+    return dict(fp, text=modus.text(fp), menschlich_offen=len(human.offen(store)))
+
+
 def _write_report(store, bericht: dict) -> Path:
     out_dir = store.root / "berichte"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -154,6 +161,7 @@ def run_nightly(store, samples: str | Path | None = None,
             "layoutwechsel": {"veraltete_vorlagen": stale},
             "fehlerbericht": eventlog.report(store),
             "tagesbericht": tagesbericht(store, samples),
+            "betrieb": betrieb(store),
             "gesundheit": health_checks(store),
         }
         bericht["dauer_s"] = round(time.monotonic() - t0, 2)

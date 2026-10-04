@@ -107,6 +107,11 @@ class Result:
     # Texterkennung (ocr.py), falls der Text per OCR statt aus einer
     # Textebene stammt -- dann tragen alle gelesenen Felder ``via: ocr``.
     ocr: dict | None = None
+    # Deutliche Warnungen, die mit der Rechnung bis nach JobRouter gehen
+    # (z.B. IBAN-Abweichung bei RECHNUNG_IBAN_ABWEICHUNG=warnen)
+    warnings: list[str] = field(default_factory=list)
+    # Was dispatch() mit der Rechnung gemacht hat (Mensch/autonom/...)
+    verteilung: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -125,6 +130,8 @@ class Result:
             "status": self.status,
             "status_label": STATUS_LABELS.get(self.status, self.status),
             "hold_reasons": self.hold_reasons,
+            "warnungen": self.warnings,
+            "verteilung": self.verteilung,
             "duration_s": self.duration_s,
             "aborted": self.aborted,
             "overall_confidence": self.overall_confidence,
@@ -369,10 +376,22 @@ def _billing_check(text: str, store: Store, res: "Result") -> Check:
 def _apply_hold(res: "Result") -> None:
     """Rueckstellgruende -> Status DEFERRED. Eine zurueckgestellte Rechnung
     (oder eine mit abweichender IBAN) kann im Schattenbetrieb nie als
-    "wuerde durchlassen" zaehlen."""
+    "wuerde durchlassen" zaehlen.
+
+    IBAN-Abweichung von den Stammdaten: Standard (``RECHNUNG_IBAN_ABWEICHUNG
+    =mensch``) zurueckstellen. Bei ``warnen`` laeuft die Rechnung weiter,
+    bekommt aber eine deutliche Warnung (``res.warnings``), die bis in den
+    JobRouter-Datensatz mitgeht -- dort gibt ohnehin ein Mensch frei."""
+    from .config import iban_mode
+
     for c in res.checks:
         if c.name == "iban-stammdaten" and c.ok is False and IBAN_DEVIATES not in res.hold_reasons:
-            res.hold_reasons.append(IBAN_DEVIATES)
+            if iban_mode() == "warnen":
+                warn = f"ACHTUNG {c.detail} -- vor Zahlung pruefen!"
+                if warn not in res.warnings:
+                    res.warnings.append(warn)
+            else:
+                res.hold_reasons.append(IBAN_DEVIATES)
     if not res.hold_reasons:
         return
     res.status = DEFERRED
@@ -747,16 +766,35 @@ def dispatch(res: Result, store: Store) -> dict:
     uebernommene Rechnungen bleiben unberuehrt; jede unsichere (human.py:
     zurueckgestellt, Pflichtfeld fehlt, rote Pruefung, OCR unsicher, Wert
     unsicher) geht in den Ordner "Menschliche Bearbeitung" -- nichts wird
-    geraten. Sichere warten auf den Bestaetigungs-Klick im Training-UI."""
-    from . import human
+    geraten. Sichere Rechnungen:
+
+    - Testphase (modus.py, Standard): warten auf den Bestaetigungs-Klick
+      im Training-UI (§7c).
+    - autonom: ohne Klick durch ``finalize`` in die JobRouter-Warteschlange
+      (dort gibt noch ein Mensch frei) -- ausser die optionale Stichprobe
+      schickt sie trotzdem zum Menschen.
+
+    Das Ergebnis steht auch in ``res.verteilung``."""
+    from . import human, modus
 
     if res.sha256 and store.seen_sha(res.sha256):
-        return {"aktion": "bereits_uebernommen"}
-    gruende = human.gruende(res)
-    if gruende:
+        out = {"aktion": "bereits_uebernommen"}
+    elif gruende := human.gruende(res):
         human.ablegen(store, res, gruende)
-        return {"aktion": "mensch", "gruende": gruende}
-    return {"aktion": "bestaetigung"}
+        out = {"aktion": "mensch", "gruende": gruende}
+    elif not modus.is_autonomous(store):
+        out = {"aktion": "bestaetigung"}
+    elif modus.stichprobe(res.sha256):
+        stich = [{"art": "stichprobe", "felder": [],
+                  "grund": f"Stichprobe ({modus.stichprobe_prozent()} %) -- bitte gegenpruefen"}]
+        human.ablegen(store, res, stich)
+        out = {"aktion": "mensch", "gruende": stich}
+    else:
+        fin = finalize(res, store, operator=modus.AUTONOM_OPERATOR, autonomous=True)
+        shadow.record(store, res, modus.AUTONOM_OPERATOR)
+        out = {"aktion": "autonom", "finalize": fin}
+    res.verteilung = out
+    return out
 
 
 def invoice_files(folder: str | Path) -> list[Path]:
@@ -772,7 +810,7 @@ def _fv(fields: dict, key: str):
 
 
 def finalize(res: Result, store: Store, *, operator: str | None = None,
-             to_jobrouter: bool = True) -> dict:
+             to_jobrouter: bool = True, autonomous: bool = False) -> dict:
     """Eine geprüfte Rechnung in die Bücher übernehmen.
 
     1. Original unverändert archivieren (``data/archive/<sha>.pdf|.xml`` – GoBD;
@@ -791,12 +829,27 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
     sind nur noch Konfidenz-Signale, keine Freigabe fürs automatische
     Durchlaufen; ohne Bestätigung wird nichts archiviert, geloggt oder an
     JobRouter eingereiht.
+
+    Einzige Ausnahme: ``autonomous=True`` im Betriebsmodus ``autonom``
+    (modus.py, SPEC §7v) UND die Rechnung ist sicher (``human.gruende``
+    leer) -- dann ohne Klick, vermerkt als ``freigabe: autonom`` im Audit
+    und im JobRouter-Datensatz. Unsichere Werte gehen nie ohne Mensch raus.
     """
+    from . import human, modus
+
+    freigabe = "mensch"
     if not store.is_confirmed(res.sha256):
-        return {"finalized": False, "error": "not_confirmed", "status": res.status}
+        if not autonomous:
+            return {"finalized": False, "error": "not_confirmed", "status": res.status}
+        if not modus.is_autonomous(store):
+            return {"finalized": False, "error": "not_autonomous", "status": res.status}
+        if human.gruende(res):
+            return {"finalized": False, "error": "unsicher", "status": res.status}
+        freigabe = "autonom"
 
     op = operator or _operator()
     payload = res.to_dict()
+    payload["freigabe"] = freigabe
     already = store.seen_sha_template(res.sha256, res.template_id)
 
     store.archive_pdf(res.file, res.sha256)
@@ -809,6 +862,7 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
             "billing_address_id": res.billing_address_id,
             "billing_address_name": res.billing_address_name,
             "status": res.status,
+            "freigabe": freigabe,
             "rechnungsnummer": _fv(res.fields, "rechnungsnummer"),
             "rechnungsdatum": _fv(res.fields, "rechnungsdatum"),
             "netto": _fv(res.fields, "netto"),
@@ -818,7 +872,8 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
             "line_items": res.line_items,
         })
         store.audit("finalize", {
-            "sha256": res.sha256, "status": res.status,
+            "sha256": res.sha256, "status": res.status, "freigabe": freigabe,
+            "warnungen": res.warnings,
             "template_id": res.template_id,
             "rechnungsnummer": _fv(res.fields, "rechnungsnummer"),
         }, op)
@@ -828,6 +883,9 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
     out["_ust_aufstellung"] = res.tax_breakdown
     if res.billing_address_name:
         out["rechnungsadresse"] = res.billing_address_name
+    if res.warnings:
+        out["warnung"] = "; ".join(res.warnings)
+    out["freigabe"] = freigabe
     store.write_output(Path(res.file).stem, out)
 
     queued = None
@@ -837,7 +895,7 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
             q = jobrouter.enqueue(store.root, payload)
             queued = str(q) if q else None
     return {"finalized": True, "already": already, "queued": queued,
-            "status": res.status}
+            "status": res.status, "freigabe": freigabe}
 
 
 def _round_rate(r) -> float | None:

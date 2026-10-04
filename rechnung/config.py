@@ -130,6 +130,16 @@ def process_timeout() -> float:
         return 120.0
 
 
+def iban_mode() -> str:
+    """Was passiert, wenn die IBAN auf der Rechnung von den Stammdaten
+    abweicht (``RECHNUNG_IBAN_ABWEICHUNG``)? ``mensch`` (Standard): die
+    Rechnung wird zurueckgestellt und geht in den Ordner "Menschliche
+    Bearbeitung". ``warnen``: sie laeuft weiter, traegt aber ein deutliches
+    Warnfeld bis in den JobRouter-Datensatz (pipeline._apply_hold)."""
+    v = os.environ.get("RECHNUNG_IBAN_ABWEICHUNG", "mensch").strip().lower()
+    return v if v in ("mensch", "warnen") else "mensch"
+
+
 def operator() -> str:
     """Wer bedient das Programm gerade – fuer den Audit-Trail."""
     return (os.environ.get("RECHNUNG_OPERATOR")

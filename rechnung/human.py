@@ -104,6 +104,7 @@ def _hold_art(reason: str) -> str:
 def gruende(res) -> list[dict]:
     """Warum ist das Programm bei dieser Rechnung nicht sicher? Leere Liste =
     sicher. Jeder Grund: ``{"art", "grund", "felder"}``."""
+    from .config import iban_mode
     from .pipeline import CONF_MIN, DEFERRED, UNSUPPORTED
     from .shadow import REQUIRED
 
@@ -120,6 +121,10 @@ def gruende(res) -> list[dict]:
         out.append({"art": ART_ZURUECKGESTELLT, "grund": "zurueckgestellt", "felder": []})
 
     covered = {"rechnungsadresse"} if res.hold_reasons else set()
+    if iban_mode() == "warnen":
+        # Abweichende IBAN geht mit Warnfeld durch (res.warnings), siehe
+        # pipeline._apply_hold -- keine eigene Rueckfrage beim Menschen.
+        covered.add("iban-stammdaten")
     if any(o["art"] == ART_IBAN for o in out):
         covered.add("iban-stammdaten")
     for c in res.checks or []:

@@ -813,6 +813,16 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         return JSONResponse({"ok": True})
 
     # ---- Buchungsjournal -----------------------------------------
+    @app.get("/api/modus")
+    def modus_ep() -> JSONResponse:
+        """Betriebsmodus + Fortschritt Testphase -> Autonomie (modus.py).
+        Nur lesend -- umgeschaltet wird ausschliesslich per CLI-Befehl
+        ``rechnung modus ... --operator NAME``."""
+        from .. import modus
+
+        fp = modus.fortschritt(store)
+        return JSONResponse(dict(fp, text=modus.text(fp)))
+
     @app.get("/api/menschlich")
     def menschlich_ep() -> JSONResponse:
         """Ordner "Menschliche Bearbeitung": was wartet auf wen und warum

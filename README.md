@@ -23,6 +23,8 @@ rechnung templates                  # gespeicherte Templates
 rechnung schatten                   # Schattenbetrieb: haette das Programm allein richtig gelegen?
 rechnung fehlerbericht              # haeufigste wiederkehrende Fehler/Korrekturen
 rechnung menschlich                 # Ordner "Menschliche Bearbeitung": was wartet und warum
+rechnung modus                      # Betriebsmodus + Fortschritt Testphase -> Autonomie
+rechnung modus autonom --operator NAME   # ausdruecklich umschalten (Audit-Eintrag)
 rechnung nacht                      # Nachtlauf: JobRouter, Layoutwechsel, Berichte, Gesundheit
 rechnung imap-test                  # IONOS: Anmeldung/Ordner/ungelesen pruefen, ohne abzuholen
 rechnung jobrouter-test              # JobRouter: Erreichbarkeit/Anmeldung pruefen, ohne anzulegen
@@ -51,7 +53,7 @@ die Werte. Die Herkunft steht je Feld im Ergebnis (`origin`: `einvoice` /
 | 1 – gelernte Vorlage | Template des Lieferanten (manuell angelernt **oder automatisch aus bestätigten Rechnungen gelernt**) | `template` |
 | 2 – KI-Extraktion | ohne Template: lokales/firmeneigenes Sprachmodell liest die ganze Rechnung (optional, Standard aus); jeder Wert muss im PDF-Text belegt sein | `llm` |
 | 3 – Prüfungen | Netto+USt=Brutto, IBAN-Prüfziffer, Datum, Dubletten, Stammdaten-Abgleich | – |
-| 4 – Entscheidung | **immer der Mensch** (Klick „Extraktion bestätigen“). Parallel misst der Schattenbetrieb, ob das Programm allein richtig entschieden hätte | – |
+| 4 – Entscheidung | Unsicheres → Ordner „Menschliche Bearbeitung“. Sicheres: in der **Testphase** (Standard) Klick „Extraktion bestätigen“, im Modus **autonom** ohne Klick an JobRouter (dort gibt ein Mensch frei). Der Schattenbetrieb misst, ob das Programm allein richtig entschieden hätte | – |
 
 Stammdaten (IBAN, USt-IdNr, Adresse) kommen in jeder Stufe aus dem
 Lieferanten-Datensatz (`library`), manuelle Korrekturen (`manual`) gewinnen immer.
@@ -88,24 +90,57 @@ korrigiert hat (auch ein an dieser Rechnung nachtrainierter Anker zählt als
 Korrektur). `rechnung schatten` bzw. `GET /api/shadow` zeigt je Lieferant:
 Rechnungen · würde durchlassen · davon ohne Korrektur · Fehlentscheidungen
 (hätte durchgelassen, Mensch musste korrigieren). Das ist **reine Messung**
-als Datengrundlage für die langfristige Perspektive unten – an der
-Bestätigungspflicht ändert sie nichts.
+als Datengrundlage für den Fortschritt Testphase → Autonomie (unten) – an
+der Bestätigungspflicht ändert sie nichts.
 
-## Bestätigungspflicht
+## Bestätigungspflicht (Testphase)
 
-Egal wie sicher eine Rechnung erkannt wird (auch `auto` bei einem längst
-gesicherten Template): **jede** Rechnung braucht einen expliziten Klick auf
-"Extraktion bestätigen" im Training-UI, bevor sie archiviert, geloggt oder an
-JobRouter weitergereicht wird. Automatisch ist nur die Vorbefüllung/Kategorie-
-Vorschläge – der Mensch drückt immer noch den Knopf und kann davor jederzeit
-korrigieren.
+Im Betriebsmodus **Testphase** (Standard) gilt: egal wie sicher eine Rechnung
+erkannt wird (auch `auto` bei einem längst gesicherten Template), **jede**
+Rechnung braucht einen expliziten Klick auf "Extraktion bestätigen" im
+Training-UI, bevor sie archiviert, geloggt oder an JobRouter weitergereicht
+wird. Automatisch ist nur die Vorbefüllung/Kategorie-Vorschläge – der Mensch
+drückt immer noch den Knopf und kann davor jederzeit korrigieren.
 
-**Langfristige Perspektive:** Ziel ist, schrittweise auf eine echte
-Automatisierung (Rechnungen laufen ohne Klick durch) hinzuarbeiten – aber
-erst, wenn die Fehlerquote im laufenden Testbetrieb nachweislich niedrig
-genug dafür ist. Das ist noch nicht der Fall und noch nicht umgesetzt; die
-Bestätigungspflicht oben gilt uneingeschränkt weiter, bis das explizit
-(und mit eigener IT-Freigabe) geändert wird.
+## Betriebsmodus: Testphase → Autonomie
+
+Programmweit, bewusst schlank – jede Rechnung wird in JobRouter ohnehin noch
+einmal von einem Menschen freigegeben.
+
+- **`testphase`** (Standard): Bestätigungspflicht wie oben, der
+  Schattenbetrieb misst. Kopfzeile im Training-UI, `rechnung modus` und der
+  Nachtbericht (`betrieb`) zeigen den Fortschritt gegen einen Richtwert:
+  standardmäßig **50 sichere Rechnungen in Folge ohne Korrektur** von
+  **mindestens 10 verschiedenen Lieferanten**, kein Mindestzeitraum
+  (`RECHNUNG_TESTPHASE_IN_FOLGE`, `RECHNUNG_TESTPHASE_LIEFERANTEN`). Eine
+  Fehlentscheidung (hätte durchgelassen, Mensch/JobRouter hat korrigiert)
+  setzt die Folge zurück; eine unsichere Rechnung, die zum Menschen ging,
+  zählt nicht, unterbricht aber auch nicht.
+- **`autonom`**: alles, was **nicht unsicher** ist, läuft ohne Klick durch
+  `finalize` in die JobRouter-Warteschlange (`rechnung scan`, dann wie
+  bisher `rechnung push`); im Audit und im JobRouter-Datensatz steht
+  `freigabe: autonom`. Nur Unsicheres (siehe Ordner „Menschliche
+  Bearbeitung“) geht zum Menschen.
+- **Umschalten nur per Befehl**, nie automatisch – auch nicht beim
+  Erreichen des Richtwerts: `rechnung modus autonom --operator NAME` bzw.
+  `rechnung modus testphase --operator NAME` (Audit `betriebsmodus` mit
+  altem/neuem Modus und Fortschritt; Hinweis, falls der Richtwert noch
+  nicht erreicht ist).
+- **Bekannt gewordene Fehler** (JobRouter-Rückmeldung) landen im
+  Fehlerprotokoll/Fehlerbericht, im Schattenbetrieb (Fehlentscheidung) und
+  lösen Neu-Lernen aus – auch für autonom übernommene Rechnungen.
+- **Optional, Standard aus:** Stichprobe (`RECHNUNG_AUTONOM_STICHPROBE`,
+  Prozent sicherer Rechnungen, die trotzdem zum Menschen gehen) und
+  automatischer Rückfall in die Testphase bei einer JobRouter-Korrektur
+  (`RECHNUNG_AUTONOM_RUECKFALL=1`).
+- **IBAN-Abweichung** von den Stammdaten: `RECHNUNG_IBAN_ABWEICHUNG=mensch`
+  (Standard: zurückgestellt → Ordner) oder `warnen` (geht durch, aber mit
+  deutlichem Feld `warnung` „ACHTUNG IBAN weicht von den Stammdaten ab …“ im
+  JobRouter-Datensatz; gezahlt wird weiterhin an die Stammdaten-IBAN).
+
+Die bisherigen Prüfungen (Summen, IBAN-Prüfziffer, Datum, Dublette …)
+bleiben unverändert – sie entscheiden nur darüber, ob eine Rechnung
+„unsicher → Ordner“ ist.
 
 ## Status-Werte
 
