@@ -43,6 +43,10 @@ Weitergabe als eine `.exe` ohne Python-Installation: siehe `build.md`.
 optional Tesseract + Ollama mit kleinem Modell): `build-windows.ps1`, Anleitung
 für Nicht-Entwickler in `INSTALL-WINDOWS.md`.
 Vollständige v1-Abgrenzung (für die IT-Abnahme): siehe `SPEC-v1.md`.
+Entwurf der aktualisierten IT-Freigabe (Laptop, OCR, Ollama, IONOS,
+JobRouter, Ordner „Menschliche Bearbeitung“, Testphase/autonom, späterer
+Server): `IT-FREIGABE-ENTWURF-v2.md` – `IT-FREIGABE.md` bleibt bis zur
+Abstimmung unverändert.
 
 ## Ablauf: Stufen 0–4
 

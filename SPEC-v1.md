@@ -622,6 +622,12 @@ nicht mehr gedeckt und muessen nachgezogen werden:
    werden, sobald echte Zugangsdaten vom Kunden kommen (siehe README-
    Checkliste in §7s).
 
+**Nachtrag:** Der Entwurf fuer die naechste Freigaberunde, der diese Punkte
+und die Erweiterungen §7u-§7w (Ordner "Menschliche Bearbeitung",
+Betriebsmodus autonom, Windows-Laptop/Build) abdeckt, liegt in
+`IT-FREIGABE-ENTWURF-v2.md`. `IT-FREIGABE.md` bleibt bis zur Abstimmung
+unveraendert.
+
 ## 7u. Ordner "Menschliche Bearbeitung" (2026-10-04)
 
 `rechnung/human.py`. Grundsatz: nichts wird geraten oder mit unsicheren
