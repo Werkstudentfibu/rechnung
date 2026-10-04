@@ -23,6 +23,7 @@ Leitplanken:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .pdf import Document, Word
@@ -229,12 +230,16 @@ def confirmed_values(fields: dict[str, FieldResult]) -> dict[str, object]:
 
 
 def learn_template(doc: Document, supplier_id: str, values: dict[str, object],
-                   existing: Template | None = None, variant: str = "standard"
+                   existing: Template | None = None, variant: str = "standard",
+                   template_id: str | None = None
                    ) -> tuple[Template | None, LearnOutcome]:
     """Aus bestaetigten Werten ein Template ableiten bzw. ``existing`` ergaenzen.
     Speichert nichts -- liefert das Template (oder None, wenn sich nichts
-    Verwertbares ergibt) plus Protokoll."""
-    tid = existing.id if existing else f"{supplier_id}__{variant}"
+    Verwertbares ergibt) plus Protokoll. ``template_id`` erzwingt eine Id fuer
+    ein neues Template (ohne ``existing``) -- genutzt, wenn eine als veraltet
+    markierte Vorlage fuer dieselbe Variante schon die Standard-Id belegt
+    (SPEC §7p: Layoutwechsel erkennen)."""
+    tid = existing.id if existing else (template_id or f"{supplier_id}__{variant}")
     outcome = LearnOutcome(template_id=tid, created=existing is None)
     tpl = (Template.from_dict(existing.to_dict()) if existing
            else Template(id=tid, supplier_id=supplier_id, variant=variant))
@@ -282,6 +287,91 @@ def learn_template(doc: Document, supplier_id: str, values: dict[str, object],
     return tpl, outcome
 
 
+# ---- Layoutwechsel erkennen (SPEC §7p) ---------------------------------
+# Wie oft in Folge eine gesicherte Vorlage ein Pflichtfeld nicht findet bzw.
+# eine Kernpruefung nicht aufgehen laesst, bevor sie als "veraltet" gilt.
+STALE_THRESHOLD = 2
+# Nur Kernpruefungen (Betraege) zaehlen als Layout-Indiz -- "iban-stammdaten"
+# o.ae. haengt an der Bibliothek, nicht am Layout, und wuerde sonst eine
+# intakte Vorlage faelschlich als veraltet markieren.
+_LAYOUT_CHECKS = ("netto+ust=brutto", "betraege-plausibel")
+
+_VERSION_RE = re.compile(r"__v(\d+)$")
+
+
+def _template_ok(tpl: Template, res) -> tuple[bool, str]:
+    """War die zuletzt BENUTZTE Vorlage auf dem maschinellen Stand (vor
+    Korrekturen, ``res.shadow``) ok? Pflichtfelder gefunden und keine
+    Kernpruefung rot -- sonst deutet das auf einen Layoutwechsel beim
+    Lieferanten hin."""
+    machine_sources = (res.shadow or {}).get("sources", {})
+    required = [f.name for f in tpl.fields if f.required]
+    missing = [n for n in required if machine_sources.get(n) in (None, "missing")]
+    if missing:
+        return False, f"Pflichtfeld(er) nicht gefunden: {', '.join(missing)}"
+    red = [c.name for c in res.checks if c.ok is False and c.name in _LAYOUT_CHECKS]
+    if red:
+        return False, f"Pruefung(en) nicht aufgegangen: {', '.join(red)}"
+    return True, ""
+
+
+def track_template_health(store, tpl: Template, res, operator: str = "") -> None:
+    """Zaehlt Fehlschlaege einer gesicherten Vorlage in Folge und markiert sie
+    ab ``STALE_THRESHOLD`` als veraltet (Audit ``template_stale``) -- bleibt
+    gespeichert, wird aber von ``pipeline._pick_template`` nicht mehr
+    ausgewaehlt. Nur fuer bereits gesicherte Vorlagen relevant (§7p); eine
+    noch nicht gesicherte Vorlage ist ohnehin in der Lernphase."""
+    if not tpl.secured or tpl.stale:
+        return
+    ok, reason = _template_ok(tpl, res)
+    if ok:
+        if tpl.consecutive_failures:
+            tpl.consecutive_failures = 0
+            store.save_template(tpl)
+        return
+    tpl.consecutive_failures += 1
+    if tpl.consecutive_failures >= STALE_THRESHOLD:
+        tpl.stale = True
+        store.save_template(tpl)
+        store.audit("template_stale", {
+            "template_id": tpl.id, "supplier_id": tpl.supplier_id,
+            "sha256": res.sha256, "grund": reason,
+            "fehlschlaege_in_folge": tpl.consecutive_failures,
+        }, operator)
+    else:
+        store.save_template(tpl)
+
+
+def _variant_templates(store, supplier_id: str, variant: str) -> list[Template]:
+    base_id = f"{supplier_id}__{variant}"
+    return [t for t in store.templates_for(supplier_id)
+            if t.id == base_id or t.id.startswith(base_id + "__v")]
+
+
+def _active_template(store, supplier_id: str, variant: str) -> Template | None:
+    """Nicht als veraltet markiertes Template fuer (supplier, variant), falls
+    vorhanden -- sonst ``None``, auch wenn fuer dieselbe Variante noch
+    veraltete Versionen existieren (die bleiben erhalten, werden aber nicht
+    mehr als Lern-Basis genommen)."""
+    active = [t for t in _variant_templates(store, supplier_id, variant) if not t.stale]
+    return active[0] if active else None
+
+
+def _next_template_id(store, supplier_id: str, variant: str) -> str:
+    """Freie Id fuer eine NEUE Vorlage derselben Variante, wenn die
+    Standard-Id (``supplier__variant``) schon von einer veralteten Version
+    belegt ist -- die alte bleibt unter ihrer Id erhalten (Nachvollziehbarkeit)."""
+    versions = _variant_templates(store, supplier_id, variant)
+    base_id = f"{supplier_id}__{variant}"
+    if not versions:
+        return base_id
+    nums = [1]
+    for t in versions:
+        m = _VERSION_RE.search(t.id)
+        nums.append(int(m.group(1)) if m else 1)
+    return f"{base_id}__v{max(nums) + 1}"
+
+
 def learn_from_confirmed(store, res, doc: Document, operator: str = "") -> LearnOutcome:
     """Einstieg fuer den Bestaetigungs-Pfad: lernt aus ``res`` (Ergebnis von
     ``pipeline.process()`` NACH dem Bestaetigungs-Klick, inkl. Korrekturen)
@@ -293,17 +383,27 @@ def learn_from_confirmed(store, res, doc: Document, operator: str = "") -> Learn
     if not res.supplier_id:
         return LearnOutcome(reason="Lieferant unbekannt")
 
-    existing = store.template(res.template_id) if res.template_id else None
+    used_tpl = store.template(res.template_id) if res.template_id else None
+    if used_tpl is not None:
+        track_template_health(store, used_tpl, res, operator)
+
+    existing = used_tpl
     variant = existing.variant if existing else (res.billing_address_id or "standard")
+    tid_override = None
     if existing is None:
-        # Gibt es fuer die Variante schon ein Template (nur nicht gewaehlt)?
-        existing = store.template(f"{res.supplier_id}__{variant}")
+        # Gibt es fuer die Variante schon eine nicht-veraltete Vorlage (nur
+        # nicht gewaehlt, z.B. weil kein Treffer)? Sonst eine neue anlegen --
+        # unter einer neuen Id, falls die Standard-Id noch von einer als
+        # veraltet markierten Version belegt ist (§7p).
+        existing = _active_template(store, res.supplier_id, variant)
+        if existing is None:
+            tid_override = _next_template_id(store, res.supplier_id, variant)
     if existing is not None:
         existing.confirmations = max(existing.confirmations,
                                      store.distinct_confirmations(existing.id))
 
     tpl, outcome = learn_template(doc, res.supplier_id, confirmed_values(res.fields),
-                                  existing, variant)
+                                  existing, variant, template_id=tid_override)
     if tpl is None:
         if outcome.reason.startswith("Gesamtprobe"):
             # Bestehendes (z.B. gesichertes) Template liefert auf einer

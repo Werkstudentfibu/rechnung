@@ -737,7 +737,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             {**s.to_dict(),
              "templates": [{"id": t.id, "variant": t.variant,
                             "confirmations": t.confirmations, "secured": t.secured,
-                            "fields": [f.name for f in t.fields]}
+                            "stale": t.stale, "fields": [f.name for f in t.fields]}
                            for t in store.templates_for(s.id)]}
             for s in store.suppliers()
         ])

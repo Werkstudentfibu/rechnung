@@ -120,7 +120,8 @@ def _cmd_templates(args) -> int:
     store = Store(args.data)
     for t in store.all_templates():
         print(f"{t.id:24s} supplier={t.supplier_id:16s} variant={t.variant:10s} "
-              f"confirmations={t.confirmations} secured={t.secured}")
+              f"confirmations={t.confirmations} secured={t.secured}"
+              + (" VERALTET" if t.stale else ""))
         for f in t.fields:
             kind = "anchor" if f.anchor else ("abs" if f.abs_frac else "-")
             print(f"   {f.name:16s} {f.value_type:8s} {kind}")

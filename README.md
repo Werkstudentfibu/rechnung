@@ -158,6 +158,16 @@ Hintergrund-Thread, siehe `rechnung/guard.py`).
   kopiert deren Template als Startpunkt statt komplett neu anzulernen. Muss danach
   trotzdem erst wieder 3× bestätigt werden, bevor `auto` greift.
 
+## Layoutwechsel erkennen
+
+Findet eine **gesicherte** Vorlage bei einem Lieferanten zwei bestätigte
+Rechnungen in Folge ein Pflichtfeld nicht oder geht eine Kernprüfung
+(Beträge) nicht auf, markiert das Programm die Vorlage als `stale`
+("veraltet") -- Audit `template_stale`. Die Vorlage wird **nicht gelöscht**,
+aber nicht mehr angewendet: die nächsten Rechnungen laufen über die
+KI-Stufe/Handeingabe, bis aus der nächsten Bestätigung automatisch eine neue
+Vorlage/Variante gelernt ist (eigene Id `<lieferant>__<variante>__v2`, ...).
+
 ## Fehler-/Ereignisprotokoll + Fehlerbericht
 
 Jede Verarbeitung (CLI `scan`, Bestätigen im Training-UI) hängt ein

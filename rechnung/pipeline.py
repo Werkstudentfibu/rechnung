@@ -646,7 +646,13 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     res.supplier_name = supplier.name
     res.match_score = score
 
-    tpl = _pick_template(doc, store.templates_for(supplier.id), res.billing_address_id)
+    # Als veraltet markierte Vorlagen (learn.py, SPEC §7p: Layoutwechsel
+    # erkennen) werden nicht mehr angewendet -- die Rechnung laeuft ueber die
+    # KI-Stufe/Handeingabe, bis aus der naechsten Bestaetigung eine neue
+    # Vorlage/Variante gelernt ist. Die veraltete Vorlage bleibt gespeichert
+    # (Audit/Nachvollziehbarkeit), wird nur nicht mehr ausgewaehlt.
+    active_templates = [t for t in store.templates_for(supplier.id) if not t.stale]
+    tpl = _pick_template(doc, active_templates, res.billing_address_id)
     if tpl is None:
         res.status = NO_TEMPLATE
         _inject_library_fields(res.fields, supplier)

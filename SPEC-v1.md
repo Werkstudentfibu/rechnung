@@ -455,6 +455,33 @@ eigenes Ereignis, nichts wird ueberschrieben.
   durchgelassen", dieses Protokoll sammelt die rohen Ereignisse fuer die
   Fehlersuche -- unabhaengige Fragen auf denselben Ergebnissen.
 
+## 7p. Layoutwechsel erkennen (2026-10-04)
+
+`rechnung/learn.py` (`track_template_health`, `_active_template`,
+`_next_template_id`). Findet eine **gesicherte** Vorlage bei einer
+bestaetigten Rechnung ein Pflichtfeld nicht (`Result.shadow["sources"]`,
+also auf dem maschinellen Stand vor Korrekturen) oder geht eine
+Kernpruefung (`netto+ust=brutto`, `betraege-plausibel`) nicht auf, zaehlt
+das als Fehlschlag. Zwei Fehlschlaege in Folge (`STALE_THRESHOLD = 2`) markieren
+die Vorlage als `stale` ("veraltet") -- Audit `template_stale` mit Grund und
+Fehlschlagzahl. Andere rote Pruefungen (z.B. `iban-stammdaten`, Bibliotheks-
+Abgleich) zaehlen bewusst nicht -- die haben keinen Layout-Bezug und wuerden
+eine intakte Vorlage faelschlich veralten lassen. Ein Erfolg setzt den
+Zaehler zurueck.
+
+- **Nicht geloescht.** `pipeline._pick_template` waehlt eine veraltete
+  Vorlage nicht mehr aus -- die naechsten Rechnungen dieses Lieferanten
+  laufen ueber die KI-Stufe (§7j) bzw. Handeingabe, bis wieder ein Template
+  greift.
+- **Automatisches Neulernen.** Aus der naechsten bestaetigten Rechnung ohne
+  Template lernt Stufe 1 (§7i) automatisch eine neue Vorlage -- unter einer
+  neuen Id (`<supplier>__<variant>__v2`, `__v3`, ...), falls die
+  Standard-Id noch von der veralteten Version belegt ist. Die veraltete
+  Vorlage bleibt unter ihrer alten Id gespeichert (Nachvollziehbarkeit/Audit),
+  wird aber nicht mehr angewendet.
+- Nur fuer gesicherte Vorlagen relevant -- eine noch nicht gesicherte ist
+  ohnehin in der Lernphase und wird durch Fehlschlaege nicht "veraltet".
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).

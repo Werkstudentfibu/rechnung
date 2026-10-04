@@ -103,6 +103,13 @@ class Template:
     line_items: Optional[LineItemSpec] = None
     confirmations: int = 0
     secured_at: int = 3
+    # Layoutwechsel erkennen (SPEC §7p): wie oft in Folge hat eine gesicherte
+    # Vorlage bei einer bestaetigten Rechnung zuletzt ein Pflichtfeld nicht
+    # gefunden bzw. eine Kernpruefung nicht aufgehen lassen (learn.py).
+    # Erreicht das die Schwelle, wird ``stale`` gesetzt -- die Vorlage bleibt
+    # erhalten (Nachvollziehbarkeit/Audit), wird aber nicht mehr angewendet.
+    consecutive_failures: int = 0
+    stale: bool = False
 
     @property
     def secured(self) -> bool:
@@ -116,6 +123,8 @@ class Template:
             "variant": self.variant,
             "confirmations": self.confirmations,
             "secured_at": self.secured_at,
+            "consecutive_failures": self.consecutive_failures,
+            "stale": self.stale,
             "line_items": self.line_items.to_dict() if self.line_items else None,
             "fields": [
                 {
@@ -156,6 +165,8 @@ class Template:
             line_items=LineItemSpec.from_dict(li) if li else None,
             confirmations=d.get("confirmations", 0),
             secured_at=d.get("secured_at", 3),
+            consecutive_failures=d.get("consecutive_failures", 0),
+            stale=d.get("stale", False),
         )
 
 
