@@ -48,19 +48,57 @@ def test_semantic_fallback_disabled_by_default_no_change(tmp_path: Path):
 
 
 def test_semantic_fallback_fills_gap(tmp_path: Path, monkeypatch):
+    """Nachgefragt wird nur das fehlende Pflichtfeld (rechnungsdatum) --
+    nicht das nie angelernte optionale ``bestellnummer`` (SPEC
+    Effizienz-Baustein 1: KI liest gezielt statt alles)."""
     store, inv = _basic_setup(tmp_path)
 
     def fake_extract(text, field_names, hints, rejected=None):
-        assert "bestellnummer" in field_names
-        assert "netto" not in field_names  # Template hat das schon stark geliefert
-        return {"bestellnummer": FieldResult("bestellnummer", "PO-42", "PO-42", 0.6, "llm")}
+        assert field_names == ["rechnungsdatum"]
+        return {"rechnungsdatum": FieldResult("rechnungsdatum", "2026-02-14", "14.02.2026", 0.6, "llm")}
 
     monkeypatch.setattr(pipeline.semantic, "extract", fake_extract)
     res = process(inv, store)
-    assert res.fields["bestellnummer"].source == "llm"
-    assert res.fields["bestellnummer"].value == "PO-42"
+    assert res.fields["rechnungsdatum"].source == "llm"
+    assert res.fields["rechnungsdatum"].value == "2026-02-14"
+    assert "bestellnummer" not in res.fields
     # ein starker Template-Treffer wird nicht von einer schwaecheren LLM-Vermutung ueberschrieben
     assert res.fields["netto"].source == "template-anchor"
+
+
+def test_semantic_fallback_asks_optional_field_of_template(tmp_path: Path, monkeypatch):
+    """Ein optionales Feld, das die Vorlage kennt, aber diesmal nicht findet,
+    wird nachgefragt -- eines, das sie nicht kennt, nicht."""
+    store, inv = _basic_setup(tmp_path)
+    t = store.template("muster__standard")
+    t.fields.append(FieldSpec("bestellnummer", "number", False, anchor=Anchor("gibtsnicht", 0),
+                              rel=(60, -4, 240, 12)))
+    store.save_template(t)
+    asked = []
+
+    def fake_extract(text, field_names, hints, rejected=None):
+        asked.extend(field_names)
+        return {}
+
+    monkeypatch.setattr(pipeline.semantic, "extract", fake_extract)
+    process(inv, store)
+    assert sorted(asked) == ["bestellnummer", "rechnungsdatum"]
+
+
+def test_semantic_fallback_not_called_when_template_complete(tmp_path: Path, monkeypatch):
+    store, inv = _basic_setup(tmp_path)
+    t = store.template("muster__standard")
+    t.fields.append(FieldSpec("rechnungsdatum", "date", True, anchor=Anchor("rechnungsdatum", 0),
+                              rel=(60, -4, 240, 12)))
+    store.save_template(t)
+    assert process(inv, store, use_llm=False).fields["rechnungsdatum"].source == "template-anchor"
+
+    def fake_extract(text, field_names, hints, rejected=None):
+        raise AssertionError(f"KI unnoetig gefragt: {field_names}")
+
+    monkeypatch.setattr(pipeline.semantic, "extract", fake_extract)
+    res = process(inv, store)
+    assert all(fr.source != "llm" for fr in res.fields.values())
 
 
 def test_semantic_fallback_never_beats_stronger_template_field(tmp_path: Path, monkeypatch):

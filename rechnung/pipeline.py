@@ -725,10 +725,17 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     # also nie allein auf 'auto' hochfahren (siehe CONF_MIN unten) -- deshalb
     # kann ``use_llm=False`` (z.B. fuer eine reine Listenuebersicht ueber
     # viele Dateien) den Fallback ueberspringen, ohne res.status zu aendern.
+    #
+    # SPEC Effizienz-Baustein 1: nachgefragt werden nur Pflichtfelder und die
+    # Felder, die die Vorlage selbst kennt -- ein optionales Feld, das fuer
+    # diesen Lieferanten nie angelernt wurde (z.B. Kostenstelle), kostet sonst
+    # bei JEDER Rechnung einen Modellaufruf und laedt das Modell zum Raten ein.
+    tpl_names = {f.name for f in tpl.fields}
     gaps = [
-        name for name in STANDARD_FIELDS
-        if res.fields.get(name) is None or res.fields[name].source == "missing"
-        or res.fields[name].confidence < CONF_MIN
+        name for name, (_vtype, required) in STANDARD_FIELDS.items()
+        if (required or name in tpl_names)
+        and (res.fields.get(name) is None or res.fields[name].source == "missing"
+             or res.fields[name].confidence < CONF_MIN)
     ]
     if gaps and use_llm:
         with timer.stage("ki"):
