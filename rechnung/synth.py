@@ -157,3 +157,93 @@ def make_invoice(path: str | Path, *, lieferant="Muster Handels GmbH",
     c.showPage()
     c.save()
     return path
+
+
+# ---- Mehrseitige Rechnungen / Sammel-PDFs (Baustein 2/3) -------------------
+
+def _draw_multipage(c: canvas.Canvas, *, lieferant: str, ustid: str, iban: str,
+                    rechnungsnr: str, datum: str, seiten: int, satz: float,
+                    waehrung: str, positionen_je_seite: int, zaehler: bool,
+                    nummer_jede_seite: bool) -> dict:
+    """Eine mehrseitige Rechnung auf ``c`` zeichnen (Kopf auf jeder Seite,
+    Positionen ueber alle Seiten, Summenblock + Bank nur auf der letzten).
+    -> Sollwerte (netto/ust/brutto)."""
+    w, h = A4
+    netto = 0.0
+    pos = 0
+    for k in range(1, seiten + 1):
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(20 * mm, h - 20 * mm, lieferant)
+        c.setFont("Helvetica", 9)
+        c.drawString(20 * mm, h - 26 * mm, f"USt-IdNr.: {ustid}")
+        if zaehler:
+            c.drawRightString(190 * mm, h - 20 * mm, f"Seite {k} von {seiten}")
+        if k == 1 or nummer_jede_seite:
+            c.setFont("Helvetica", 10)
+            c.drawString(120 * mm, h - 40 * mm, "Rechnungsnummer:")
+            c.drawString(160 * mm, h - 40 * mm, rechnungsnr)
+        if k == 1:
+            c.drawString(120 * mm, h - 47 * mm, "Rechnungsdatum:")
+            c.drawString(160 * mm, h - 47 * mm, datum)
+            c.drawString(20 * mm, h - 50 * mm, "Beispiel Kunde AG, Bestellstr. 1, 10115 Berlin")
+        y = h - 70 * mm
+        c.setFont("Helvetica", 9)
+        for _ in range(positionen_je_seite):
+            pos += 1
+            betrag = round(10 + pos * 1.25, 2)
+            netto = round(netto + betrag, 2)
+            c.drawString(20 * mm, y, f"Pos. {pos}  Artikel {pos:04d}")
+            c.drawRightString(150 * mm, y, _de_amount(betrag))
+            y -= 6 * mm
+        if k < seiten:
+            c.drawString(20 * mm, y - 4 * mm, f"Uebertrag {_de_amount(netto)}")
+        else:
+            ust = round(netto * satz / 100, 2)
+            brutto = round(netto + ust, 2)
+            ty = y - 10 * mm
+            for label, val in (("Nettobetrag", netto), (f"Umsatzsteuer {satz:g}%", ust),
+                               ("Gesamtbetrag", brutto)):
+                c.setFont("Helvetica", 10)
+                c.drawString(20 * mm, ty, label)
+                c.drawString(120 * mm, ty, f"{_de_amount(val)} {waehrung}")
+                ty -= 7 * mm
+            c.setFont("Helvetica", 9)
+            c.drawString(20 * mm, 30 * mm, f"Zahlbar innerhalb 14 Tagen auf IBAN {iban}")
+        c.showPage()
+    return {"rechnungsnummer": rechnungsnr, "netto": netto, "ust": ust, "brutto": brutto,
+            "seiten": seiten}
+
+
+def make_multipage_invoice(path: str | Path, *, seiten: int = 12,
+                           lieferant="Muster Handels GmbH", ustid="DE123456789",
+                           iban="DE89370400440532013000", rechnungsnr="RE-2026-00100",
+                           datum="14.02.2026", satz: float = 19, waehrung="EUR",
+                           positionen_je_seite: int = 8, zaehler: bool = True,
+                           nummer_jede_seite: bool = True) -> dict:
+    """Lange Rechnung (Standard 12 Seiten) -> Sollwerte inkl. ``path``."""
+    path = Path(path)
+    c = canvas.Canvas(str(path), pagesize=A4)
+    soll = _draw_multipage(c, lieferant=lieferant, ustid=ustid, iban=iban,
+                           rechnungsnr=rechnungsnr, datum=datum, seiten=seiten, satz=satz,
+                           waehrung=waehrung, positionen_je_seite=positionen_je_seite,
+                           zaehler=zaehler, nummer_jede_seite=nummer_jede_seite)
+    c.save()
+    return dict(soll, path=path)
+
+
+def make_sammel_pdf(path: str | Path, rechnungen: list[dict], **common) -> list[dict]:
+    """Mehrere (ggf. mehrseitige) Rechnungen in EINEM PDF. ``rechnungen``:
+    je Rechnung die Parameter von ``make_multipage_invoice`` (mind.
+    ``rechnungsnr``, ``seiten``). -> Sollwerte je Rechnung."""
+    path = Path(path)
+    c = canvas.Canvas(str(path), pagesize=A4)
+    out = []
+    defaults = dict(lieferant="Muster Handels GmbH", ustid="DE123456789",
+                    iban="DE89370400440532013000", datum="14.02.2026", satz=19,
+                    waehrung="EUR", positionen_je_seite=5, zaehler=True,
+                    nummer_jede_seite=True)
+    for r in rechnungen:
+        kw = dict(defaults, **common, **r)
+        out.append(_draw_multipage(c, **kw))
+    c.save()
+    return out

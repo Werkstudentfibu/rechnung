@@ -22,6 +22,7 @@ from .. import human
 from .. import learn
 from .. import pdf as pdfmod
 from .. import semantic
+from .. import split
 from .. import shadow
 from .. import vorlernen
 from ..billing import BillingAddress
@@ -218,6 +219,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         # weiterhin beim Oeffnen einer einzelnen Rechnung (/api/invoice) und
         # beim tatsaechlichen Bestaetigen (/api/confirm).
         out = []
+        split.prepare_folder(samples, store)
         for p in invoice_files(samples):
             r = _process(p, use_llm=False)
             # Unsichere Rechnungen in den Ordner "Menschliche Bearbeitung"

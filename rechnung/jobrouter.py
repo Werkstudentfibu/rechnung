@@ -90,6 +90,8 @@ def payload_from_result(res: dict, cfg: JobRouterConfig | None = None) -> dict:
         # "mensch" (Bestaetigungs-Klick) oder "autonom" (SPEC §7v)
         "approval": res.get("freigabe") or "mensch",
         "warnings": warnings,
+        # Teil eines aufgeteilten Sammel-PDFs: Verweis aufs Original
+        "originalSha256": (res.get("sammel") or {}).get("original_sha256"),
     }
 
 

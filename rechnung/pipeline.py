@@ -15,6 +15,7 @@ from . import ocr
 from . import pdf as pdfmod
 from . import semantic
 from . import shadow
+from . import split
 from .timing import StageTimer
 from .config import jobrouter as _jr_cfg
 from .config import operator as _operator
@@ -116,6 +117,9 @@ class Result:
     warnings: list[str] = field(default_factory=list)
     # Was dispatch() mit der Rechnung gemacht hat (Mensch/autonom/...)
     verteilung: dict | None = None
+    # Teil eines aufgeteilten Sammel-PDFs (split.py): Verweis auf das
+    # Original (sha256, Name, Seiten), sonst None
+    sammel: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -136,6 +140,7 @@ class Result:
             "hold_reasons": self.hold_reasons,
             "warnungen": self.warnings,
             "verteilung": self.verteilung,
+            "sammel": self.sammel,
             "duration_s": self.duration_s,
             "aborted": self.aborted,
             "stufenzeiten": self.stufenzeiten,
@@ -680,6 +685,17 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
         return res
     res = Result(file=str(path), sha256=doc.sha256)
 
+    # Sammel-PDF (split.py): Teile tragen den Verweis aufs Original. Ein PDF
+    # mit (moeglicherweise) mehreren Rechnungen wird nie als eine verarbeitet.
+    res.sammel = split.part_info(store, doc.sha256)
+    if res.sammel is None:
+        mehrere = split.analyse(doc)
+        if mehrere.uncertain:
+            res.hold_reasons.append(mehrere.uncertain)
+        elif mehrere.multiple:
+            res.hold_reasons.append(f"{split.MULTI} ({len(mehrere.segments)}) -- "
+                                    f"wird beim Scan aufgeteilt")
+
     # Lieferant und Rechnungsadresse ausschliesslich per Abgleich mit der
     # Bibliothek. Kein eindeutiger Treffer -> zurueckgestellt; die Extraktion
     # laeuft trotzdem, damit der Mensch die Werte gleich vor sich hat.
@@ -809,6 +825,8 @@ def scan_folder(folder: str | Path, store: Store, guard=None) -> list[Result]:
     results: list[Result] = []
     had_slow = False
     try:
+        # Sammel-PDFs vorher sicher aufteilen (split.py)
+        split.prepare_folder(folder, store)
         fast, slow = split_by_effort(invoice_files(folder), store)
         for p in fast:
             res = guard.process(p)
@@ -931,6 +949,7 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
             "billing_address_name": res.billing_address_name,
             "status": res.status,
             "freigabe": freigabe,
+            "sammel": res.sammel,
             "rechnungsnummer": _fv(res.fields, "rechnungsnummer"),
             "rechnungsdatum": _fv(res.fields, "rechnungsdatum"),
             "netto": _fv(res.fields, "netto"),
