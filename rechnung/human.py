@@ -69,6 +69,8 @@ _CHECK_FIELDS = {
     "keine-dublette": ("rechnungsnummer",),
     "ust-aufstellung-summe": ("ust_aufstellung",),
     "positionen-summe": ("netto",),
+    "positionen-rechnung": (),
+    "steuersatz-positionen": ("ust_aufstellung",),
     "pdf-xml-abgleich": ("rechnungsnummer", "brutto"),
     "belegart": ("belegart",),
     "vorzeichen": ("netto", "ust_betrag", "brutto"),

@@ -586,7 +586,7 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
         pdf_check = _check_pdf_matches_xml(path, inv)
 
         def checks_for(fields):
-            cs = run_all(fields, supplier, store.seen_invoice, res.line_items)
+            cs = run_all(fields, supplier, store.seen_invoice, res.line_items, pdf_text)
             cs = [_einvoice_check(c, inv, res.line_items) for c in cs] + [pdf_check]
             cs = _replace_check(cs, dubletten.check(
                 fields, supplier.id if supplier is not None else None, store, res.sha256,
@@ -695,7 +695,7 @@ def _all_checks(fields, supplier, store: Store, line_items, doc,
                 extra: list[Check] | None = None,
                 qr: "swissqr.SwissQR | None" = None) -> list[Check]:
     """Pruefungen fuer PDF-Rechnungen (Template- und Untemplated-Pfad)."""
-    checks = run_all(fields, supplier, store.seen_invoice, line_items)
+    checks = run_all(fields, supplier, store.seen_invoice, line_items, doc.text)
     if supplier is not None:
         # cross_check liest die USt-IdNr direkt aus dem PDF-Text (nicht nur
         # aus dem Feld, das ja aus den Stammdaten kommt). Pro Namen genau
