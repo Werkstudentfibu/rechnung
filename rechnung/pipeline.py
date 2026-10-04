@@ -778,21 +778,41 @@ def scan_folder(folder: str | Path, store: Store, guard=None) -> list[Result]:
     Ereignis an ``data/events.jsonl`` -- Grundlage fuer den Fehlerbericht
     (eventlog.py), unabhaengig davon, ob die Rechnung spaeter bestaetigt wird.
     Danach wird jede Rechnung verteilt (``dispatch``): unsichere in den Ordner
-    "Menschliche Bearbeitung" (human.py)."""
-    from . import eventlog
+    "Menschliche Bearbeitung" (human.py).
+
+    SPEC Effizienz-Baustein 5: schnelle Faelle (E-Rechnung, Textebene +
+    bekannte Vorlage) werden komplett abgearbeitet, BEVOR die langsamen
+    (OCR/KI) ueberhaupt beginnen (``queueing.split_by_effort``) -- eine
+    einzelne langsame Rechnung haelt die vielen schnellen eines Stapellaufs
+    damit nicht auf. Nach dem KI-Stapel wird das Modell wieder freigegeben
+    (``semantic.release_model``, Laptop-RAM)."""
+    from . import eventlog, semantic
     from .guard import Guard
+    from .queueing import split_by_effort
 
     folder = Path(folder)
     own = guard is None
     guard = guard or Guard(store.root)
+    results: list[Result] = []
+    had_slow = False
     try:
-        results = [guard.process(p) for p in invoice_files(folder)]
+        fast, slow = split_by_effort(invoice_files(folder), store)
+        for p in fast:
+            res = guard.process(p)
+            eventlog.record(store, res)
+            dispatch(res, store)
+            results.append(res)
+        had_slow = bool(slow)
+        for p in slow:
+            res = guard.process(p)
+            eventlog.record(store, res)
+            dispatch(res, store)
+            results.append(res)
     finally:
         if own:
             guard.close()
-    for res in results:
-        eventlog.record(store, res)
-        dispatch(res, store)
+        if had_slow:
+            semantic.release_model()
     return results
 
 

@@ -179,6 +179,27 @@ def available() -> bool:
     return ok
 
 
+def release_model() -> None:
+    """Modell nach einem KI-Stapel aus dem RAM entladen (SPEC Effizienz-
+    Baustein 5: waehrend eines KI-Stapels geladen halten -- ``keep_alive``
+    bei jedem Aufruf --, zwischen Stapeln freigeben). Ollama laedt es beim
+    naechsten Aufruf einfach neu; nur fuer Ollama relevant (OpenAI-kompatible
+    Server verwalten ihr Modell selbst). Reine Aufraeum-Operation -- kein
+    Fehler, wenn das Modell aus/nicht erreichbar ist."""
+    cfg = _llm_cfg()
+    if not cfg.enabled or cfg.backend != "ollama":
+        return
+    body = json.dumps({"model": cfg.model, "keep_alive": 0}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{cfg.base_url}/api/generate", data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=5)
+    except (urllib.error.URLError, OSError, ValueError):
+        pass
+
+
 def _dynamic_num_ctx(prompt: str, cap: int) -> int:
     """Kontextgroesse an die tatsaechliche Promptlaenge anpassen (SPEC
     Effizienz-Baustein 1) statt immer das Maximum zu reservieren --
