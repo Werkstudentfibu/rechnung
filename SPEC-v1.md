@@ -584,6 +584,41 @@ dahin bleibt alles Trockenlauf (`RECHNUNG_JOBROUTER_ENABLED=0`) und
   (IONOS: Host/Benutzer/Passwort/Ordner/Zielordner; JobRouter: URL/Token,
   Prozess/Version/Schritt, Feldnamen, Rueckmelde-Weg).
 
+## 7t. Vor dem Serverbetrieb: was in IT-FREIGABE.md angepasst werden muss (2026-10-04)
+
+`IT-FREIGABE.md` beschreibt bewusst den **aktuellen Einzelplatz-Prototyp**
+(Firmen-Laptop, `127.0.0.1`, kein Netzwerkzugriff ausser optional/manuell
+IONOS/JobRouter) und wurde in diesem Durchlauf absichtlich **nicht
+geaendert** -- das ist ein eigenes Gespraech mit der IT. Vor einer erneuten
+Vorlage dort bzw. vor einem Serverbetrieb sind diese Punkte inzwischen
+nicht mehr gedeckt und muessen nachgezogen werden:
+
+1. **"Lokales Sprachmodell nur `127.0.0.1`" gilt nicht mehr uneingeschraenkt**
+   (siehe schon §7f/§7j): `RECHNUNG_LLM_BACKEND=openai` kann auf einen
+   Firmenserver zeigen -- dann gehen Rechnungstexte dorthin. Betrifft nur,
+   wer das einschaltet (Standard weiterhin aus).
+2. **Tesseract (OCR, §7n) ist eine neue, externe Abhaengigkeit** ausserhalb
+   der Python-Pakete -- ein eigenes, separat zu installierendes Programm auf
+   demselben Rechner (siehe `build.md`). Steht in der Bibliotheks-Tabelle
+   von `IT-FREIGABE.md` noch nicht drin; rein lokal, aber systemseitig
+   vorauszusetzen.
+3. **Der Nachtlauf (§7r, `rechnung nacht`) ist kein interaktiver
+   Handbetrieb mehr** -- er ist fuer **unbeaufsichtigten** Lauf per
+   Zeitsteuerung (cron/Windows-Aufgabenplanung) gedacht und macht dabei
+   aktiv Netzwerkzugriffe (IONOS-Anmeldung fuer den Gesundheitscheck,
+   JobRouter-Rueckmeldungen abholen) **ohne** einen Menschen, der im
+   selben Moment am Rechner sitzt und klickt. Das passt nicht mehr zu
+   "Einzelplatz-Werkzeug ... keine Mehrbenutzer-/Servernutzung vorgesehen"
+   in `IT-FREIGABE.md` und sollte dort als eigener, erklaerter Betriebsmodus
+   nachgetragen werden, sobald IONOS/JobRouter tatsaechlich scharf gestellt
+   werden (beides bleibt bis dahin Trockenlauf, siehe §7a/§7q/§7s).
+4. **IONOS-/JobRouter-Anbindung selbst** (§7a/§7s) ist in `IT-FREIGABE.md`
+   noch als "im jetzigen Testbetrieb nicht aktiv" beschrieben -- das bleibt
+   korrekt, solange `RECHNUNG_IMAP_*`/`RECHNUNG_JOBROUTER_ENABLED` nicht
+   gesetzt sind, muss aber bei der naechsten Freigabe-Runde aktualisiert
+   werden, sobald echte Zugangsdaten vom Kunden kommen (siehe README-
+   Checkliste in §7s).
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).
