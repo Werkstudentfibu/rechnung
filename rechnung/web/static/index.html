@@ -63,6 +63,8 @@
   .form-grid label { padding-top: 4px; }
   .box { border: 1px solid #ddd; border-radius: 6px; padding: 10px 12px; margin: 10px 0; }
   .box h4 { margin: 0 0 6px; }
+  td.abw { background: #fff1b8; outline: 1px solid #faad14; }
+  td.aus, th.aus { opacity: .45; text-decoration: line-through; }
   .li-col { display: inline-block; background: #eef4fb; border: 1px solid #cfe0f4; border-radius: 4px; padding: 2px 6px; margin: 2px; }
 </style>
 </head>
@@ -75,6 +77,7 @@
   <button id="nav-addresses" onclick="show('addresses')">Rechnungsadressen</button>
   <button id="nav-categories" onclick="show('categories')">Kategorien</button>
   <button id="nav-journal" onclick="show('journal')">Journal</button>
+  <button id="nav-vorlernen" onclick="show('vorlernen')">Vorlernen</button>
   <span id="stats" class="hint" style="color:#eaf5ef"></span>
   <span id="modus" class="hint" style="color:#eaf5ef; margin-left:auto"
         title="Umschalten nur per Befehl: rechnung modus autonom|testphase --operator NAME"></span>
@@ -128,6 +131,21 @@
       <a href="/api/journal.csv">CSV herunterladen</a></p>
     <div id="journal-table"></div>
   </div>
+
+  <div id="v-vorlernen" class="view pane">
+    <h2>Vorlernen aus Altbestand</h2>
+    <p class="hint">Alte Rechnungen eines Ordners werden nach Lieferant und Layout gruppiert; je
+      Gruppe stehen alle erkannten Werte nebeneinander, <b>gelb</b> = fehlt oder weicht ab.
+      Werte per Klick korrigieren, einzelne Rechnungen ausschließen. Erst „Gruppe bestätigen“
+      macht die Vorlage aktiv. Vorgelernte Rechnungen gehen <b>nie</b> nach JobRouter und zählen
+      nicht in der Schattenstatistik.</p>
+    <div class="box">
+      Ordner: <input id="vl-ordner" size="60" placeholder="z.B. C:\Rechnungen\Altbestand">
+      <button onclick="vlScan()">Ordner einlesen</button>
+      <span id="vl-status" class="hint"></span>
+    </div>
+    <div id="vl-groups"></div>
+  </div>
 </main>
 
 <script>
@@ -151,6 +169,7 @@ function show(v) {
   if (v === 'addresses') loadAddresses();
   if (v === 'categories') loadCategories();
   if (v === 'journal') loadJournal();
+  if (v === 'vorlernen') loadVorlernen();
   if (v === 'scan') loadList();
 }
 const esc = s => (s == null ? '' : String(s)).replace(/[&<>"]/g, c =>
@@ -986,6 +1005,106 @@ async function loadJournal() {
   $('#journal-table').innerHTML = '';
   $('#journal-table').appendChild(t);
   if (!d.rows.length) $('#journal-table').innerHTML = '<p class="hint">Noch keine bestätigten Rechnungen.</p>';
+}
+
+/* ================= Vorlernen aus Altbestand ================= */
+const VL_FIELDS = ['rechnungsnummer', 'rechnungsdatum', 'netto', 'ust_betrag', 'ust_satz', 'brutto',
+                   'bestellnummer', 'kostenstelle', 'ustid', 'iban', 'steuernummer'];
+let VL_SUPPLIERS = [];
+
+async function vlPost(url, body, method = 'POST') {
+  const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' },
+                               body: body ? JSON.stringify(body) : undefined });
+  const d = await r.json();
+  if (!r.ok) { alert(d.detail || 'Fehler'); return null; }
+  return d;
+}
+
+async function vlScan() {
+  const ordner = $('#vl-ordner').value.trim();
+  if (!ordner) return;
+  $('#vl-status').textContent = 'liest … (je Rechnung ggf. Texterkennung/KI)';
+  const d = await vlPost('/api/vorlernen/scan', { ordner });
+  $('#vl-status').textContent = d ? `${d.dateien} Rechnung(en) in ${d.gruppen} Gruppe(n), ` +
+    `${d.e_rechnungen} E-Rechnung(en) übersprungen` +
+    (d.ohne_werte ? `, ${d.ohne_werte} ohne gelesene Werte (von Hand eintragen)` : '') +
+    (d.fehler.length ? `, ${d.fehler.length} Fehler: ` + d.fehler.map(f => f.datei + ': ' + f.grund).join('; ') : '') : '';
+  loadVorlernen();
+}
+
+function vlValue(d, f) {
+  if (d.korrekturen && f in d.korrekturen) return { v: d.korrekturen[f], src: 'manual' };
+  const w = (d.werte || {})[f];
+  if (!w || w.source === 'missing' || w.value == null || w.value === '') return { v: '', src: '' };
+  return { v: typeof w.value === 'object' ? JSON.stringify(w.value) : w.value, src: w.source };
+}
+
+async function loadVorlernen() {
+  const [d, sups] = await Promise.all([api('/api/vorlernen'), api('/api/suppliers')]);
+  VL_SUPPLIERS = sups;
+  const box = $('#vl-groups'); box.innerHTML = '';
+  if (!d.gruppen.length) { box.innerHTML = '<p class="hint">Noch nichts eingelesen.</p>'; return; }
+  for (const g of d.gruppen) box.appendChild(vlGroup(g));
+}
+
+function vlGroup(g) {
+  const div = document.createElement('div'); div.className = 'box'; div.id = 'vl-' + g.gruppe_id;
+  const files = g.dateien;
+  const used = VL_FIELDS.filter(f => files.some(x => vlValue(x, f).v !== '') ||
+                                     (g.markiert || {})[f]);
+  const supSel = g.supplier_id ? '' :
+    `<select onchange="vlSupplier('${esc(g.gruppe_id)}', this.value)"><option value="">Lieferant zuordnen …</option>` +
+    VL_SUPPLIERS.map(s => `<option value="${esc(s.id)}">${esc(s.name || s.id)}</option>`).join('') + '</select>';
+  const stand = g.bestaetigt
+    ? `<span class="badge auto">bestätigt → ${esc(g.template_id)} (${esc(g.bestaetigt_von || '')})</span>`
+    : '<span class="badge review">Vorschlag – noch nicht aktiv</span>';
+  let html = `<h4>${esc(g.supplier_name || 'Lieferant unbekannt')} · Layout ${esc(g.variant)}
+    · ${files.length} Rechnung(en) ${stand}</h4>${supSel}
+    <table><tr><th>Feld</th>${files.map(x => `<th class="${x.ausgeschlossen ? 'aus' : ''}">
+      ${esc(x.datei)}<br><label class="hint"><input type="checkbox" ${x.ausgeschlossen ? 'checked' : ''}
+      onchange="vlExclude('${esc(g.gruppe_id)}', '${x.sha256}', this.checked)"> ausschließen</label></th>`).join('')}</tr>`;
+  for (const f of used) {
+    const mark = new Set((g.markiert || {})[f] || []);
+    html += `<tr><td>${esc(f)}</td>` + files.map(x => {
+      const { v, src } = vlValue(x, f);
+      const cls = [mark.has(x.sha256) ? 'abw' : '', x.ausgeschlossen ? 'aus' : ''].join(' ');
+      return `<td class="${cls} clickable" title="klicken zum Korrigieren"
+        onclick="vlCorrect('${esc(g.gruppe_id)}', '${x.sha256}', '${f}', this.dataset.v)"
+        data-v="${esc(v)}">${esc(v)} ${src ? `<span class="badge ${esc(src)}">${esc(src)}</span>` : ''}</td>`;
+    }).join('') + '</tr>';
+  }
+  html += '</table>';
+  const abw = Object.entries(g.abweichungen || {});
+  if (abw.length) html += '<p class="hint">Nach dem Lernen weicht die Vorlage ab bei: ' +
+    abw.map(([f, d]) => `${esc(f)} (${Object.keys(d).map(esc).join(', ')})`).join('; ') + '</p>';
+  html += `<p><button onclick="vlConfirm('${esc(g.gruppe_id)}')" ${g.supplier_id ? '' : 'disabled'}>
+      ${g.bestaetigt ? 'Erneut bestätigen' : 'Gruppe bestätigen → Vorlage aktiv'}</button>
+    <button class="danger" onclick="vlDiscard('${esc(g.gruppe_id)}')">Gruppe verwerfen</button></p>`;
+  div.innerHTML = html;
+  return div;
+}
+
+async function vlCorrect(gid, sha, feld, alt) {
+  const wert = prompt(`${feld} (leer = Korrektur zurücknehmen):`, alt || '');
+  if (wert === null) return;
+  if (await vlPost(`/api/vorlernen/${gid}/korrektur`, { sha256: sha, feld, wert })) loadVorlernen();
+}
+async function vlExclude(gid, sha, ausgeschlossen) {
+  if (await vlPost(`/api/vorlernen/${gid}/ausschliessen`, { sha256: sha, ausgeschlossen })) loadVorlernen();
+}
+async function vlSupplier(gid, supplier_id) {
+  if (supplier_id && await vlPost(`/api/vorlernen/${gid}/lieferant`, { supplier_id })) loadVorlernen();
+}
+async function vlConfirm(gid) {
+  const d = await vlPost(`/api/vorlernen/${gid}/bestaetigen`);
+  if (!d) return;
+  const skip = Object.entries(d.skipped || {}).map(([f, w]) => `${f}: ${w}`);
+  alert(`Vorlage ${d.template_id} aktiv.` + (skip.length ? '\nNicht gelernt: ' + skip.join('; ') : ''));
+  loadVorlernen();
+}
+async function vlDiscard(gid) {
+  if (confirm('Gruppe verwerfen? (Vorschlag wird gelöscht, eine schon aktive Vorlage bleibt)'))
+    if (await vlPost(`/api/vorlernen/${gid}`, null, 'DELETE')) loadVorlernen();
 }
 
 loadList();

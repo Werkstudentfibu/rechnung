@@ -1,4 +1,4 @@
-"""Kommandozeile: fetch / scan / suppliers / templates / journal / schatten / modus / push / web / app / demo."""
+"""Kommandozeile: fetch / scan / messen / vorlernen / suppliers / templates / journal / schatten / modus / push / web / app / demo."""
 
 from __future__ import annotations
 
@@ -135,13 +135,14 @@ def _cmd_messen(args) -> int:
     from .messen import messen, verteilung
 
     store = Store(args.data)
-    results = messen(args.samples, store)
+    folder = args.ordner or args.samples
+    results = messen(folder, store)
     if args.json:
         print(json.dumps({"dateien": [r.to_dict() for r in results],
                           "verteilung": verteilung(results)}, indent=2, ensure_ascii=False))
         return 0
     if not results:
-        print(f"Keine Rechnungen in {args.samples}")
+        print(f"Keine Rechnungen in {folder}")
         return 0
     for r in results:
         stufen = " ".join(f"{k}={v:.2f}s" for k, v in (r.stufenzeiten or {}).items())
@@ -152,6 +153,57 @@ def _cmd_messen(args) -> int:
             continue
         print(f"  {name:12s} median={d['median']:.2f}s p90={d['p90']:.2f}s "
               f"max={d['max']:.2f}s (n={d['anzahl']})")
+    return 0
+
+
+def _cmd_vorlernen(args) -> int:
+    """Altbestand vorlernen: Ordner lesen und gruppieren (Vorschlaege), die
+    Gruppen auflisten oder eine Gruppe bestaetigen. Nichts davon geht nach
+    JobRouter oder in die Schattenstatistik (vorlernen.py)."""
+    from . import vorlernen
+
+    store = Store(args.data)
+    if args.bestaetigen:
+        if not args.operator:
+            print("Bestaetigen nur mit --operator NAME (Audit-Protokoll)")
+            return 2
+        try:
+            out = vorlernen.confirm(store, args.bestaetigen, args.operator)
+        except ValueError as e:
+            print(f"Fehler: {e}")
+            return 1
+        if args.json:
+            print(json.dumps(out, indent=2, ensure_ascii=False, default=str))
+            return 0
+        print(f"Vorlage {out['template_id']} aktiv (gelernt: {', '.join(out['gelernt']) or '-'})")
+        for fname, grund in out["skipped"].items():
+            print(f"  nicht gelernt {fname}: {grund}")
+        for fname, dateien in out["abweichungen"].items():
+            for datei, w in dateien.items():
+                print(f"  Abweichung {fname} in {datei}: Vorlage={w['gelernt']} "
+                      f"erwartet={w['erwartet']}")
+        return 0
+    if args.ordner:
+        rep = vorlernen.scan(args.ordner, store)
+        if args.json:
+            print(json.dumps(rep.to_dict(), indent=2, ensure_ascii=False))
+            return 0
+        print(f"{rep.dateien} Rechnung(en) in {rep.gruppen} Gruppe(n) vorgeschlagen, "
+              f"{rep.e_rechnungen} E-Rechnung(en) uebersprungen (brauchen keine Vorlage)")
+        if rep.ohne_werte:
+            print(f"  {rep.ohne_werte} ohne gelesene Werte (KI aus/nicht erreichbar?) -- "
+                  "Werte im Training-UI (Reiter Vorlernen) eintragen")
+        for f in rep.fehler:
+            print(f"  FEHLER {f['datei']}: {f['grund']}")
+    groups = vorlernen.list_groups(store)
+    if args.json and not args.ordner:
+        print(json.dumps(groups, indent=2, ensure_ascii=False, default=str))
+        return 0
+    for g in groups:
+        aktiv = sum(1 for d in g["dateien"] if not d.get("ausgeschlossen"))
+        stand = f"bestaetigt -> {g['template_id']}" if g.get("bestaetigt") else "Vorschlag"
+        print(f"{g['gruppe_id']:40.40s} {g.get('supplier_name') or '(Lieferant unbekannt)':30.30s} "
+              f"{aktiv:3d} Rechnung(en)  {stand}")
     return 0
 
 
@@ -486,8 +538,19 @@ def main(argv=None) -> int:
 
     me = sub.add_parser("messen",
                         help="Stufenzeiten messen (Trockenlauf, nichts wird gespeichert/eingereiht)")
+    me.add_argument("ordner", nargs="?", help="Ordner mit Rechnungen (Standard: --samples)")
     me.add_argument("--json", action="store_true")
     me.set_defaults(func=_cmd_messen)
+
+    vl = sub.add_parser("vorlernen",
+                        help="Altbestand vorlernen: Vorlagen-Vorschlaege je Lieferant/Layout "
+                             "(ohne JobRouter/Schattenstatistik)")
+    vl.add_argument("ordner", nargs="?", help="Ordner mit alten Rechnungen (ohne: Gruppen auflisten)")
+    vl.add_argument("--bestaetigen", metavar="GRUPPE",
+                    help="Vorlage aus dieser Gruppe lernen und aktivieren")
+    vl.add_argument("--operator", help="wer bestaetigt (Pflicht bei --bestaetigen, Audit)")
+    vl.add_argument("--json", action="store_true")
+    vl.set_defaults(func=_cmd_vorlernen)
 
     sub.add_parser("suppliers", help="Bekannte Lieferanten").set_defaults(func=_cmd_suppliers)
     sub.add_parser("templates", help="Gespeicherte Templates").set_defaults(func=_cmd_templates)

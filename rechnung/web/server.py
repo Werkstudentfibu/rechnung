@@ -23,6 +23,7 @@ from .. import learn
 from .. import pdf as pdfmod
 from .. import semantic
 from .. import shadow
+from .. import vorlernen
 from ..billing import BillingAddress
 from ..guard import Guard
 from ..ocr import IMAGE_SUFFIXES
@@ -73,6 +74,25 @@ class TemplatePost(BaseModel):
 class LineItemPreviewPost(BaseModel):
     file: str
     line_items: LineItemAssign
+
+
+class VorlernenScanPost(BaseModel):
+    ordner: str
+
+
+class VorlernenKorrekturPost(BaseModel):
+    sha256: str
+    feld: str
+    wert: str | None = None             # leer/None = Korrektur zuruecknehmen
+
+
+class VorlernenAusschlussPost(BaseModel):
+    sha256: str
+    ausgeschlossen: bool = True
+
+
+class VorlernenLieferantPost(BaseModel):
+    supplier_id: str
 
 
 class ConfirmPost(BaseModel):
@@ -843,6 +863,64 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         unsichere Felder, Korrekturen) je Pruefung/Feld und Lieferant,
         optional ab einem Datum (``seit=YYYY-MM-DD``). Siehe eventlog.py."""
         return JSONResponse(eventlog.report(store, seit))
+
+    # ---- Vorab-Lernen aus Altbestand (vorlernen.py) -------------------
+    # Bewusst getrennt vom Rechnungen-Reiter: nichts hiervon geht nach
+    # JobRouter oder in die Schattenstatistik; aktiv wird eine Vorlage erst
+    # nach dem Klick "Gruppe bestaetigen".
+    def _vl_view(g: dict) -> dict:
+        return dict(g, markiert=vorlernen.deviations(g))
+
+    def _vl_or_404(g: dict | None) -> JSONResponse:
+        if g is None:
+            raise HTTPException(404, "Vorlernen-Gruppe nicht gefunden")
+        return JSONResponse(_vl_view(g))
+
+    @app.get("/api/vorlernen")
+    def vorlernen_list() -> JSONResponse:
+        return JSONResponse({"gruppen": [_vl_view(g) for g in vorlernen.list_groups(store)]})
+
+    @app.post("/api/vorlernen/scan")
+    def vorlernen_scan(body: VorlernenScanPost) -> JSONResponse:
+        ordner = Path(body.ordner).expanduser()
+        if not ordner.is_dir():
+            raise HTTPException(404, f"Ordner nicht gefunden: {ordner}")
+        return JSONResponse(vorlernen.scan(ordner, store).to_dict())
+
+    @app.post("/api/vorlernen/{gruppe_id}/korrektur")
+    def vorlernen_korrektur(gruppe_id: str, body: VorlernenKorrekturPost) -> JSONResponse:
+        try:
+            g = vorlernen.set_correction(store, gruppe_id, body.sha256, body.feld, body.wert)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return _vl_or_404(g)
+
+    @app.post("/api/vorlernen/{gruppe_id}/ausschliessen")
+    def vorlernen_ausschliessen(gruppe_id: str, body: VorlernenAusschlussPost) -> JSONResponse:
+        return _vl_or_404(vorlernen.set_excluded(store, gruppe_id, body.sha256,
+                                                 body.ausgeschlossen))
+
+    @app.post("/api/vorlernen/{gruppe_id}/lieferant")
+    def vorlernen_lieferant(gruppe_id: str, body: VorlernenLieferantPost) -> JSONResponse:
+        sup = store.supplier(body.supplier_id)
+        if sup is None:
+            raise HTTPException(404, "Lieferant nicht in der Bibliothek -- erst anlegen")
+        return _vl_or_404(vorlernen.assign_supplier(store, gruppe_id, sup.id, sup.name))
+
+    @app.post("/api/vorlernen/{gruppe_id}/bestaetigen")
+    def vorlernen_bestaetigen(gruppe_id: str) -> JSONResponse:
+        from ..config import operator as _op
+
+        try:
+            return JSONResponse(vorlernen.confirm(store, gruppe_id, _op()))
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+
+    @app.delete("/api/vorlernen/{gruppe_id}")
+    def vorlernen_verwerfen(gruppe_id: str) -> JSONResponse:
+        if not vorlernen.discard(store, gruppe_id):
+            raise HTTPException(404, "Vorlernen-Gruppe nicht gefunden")
+        return JSONResponse({"ok": True})
 
     @app.get("/api/journal")
     def journal() -> JSONResponse:
