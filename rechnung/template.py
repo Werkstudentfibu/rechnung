@@ -39,6 +39,12 @@ STANDARD_FIELDS: dict[str, tuple[str, bool]] = {
     "faelligkeit": ("date", False),
     "skonto_prozent": ("amount", False),
     "skonto_frist": ("date", False),
+    # Waehrung (Postfach-Baustein 7) -- lernbar wie jedes Feld; ohne Vorlage
+    # liest waehrung.py sie per Regel aus dem Text (CHF/Fr./SFr. vs. EUR).
+    "waehrung": ("text", False),
+    # Zahlungsreferenz einer Schweizer QR-Rechnung (QRR/SCOR), aus dem
+    # QR-Zahlteil (swissqr.py) -- kommt nie aus einer gelernten Vorlage.
+    "zahlungsreferenz": ("text", False),
 }
 
 

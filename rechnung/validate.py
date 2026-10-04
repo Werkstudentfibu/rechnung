@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from .textnorm import iban_valid, parse_amount, parse_date
+from .textnorm import iban_valid, norm_ustid, parse_amount, parse_date
 
 
 @dataclass
@@ -71,12 +71,15 @@ def check_iban_known(fields: dict, supplier) -> Check:
 
 
 def check_ustid_known(fields: dict, supplier) -> Check:
+    """Vergleich normalisiert (``norm_ustid``) -- die Stammdaten duerfen
+    anders geschrieben sein als der Fund im Rechnungstext (Leerzeichen,
+    Punkte, Bindestriche; Schweizer UID mit MWST-Zusatz)."""
     fr = fields.get("ustid")
     if supplier is None or not getattr(supplier, "ustids", None) or fr is None or not fr.raw:
         return Check("ustid-stammdaten", None, "")
-    val = (fr.value if isinstance(fr.value, str) else fr.raw or "").replace(" ", "").upper()
-    return Check("ustid-stammdaten", val in set(supplier.ustids),
-                 val if val not in set(supplier.ustids) else "ok")
+    val = norm_ustid(fr.value if isinstance(fr.value, str) else fr.raw or "")
+    known = {norm_ustid(u) for u in supplier.ustids}
+    return Check("ustid-stammdaten", val in known, val if val not in known else "ok")
 
 
 def check_tax_summary(fields: dict, tol: float = 0.05) -> Check:

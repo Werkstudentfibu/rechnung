@@ -25,13 +25,24 @@ def norm(s: str) -> str:
 
 _AMOUNT_RE = re.compile(r"-?\d[\d.\s ]*,\d{1,2}|-?\d[\d,\s ]*\.\d{1,2}|-?\d+")
 
+# Schweizer Zahlenformat: Hochkomma als Tausendertrenner (1'234.50, 1’234.50)
+# und ".–"/".-" fuer glatte Franken ("120.–")
+_CH_THOUSANDS = re.compile(r"(?<=\d)['’ʼ](?=\d{3}(?!\d))")
+_CH_DASH = re.compile(r"(?<=\d)\.[–—-](?![\d–—-])")
+
+
+def ch_number(s: str) -> str:
+    """Schweizer Schreibweise eines Betrags in die uebliche ueberfuehren."""
+    return _CH_DASH.sub(".00", _CH_THOUSANDS.sub("", s))
+
 
 def parse_amount(s: str) -> float | None:
-    """Erkennt '1.234,56', '1 234,56', '1234.56', '1234' und einstellige
-    Nachkommabetraege wie '8,1' (Schweizer MwSt-Saetze 2,6/8,1)."""
+    """Erkennt '1.234,56', '1 234,56', '1234.56', '1234', Schweizer
+    "1'234.56"/"1’234.56"/"120.–" und einstellige Nachkommabetraege wie
+    '8,1' (Schweizer MwSt-Saetze 2,6/8,1)."""
     if not s:
         return None
-    m = _AMOUNT_RE.search(s.replace(" ", " "))
+    m = _AMOUNT_RE.search(ch_number(s.replace(" ", " ")))
     if not m:
         return None
     t = m.group(0).replace(" ", "")
@@ -123,17 +134,43 @@ def iban_valid(iban: str | None) -> bool:
 
 
 _USTID_RE = re.compile(r"\b(DE\s?\d{9}|[A-Z]{2}\s?[A-Z0-9]{8,12})\b")
+# Schweizer UID/MWST-Nummer: CHE-123.456.789 (MWST/TVA/IVA)
+_CHE_RE = re.compile(r"\bCHE[-\s]?(\d{3})[.\s]?(\d{3})[.\s]?(\d{3})\b")
+
+
+def che_valid(uid: str) -> bool:
+    """Pruefziffer der Schweizer UID (Modulo 11, Gewichte 5 4 3 2 7 6 5 4)."""
+    d = re.sub(r"\D", "", uid or "")
+    if len(d) != 9:
+        return False
+    s = sum(int(a) * w for a, w in zip(d[:8], (5, 4, 3, 2, 7, 6, 5, 4)))
+    chk = 11 - s % 11
+    return chk != 10 and (0 if chk == 11 else chk) == int(d[8])
+
+
+def norm_ustid(s) -> str:
+    """USt-IdNr/UID vergleichbar machen: 'DE 123 456 789' -> 'DE123456789',
+    'CHE-123.456.789 MWST' -> 'CHE123456789'."""
+    c = re.sub(r"[^A-Z0-9]", "", str(s or "").upper())
+    m = re.match(r"CHE(\d{9})", c)
+    return "CHE" + m.group(1) if m else c
 
 
 def find_ustids(s: str) -> set[str]:
     """EU-USt-IdNr: 2 Laenderbuchstaben + Kennung. Kennung muss >=2 Ziffern
-    enthalten, sonst matchen auch normale Grossbuchstaben-Woerter."""
+    enthalten, sonst matchen auch normale Grossbuchstaben-Woerter. Dazu die
+    Schweizer UID/MWST-Nummer (CHE-123.456.789, nur mit gueltiger
+    Pruefziffer) als 'CHE123456789'."""
     out = set()
-    for m in _USTID_RE.finditer(s.upper()):
+    up = s.upper()
+    che = {"CHE" + "".join(m.groups()) for m in _CHE_RE.finditer(up)}
+    for m in _USTID_RE.finditer(up):
         cand = re.sub(r"\s+", "", m.group(1))
+        if cand.startswith("CHE"):
+            continue   # Schweizer UID: nur ueber _CHE_RE (mit Pruefziffer)
         if sum(c.isdigit() for c in cand[2:]) >= 2:
             out.add(cand)
-    return out
+    return out | {u for u in che if che_valid(u)}
 
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@([\w-]+\.[\w.-]+)", re.I)
@@ -145,12 +182,13 @@ def find_domains(s: str) -> set[str]:
 
 
 _RATE_RE = re.compile(r"(\d{1,2}(?:[.,]\d{1,2})?)\s*%")
-_AMOUNT_TOKEN_RE = re.compile(r"-?\d{1,3}(?:[.\s]\d{3})*,\d{2}|-?\d+,\d{2}|-?\d{1,3}(?:,\d{3})*\.\d{2}")
+_AMOUNT_TOKEN_RE = re.compile(r"-?\d{1,3}(?:[.\s]\d{3})*,\d{2}|-?\d+,\d{2}|-?\d{1,3}(?:,\d{3})*\.\d{2}"
+                              r"|-?\d+\.\d{2}")
 
 
 def _amounts(s: str) -> list[float]:
     out = []
-    for m in _AMOUNT_TOKEN_RE.finditer(s or ""):
+    for m in _AMOUNT_TOKEN_RE.finditer(ch_number(s or "")):
         v = parse_amount(m.group(0))
         if v is not None:
             out.append(v)
@@ -220,7 +258,7 @@ _AMOUNT_FULL_RE = re.compile(
     r"-?\d{1,3}(?:[.\s ]\d{3})*,\d{1,2}|-?\d{1,3}(?:,\d{3})*\.\d{1,2}"
     r"|-?\d+[.,]\d{1,2}|-?\d+"
 )
-_CURRENCY_RE = re.compile(r"(?i)^(eur|euro|chf|usd|€|\$|%)+|(eur|euro|chf|usd|€|\$|%)+$")
+_CURRENCY_RE = re.compile(r"(?i)^(eur|euro|chf|sfr\.?|fr\.|usd|€|\$|%)+|(eur|euro|chf|sfr\.?|fr\.|usd|€|\$|%)+$")
 MAX_SPAN = 4  # laengste Wortfolge, die als ein Wert gilt ("14. Februar 2026")
 
 
@@ -231,7 +269,7 @@ def compact(s) -> str:
 
 
 def _amount_of(raw: str) -> float | None:
-    t = raw.strip().rstrip(":;")
+    t = ch_number(raw.strip().rstrip(":;"))
     orig = t
     for _ in range(2):
         t = _CURRENCY_RE.sub("", t).strip()

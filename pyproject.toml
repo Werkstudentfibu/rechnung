@@ -26,6 +26,11 @@ dev = [
     "pytest>=8.3",
     "httpx>=0.27",
 ]
+# Swiss QR-Rechnung (QR-Zahlteil lesen, Postfach-Baustein 7) -- optional:
+# fehlt sie, degradiert swissqr.read() sauber auf None (siehe dort).
+qr = [
+    "zxing-cpp>=2.2",
+]
 
 [project.scripts]
 rechnung = "rechnung.cli:main"

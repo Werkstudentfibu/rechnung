@@ -18,6 +18,8 @@ from . import pdf as pdfmod
 from . import semantic
 from . import shadow
 from . import split
+from . import swissqr
+from . import waehrung
 from . import zahlung
 from .timing import StageTimer
 from .config import jobrouter as _jr_cfg
@@ -131,6 +133,9 @@ class Result:
     # gestaffelt -- leer gelassen", Positionen folgen nach OCR) -- gehen mit
     # nach JobRouter (``hints``), anders als ``warnings`` ohne "ACHTUNG"
     hinweise: list[str] = field(default_factory=list)
+    # Schweizer QR-Zahlteil (swissqr.py), falls auf der Rechnung gefunden,
+    # sonst None -- rein informativ fuer die Oberflaeche
+    qr: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -154,6 +159,7 @@ class Result:
             "verteilung": self.verteilung,
             "sammel": self.sammel,
             "dublette": self.dublette,
+            "qr": self.qr,
             "duration_s": self.duration_s,
             "aborted": self.aborted,
             "stufenzeiten": self.stufenzeiten,
@@ -544,6 +550,7 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
         put("faelligkeit", inv.faelligkeit)
         put("zahlbetrag", inv.zahlbetrag)
         put("waehrung", inv.waehrung)
+        waehrung.apply(res.fields, pdf_text, res.hinweise)
         put("leitweg_id", inv.leitweg_id)
         put("zahlungsbedingungen", inv.zahlungsbedingungen)
         # Belegart aus dem Typcode (381 Gutschrift, 384 Korrektur, ...)
@@ -580,6 +587,8 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
                 text=pdf_text)[0])
             for bc in belegart.checks(fields, title=pdf_text[:dubletten.TITLE_CHARS]):
                 cs = _replace_check(cs, bc)
+            for wc in waehrung.checks(fields, pdf_text):
+                cs = _replace_check(cs, wc)
             return _replace_check(cs, _iban_master_check(supplier, invoice_ibans, fields)) + [addr_check]
 
         res.checks = checks_for(res.fields)
@@ -635,7 +644,8 @@ def _llm_full(res: Result, doc) -> None:
 
 def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
                         extra_checks: list[Check] | None = None,
-                        timer: StageTimer | None = None) -> None:
+                        timer: StageTimer | None = None,
+                        qr: "swissqr.SwissQR | None" = None) -> None:
     """Rechnung ohne Template (Lieferant unbekannt oder noch nicht angelernt):
     optional KI-Extraktion (Stufe 2), Korrekturen einmischen und, sobald Werte
     da sind, pruefen. Damit kann ein Mensch die Werte (KI-Vorschlag oder
@@ -655,23 +665,29 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
     # relative Frist ein vom Menschen eingetragenes Rechnungsdatum nutzt
     zahlung.apply(res.fields, doc.text, res.hinweise)
     belegart.apply(res.fields, doc, hinweise=res.hinweise)
+    waehrung.apply(res.fields, doc.text, res.hinweise)
+    swissqr.apply(res.fields, qr)
     with timer.stage("pruefungen"):
         res.shadow = shadow.decide(machine, _all_checks(machine, supplier, store, res.line_items,
-                                                        doc, extra), new_supplier=True)
+                                                        doc, extra, qr), new_supplier=True)
         # nur Stammdaten bzw. Zahlungsbedingungen per Textregel: noch nichts
         # Pruefbares extrahiert
         if not any(f.source not in ("library", zahlung.SOURCE) for f in res.fields.values()):
-            # Belegart unklar ist auch ohne Werte ein Grund fuer den Menschen
-            res.checks = extra + [c for c in belegart.checks(res.fields, doc)
-                                  if c.name == "belegart"]
+            # Belegart/Waehrung/QR-Zahlteil sind auch ohne sonstige Werte
+            # pruefbar -- bleiben also auch hier ein Grund fuer den Menschen.
+            res.checks = (extra
+                         + [c for c in belegart.checks(res.fields, doc) if c.name == "belegart"]
+                         + waehrung.checks(res.fields, doc.text)
+                         + swissqr.checks(res.fields, qr, supplier))
             return
         res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
-        res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, extra)
+        res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, extra, qr)
         _set_dublette(res, store, doc)
 
 
 def _all_checks(fields, supplier, store: Store, line_items, doc,
-                extra: list[Check] | None = None) -> list[Check]:
+                extra: list[Check] | None = None,
+                qr: "swissqr.SwissQR | None" = None) -> list[Check]:
     """Pruefungen fuer PDF-Rechnungen (Template- und Untemplated-Pfad)."""
     checks = run_all(fields, supplier, store.seen_invoice, line_items)
     if supplier is not None:
@@ -691,6 +707,10 @@ def _all_checks(fields, supplier, store: Store, line_items, doc,
         fields, supplier.id if supplier is not None else None, store, doc.sha256, doc)[0])
     for bc in belegart.checks(fields, doc):
         checks = _replace_check(checks, bc)
+    for wc in waehrung.checks(fields, doc.text):
+        checks = _replace_check(checks, wc)
+    for qc in swissqr.checks(fields, qr, supplier):
+        checks = _replace_check(checks, qc)
     checks = [_credit_check(c, fields) for c in checks]
     return checks + list(extra or [])
 
@@ -750,6 +770,12 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
         return res
     res = Result(file=str(path), sha256=doc.sha256, seiten=len(doc.pages))
 
+    # Swiss QR-Rechnung (Postfach-Baustein 7): nur rendern/dekodieren, wenn
+    # der Text ueberhaupt danach aussieht (Label "Zahlteil"/"QR-IBAN" etc.)
+    # -- teures Seiten-Rendern nicht bei jeder gewoehnlichen Rechnung.
+    qr_obj = swissqr.read(path) if swissqr.likely(doc.text) else None
+    res.qr = qr_obj.to_dict() if qr_obj else None
+
     # Sammel-PDF (split.py): Teile tragen den Verweis aufs Original. Ein PDF
     # mit (moeglicherweise) mehreren Rechnungen wird nie als eine verarbeitet.
     res.sammel = split.part_info(store, doc.sha256)
@@ -769,7 +795,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
         addr_check = _billing_check(doc.text, store, res)
     if not match:
         res.hold_reasons.insert(0, f"Lieferant: {why}")
-        _finish_untemplated(res, doc, None, store, use_llm, [addr_check], timer)
+        _finish_untemplated(res, doc, None, store, use_llm, [addr_check], timer, qr_obj)
         _ocr_adjust(res, o)
         _apply_hold(res)
         res.stufenzeiten = timer.times
@@ -791,7 +817,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     if tpl is None:
         res.status = NO_TEMPLATE
         _inject_library_fields(res.fields, supplier)
-        _finish_untemplated(res, doc, supplier, store, use_llm, [addr_check], timer)
+        _finish_untemplated(res, doc, supplier, store, use_llm, [addr_check], timer, qr_obj)
         _ocr_adjust(res, o)
         _apply_hold(res)
         res.stufenzeiten = timer.times
@@ -840,6 +866,8 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     # Faelligkeit/Skonto: was Vorlage/Mensch nicht liefern, per Regel aus dem Text
     zahlung.apply(res.fields, doc.text, res.hinweise)
     belegart.apply(res.fields, doc, hinweise=res.hinweise)
+    waehrung.apply(res.fields, doc.text, res.hinweise)
+    swissqr.apply(res.fields, qr_obj)
 
     if tpl.line_items and o is not None and o.partial:
         # Langer Scan, Positionsseiten noch ohne Texterkennung: keine halbe
@@ -855,10 +883,12 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     with timer.stage("pruefungen"):
         res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
 
-        res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, [addr_check])
+        res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, [addr_check],
+                                 qr_obj)
         _set_dublette(res, store, doc)
         res.shadow = shadow.decide(
-            machine, _all_checks(machine, supplier, store, res.line_items, doc, [addr_check])
+            machine, _all_checks(machine, supplier, store, res.line_items, doc, [addr_check],
+                                 qr_obj)
             if corrections else res.checks, new_supplier=False)
 
     required = [f for f in tpl.fields if f.required]

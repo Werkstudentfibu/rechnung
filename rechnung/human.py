@@ -72,6 +72,10 @@ _CHECK_FIELDS = {
     "pdf-xml-abgleich": ("rechnungsnummer", "brutto"),
     "belegart": ("belegart",),
     "vorzeichen": ("netto", "ust_betrag", "brutto"),
+    "waehrung": ("waehrung",),
+    "qr-iban": ("iban",),
+    "qr-betrag": ("brutto",),
+    "qr-referenz": ("zahlungsreferenz",),
 }
 
 # Quellen, deren Konfidenz nicht "gelesen" ist (Stammdaten/Mensch/fehlt)

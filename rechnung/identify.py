@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 
 from .pdf import Document
-from .textnorm import find_domains, find_iban, find_ibans, find_ustids, norm
+from .textnorm import find_domains, find_iban, find_ibans, find_ustids, norm, norm_ustid
 
 # Stammdaten-Felder, die als "fester Wert" pro Lieferant hinterlegt werden koennen
 # (Name -> value_type). Werden von der Pipeline in die Extraktion gemischt, statt
@@ -23,9 +23,12 @@ FIXED_FIELD_TYPES: dict[str, str] = {
 # Spalten, damit sie nicht erst nach der ersten passenden Rechnung auftauchen).
 # Legt NICHTS fest -- tatsaechlich beobachtete Saetze kommen in pipeline.py
 # unabhaengig davon dazu, egal ob mehr oder weniger als hier vorgeschlagen.
+# CHF: aktuelle Saetze (seit 2024) 8,1/2,6/3,8 sowie die alten 7,7/2,5/3,7
+# (Belege von vor 2024) -- beide Generationen bleiben gueltig, es wird kein
+# Satz als "falsch" verworfen.
 EXPECTED_RATES: dict[str, list[float]] = {
     "EUR": [19.0, 7.0, 0.0],
-    "CHF": [8.1, 2.6, 0.0],
+    "CHF": [8.1, 2.6, 3.8, 7.7, 2.5, 3.7, 0.0],
 }
 DEFAULT_CURRENCY = "EUR"
 
@@ -136,7 +139,10 @@ def build_identifier_index(suppliers: list[Supplier]) -> dict[tuple[str, str], s
     idx: dict[tuple[str, str], set[str]] = {}
     for s in suppliers:
         for u in s.ustids:
-            idx.setdefault(("ustid", u), set()).add(s.id)
+            # normalisiert (Leerzeichen/Punkte/Bindestriche weg, Schweizer
+            # UID "CHE-123.456.789 MWST" -> "CHE123456789") -- ein Stammdatum
+            # darf anders geschrieben sein als der Fund im Rechnungstext.
+            idx.setdefault(("ustid", norm_ustid(u)), set()).add(s.id)
         for i in s.ibans:
             idx.setdefault(("iban", i), set()).add(s.id)
     return idx
@@ -179,7 +185,7 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
     idx = index if index is not None else build_identifier_index(suppliers)
     hard_ids: set[str] = set()
     for u in ids["ustids"]:
-        hard_ids |= idx.get(("ustid", u), set())
+        hard_ids |= idx.get(("ustid", norm_ustid(u)), set())
     for i in ids["ibans"]:
         hard_ids |= idx.get(("iban", i), set())
     if len(hard_ids) > 1:
@@ -190,7 +196,7 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
         by_id = {s.id: s for s in suppliers}
         s = by_id[next(iter(hard_ids))]
         score = 0.0
-        if ids["ustids"] & set(s.ustids):
+        if {norm_ustid(u) for u in ids["ustids"]} & {norm_ustid(u) for u in s.ustids}:
             score += 0.6
         if ids["ibans"] & set(s.ibans):
             score += 0.5
@@ -234,10 +240,11 @@ def cross_check(doc: Document, supplier: Supplier) -> list[dict]:
         out.append({"kind": "iban-stammdaten", "ok": not foreign,
                     "detail": (f"{IBAN_DEVIATES}: {', '.join(foreign)}" if foreign else "ok")})
     if supplier.ustids:
-        found = ids["ustids"]
-        ok = (not found) or bool(found & set(supplier.ustids))
+        found = {norm_ustid(u) for u in ids["ustids"]}
+        sup_ustids = {norm_ustid(u) for u in supplier.ustids}
+        ok = (not found) or bool(found & sup_ustids)
         out.append({"kind": "ustid-stammdaten", "ok": ok,
-                    "detail": ",".join(sorted(found - set(supplier.ustids))) or "ok"})
+                    "detail": ",".join(sorted(found - sup_ustids)) or "ok"})
     return out
 
 

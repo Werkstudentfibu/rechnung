@@ -6,7 +6,10 @@ from pathlib import Path
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
+
+from .swissqr import build_spc
 
 # Rechte Kante je Spalte der Positionstabelle, als mm-Offset ab dem linken
 # Rand (20mm). "Beschreibung" ist die einzige linksbuendige Spalte.
@@ -25,6 +28,30 @@ _LI_HEADERS = [
 
 def _de_amount(v: float) -> str:
     return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _ch_amount(v: float) -> str:
+    """Schweizer Schreibweise mit Hochkomma als Tausendertrenner ('1'234.50')."""
+    return f"{v:,.2f}".replace(",", "'")
+
+
+def _draw_qr(c: canvas.Canvas, x_mm: float, y_mm: float, size_mm: float, spc: str) -> bool:
+    """SPC-Inhalt als QR-Code auf die Seite zeichnen (``zxingcpp``, optionale
+    Abhaengigkeit wie in swissqr.py) -> True wenn gezeichnet, False wenn
+    ``zxingcpp`` nicht installiert ist (dann bleibt die Seite ohne QR-Code,
+    kein Fehler)."""
+    try:
+        import zxingcpp
+    except ImportError:
+        return False
+    from PIL import Image
+
+    bc = zxingcpp.create_barcode(spc, zxingcpp.QRCode)
+    img = zxingcpp.write_barcode_to_image(bc, scale=8)
+    h_px, w_px = img.shape
+    pil = Image.frombuffer("L", (w_px, h_px), bytes(memoryview(img)), "raw", "L", 0, 1)
+    c.drawImage(ImageReader(pil), x_mm * mm, y_mm * mm, size_mm * mm, size_mm * mm)
+    return True
 
 
 def _default_items(netto: float, satz: float, waehrung: str) -> list[dict]:
@@ -85,7 +112,10 @@ def make_invoice(path: str | Path, *, lieferant="Muster Handels GmbH",
                  domain="muster-handel.de", rechnungsnr="RE-2026-00042",
                  datum="14.02.2026", netto=1000.00, satz=19, waehrung="EUR",
                  layout="a", items: list[dict] | None = None,
-                 zahlungstext: str | None = None) -> Path:
+                 zahlungstext: str | None = None,
+                 ch_zahlenformat: bool = False,
+                 qr_zahlteil: bool = False, qr_referenz_typ: str = "NON",
+                 qr_referenz: str = "") -> Path:
     path = Path(path)
     custom_items = items is not None
     if items is None:
@@ -142,12 +172,13 @@ def make_invoice(path: str | Path, *, lieferant="Muster Handels GmbH",
 
     table_bottom = _draw_items_table(c, h, table_top, items)
 
+    fmt = _ch_amount if ch_zahlenformat else (lambda v: f"{v:.2f}")
     c.setFont("Helvetica", 10)
     ty = table_bottom - 8 * mm
     for label, val in [
-        ("Nettobetrag", f"{netto:.2f} {waehrung}"),
-        (f"Umsatzsteuer {satz}%" if not custom_items else "Umsatzsteuer", f"{ust:.2f} {waehrung}"),
-        ("Gesamtbetrag", f"{brutto:.2f} {waehrung}"),
+        ("Nettobetrag", f"{fmt(netto)} {waehrung}"),
+        (f"Umsatzsteuer {satz}%" if not custom_items else "Umsatzsteuer", f"{fmt(ust)} {waehrung}"),
+        ("Gesamtbetrag", f"{fmt(brutto)} {waehrung}"),
     ]:
         c.drawString(20 * mm, ty, label)
         c.drawString(120 * mm, ty, val)
@@ -160,6 +191,17 @@ def make_invoice(path: str | Path, *, lieferant="Muster Handels GmbH",
         c.drawString(20 * mm, 30 * mm, f"Bankverbindung IBAN {iban}")
     else:
         c.drawString(20 * mm, 30 * mm, f"Zahlbar bis 28.02.2026 auf IBAN {iban}")
+
+    if qr_zahlteil:
+        # Swiss QR-Rechnung (Postfach-Baustein 7): "Zahlteil" als Text (damit
+        # swissqr.likely() den QR-Code ueberhaupt sucht) + der QR-Code selbst.
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(120 * mm, 60 * mm, "Zahlteil")
+        spc = build_spc(iban=iban, creditor_name=lieferant, creditor_city=ort,
+                        betrag=brutto, waehrung=waehrung,
+                        debtor_name="Beispiel Kunde AG", debtor_city="10115 Berlin",
+                        referenz_typ=qr_referenz_typ, referenz=qr_referenz)
+        _draw_qr(c, 120, 10, 46, spc)
     c.showPage()
     c.save()
     return path
