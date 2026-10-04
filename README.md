@@ -21,6 +21,7 @@ rechnung --samples ./samples scan   # alle PDFs verarbeiten (Konsole)
 rechnung suppliers                  # bekannte Lieferanten
 rechnung templates                  # gespeicherte Templates
 rechnung schatten                   # Schattenbetrieb: haette das Programm allein richtig gelegen?
+rechnung fehlerbericht              # haeufigste wiederkehrende Fehler/Korrekturen
 ```
 
 `app` und `web` sind dieselbe Oberfläche (gleicher FastAPI-Code) – `app`
@@ -156,6 +157,21 @@ Hintergrund-Thread, siehe `rechnung/guard.py`).
   das Training-UI Layouts mit ähnlichem Kopf-Fingerprint vor; "Vorlage übernehmen"
   kopiert deren Template als Startpunkt statt komplett neu anzulernen. Muss danach
   trotzdem erst wieder 3× bestätigt werden, bevor `auto` greift.
+
+## Fehler-/Ereignisprotokoll + Fehlerbericht
+
+Jede Verarbeitung (CLI `scan`, Bestätigen im Training-UI) hängt ein
+strukturiertes Ereignis an `data/events.jsonl` an: Datei, sha256, Lieferant,
+welche Stufen Werte beigetragen haben, Herkunft/Konfidenz je Feld, alle
+Prüfungen mit Ergebnis/Grund, Dauer, Endstatus. Eine im Training-UI
+vorgenommene Korrektur (Feld, alter Wert, neuer Wert) hängt sich als eigenes
+Ereignis an. Rein additiv wie `audit.jsonl`/`shadow.jsonl`.
+
+`rechnung fehlerbericht [--seit JJJJ-MM-TT] [--json]` bzw.
+`GET /api/fehlerbericht?seit=...` werten das aus: häufigste wiederkehrende
+rote Prüfungen und fehlende/unsichere Felder je Prüfung/Feld und Lieferant,
+sowie häufige Korrekturen je Feld -- jeweils mit Beispiel-Rechnungen,
+absteigend nach Häufigkeit sortiert.
 
 ## Härtung (v1.3)
 

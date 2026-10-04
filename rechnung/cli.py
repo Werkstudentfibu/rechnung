@@ -179,6 +179,37 @@ def _cmd_shadow(args) -> int:
     return 0
 
 
+def _cmd_fehlerbericht(args) -> int:
+    """Haeufigste wiederkehrende Fehler: rote Pruefungen, fehlende/unsichere
+    Felder, Korrekturen -- je Pruefung/Feld und Lieferant, mit Beispielen."""
+    from .eventlog import report
+
+    data = report(Store(args.data), args.seit)
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return 0
+    if not (data["pruefungen"] or data["felder"] or data["korrekturen"]):
+        print("Keine Ereignisse" + (f" seit {args.seit}" if args.seit else "") + ".")
+        return 0
+    tag = f" seit {args.seit}" if args.seit else ""
+    print(f"Fehlerbericht{tag}\n")
+
+    def section(title: str, rows: list[dict], key: str) -> None:
+        if not rows:
+            return
+        print(f"{title}:")
+        for r in rows:
+            who = r["lieferant_name"] or r["lieferant"]
+            beispiele = ", ".join(b["datei"] for b in r["beispiele"][:3])
+            print(f"  {r['anzahl']:4d}x  {r[key]:<24s} {who:<30.30s}  z.B. {beispiele}")
+        print()
+
+    section("Pruefungen (rot)", data["pruefungen"], "pruefung")
+    section("Felder (fehlend/niedrige Konfidenz)", data["felder"], "feld")
+    section("Korrekturen", data["korrekturen"], "feld")
+    return 0
+
+
 def _cmd_web(args) -> int:
     import uvicorn
 
@@ -308,6 +339,12 @@ def main(argv=None) -> int:
                         help="Schattenbetrieb: wuerde-durchlassen vs. Korrekturen je Lieferant")
     sh.add_argument("--json", action="store_true")
     sh.set_defaults(func=_cmd_shadow)
+
+    fb = sub.add_parser("fehlerbericht",
+                        help="Haeufigste wiederkehrende Fehler/Korrekturen je Pruefung/Feld und Lieferant")
+    fb.add_argument("--seit", help="nur Ereignisse ab diesem Datum (YYYY-MM-DD)")
+    fb.add_argument("--json", action="store_true")
+    fb.set_defaults(func=_cmd_fehlerbericht)
 
     w = sub.add_parser("web", help="Lokale Training-UI im Browser starten (Entwicklung/Linux)")
     w.add_argument("--port", type=int, default=8000)

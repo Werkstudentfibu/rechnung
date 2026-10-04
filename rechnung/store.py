@@ -95,6 +95,7 @@ class Store:
         self._categories = self.root / "categories.json"
         self._confirmations_log = self.root / "confirmations.jsonl"
         self._shadow = self.root / "shadow.jsonl"
+        self._events = self.root / "events.jsonl"
         self._processed_cache: list[dict] | None = None
 
     # ---- Lieferanten --------------------------------------------------
@@ -283,6 +284,17 @@ class Store:
 
     def shadow_log(self) -> list[dict]:
         return _read_jsonl_safe(self._shadow)
+
+    # ---- Vollstaendiges Ereignisprotokoll (eventlog.py) -- append-only wie
+    # audit/shadow. Jede Verarbeitung/Bestaetigung und jede spaetere
+    # Korrektur haengt sich hier an; Basis fuer den Fehlerbericht
+    # (haeufigste wiederkehrende Pruefungs-Fehlschlaege/Korrekturen).
+    def event_append(self, rec: dict) -> None:
+        with self._events.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    def events(self) -> list[dict]:
+        return _read_jsonl_safe(self._events)
 
     # ---- Kategorie-Lerntabelle (Positionstext -> Kategorie) ---------
     # Gilt lieferantenuebergreifend: einmal gelernte Zuordnungen ("Porto" ->

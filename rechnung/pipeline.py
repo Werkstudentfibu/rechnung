@@ -713,17 +713,24 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
 
 def scan_folder(folder: str | Path, store: Store, guard=None) -> list[Result]:
     """Alle Rechnungen eines Ordners verarbeiten -- jede mit Zeitgrenze
-    (guard.py), damit eine haengende Rechnung die Schlange nicht blockiert."""
+    (guard.py), damit eine haengende Rechnung die Schlange nicht blockiert.
+    Jedes Ergebnis (auch ein Abbruch durch Zeitgrenze/OCR-Fehler) haengt ein
+    Ereignis an ``data/events.jsonl`` -- Grundlage fuer den Fehlerbericht
+    (eventlog.py), unabhaengig davon, ob die Rechnung spaeter bestaetigt wird."""
+    from . import eventlog
     from .guard import Guard
 
     folder = Path(folder)
     own = guard is None
     guard = guard or Guard(store.root)
     try:
-        return [guard.process(p) for p in invoice_files(folder)]
+        results = [guard.process(p) for p in invoice_files(folder)]
     finally:
         if own:
             guard.close()
+    for res in results:
+        eventlog.record(store, res)
+    return results
 
 
 def invoice_files(folder: str | Path) -> list[Path]:

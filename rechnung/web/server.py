@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from .. import billing
 from .. import einvoice
+from .. import eventlog
 from .. import learn
 from .. import pdf as pdfmod
 from .. import semantic
@@ -608,6 +609,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             res = _process_for_confirm(path)
         _log_confirmed(path, res, tpl.id, tpl.variant)
         shadow.record(store, res, _operator())
+        eventlog.record(store, res, _operator())
         # Stufe 1: aus den eben bestaetigten Werten das Template ergaenzen/
         # praezisieren (gesicherte Templates werden nur ergaenzt).
         learned = learn.learn_from_confirmed(store, res, doc, _operator())
@@ -631,6 +633,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             _log_confirmed(path, res, res.template_id, res.template_variant,
                            extraction=res.extraction)
         shadow.record(store, res, operator)
+        eventlog.record(store, res, operator)
         learned = learn.learn_from_confirmed(store, res, _load(path), operator)
         return JSONResponse({"confirmed": True, "status": res.status,
                              "confirmations": 0, "secured": False,
@@ -642,6 +645,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if not store.seen_sha_template(res.sha256, None):
             _log_confirmed(path, res, None, None, extraction=EXTRACT_EINVOICE)
         shadow.record(store, res, operator)
+        eventlog.record(store, res, operator)
         return JSONResponse({"confirmed": True, "extraction": EXTRACT_EINVOICE,
                              "status": res.status})
 
@@ -649,7 +653,23 @@ def create_app(store: Store, samples: Path) -> FastAPI:
     def save_correction_ep(body: CorrectionPost) -> JSONResponse:
         from ..config import operator
         path = _resolve(body.file)
-        store.save_correction(_sha(path), body.field, body.value, operator())
+        sha = _sha(path)
+        op = operator()
+        # "alt" ist der Wert der vorherigen Korrektur dieser Rechnung/dieses
+        # Feldes (falls vorhanden) -- fuer den Fehlerbericht (eventlog.py).
+        alt = store.corrections(sha).get(body.field)
+        store.save_correction(sha, body.field, body.value, op)
+        sup_id = sup_name = None
+        try:
+            doc = _load(path)
+            match = identify(doc, store.suppliers())
+            if match:
+                sup_id, sup_name = match[0].id, match[0].name
+        except HTTPException:
+            pass
+        eventlog.record_correction(store, sha, body.field, alt, body.value, op,
+                                   supplier_id=sup_id, supplier_name=sup_name,
+                                   file=path.name)
         return JSONResponse({"ok": True})
 
     @app.delete("/api/correction")
@@ -785,6 +805,13 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         davon ohne Korrektur / Fehlentscheidungen. Reine Auswertung -- die
         Bestaetigungspflicht bleibt unveraendert."""
         return JSONResponse(shadow.stats(store))
+
+    @app.get("/api/fehlerbericht")
+    def fehlerbericht_ep(seit: str | None = None) -> JSONResponse:
+        """Haeufigste wiederkehrende Fehler (rote Pruefungen, fehlende/
+        unsichere Felder, Korrekturen) je Pruefung/Feld und Lieferant,
+        optional ab einem Datum (``seit=YYYY-MM-DD``). Siehe eventlog.py."""
+        return JSONResponse(eventlog.report(store, seit))
 
     @app.get("/api/journal")
     def journal() -> JSONResponse:

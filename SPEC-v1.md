@@ -57,6 +57,7 @@ data/
   suppliers.json          Lieferanten-Merkmale (USt-IdNr, IBAN, Domain, Fingerprint)
   templates/<id>.json     Feld-Definitionen
   processed.jsonl         Verarbeitungs-Log (Dublettenprüfung, Audit)
+  events.jsonl            Ereignisprotokoll (§7o): je Verarbeitung/Korrektur ein Eintrag
   out/<rechnung>.json|csv Extraktionsergebnis
 ```
 
@@ -428,6 +429,31 @@ demselben Rechner, es geht nichts ins Netz.
 - Der fruehere Status `scan_no_textlayer` ("v1 nicht unterstuetzt", §3) wird
   dadurch nicht mehr vergeben, bleibt aber als Konstante/UI-Darstellung
   bestehen.
+
+## 7o. Vollstaendiges Fehler-/Ereignisprotokoll + Fehlerbericht (2026-10-04)
+
+`rechnung/eventlog.py`. Jede Verarbeitung (CLI `scan`, Bestaetigen im
+Training-UI) haengt ein Ereignis an `data/events.jsonl` an: Datei, sha256,
+Lieferant, welche Stufen/Herkunftsquellen Werte beigetragen haben (`stages`,
+inkl. `ocr`), Herkunft und Konfidenz je Feld, alle Pruefungen mit
+Ergebnis/Grund, Dauer, Endstatus, Rueckstellgruende. Rein additiv wie
+`audit.jsonl`/`shadow.jsonl` -- jeder Verarbeitungsdurchlauf (auch ein per
+Zeitgrenze/OCR-Fehler abgebrochener, der nie bestaetigt wird) bekommt sein
+eigenes Ereignis, nichts wird ueberschrieben.
+
+- **Korrekturen**: `POST /api/correction` haengt zusaetzlich ein
+  Korrektur-Ereignis an (Feld, alter Wert der vorherigen Korrektur bzw.
+  `null` bei der ersten, neuer Wert, Lieferant falls erkennbar).
+- **Fehlerbericht**: `rechnung fehlerbericht [--seit JJJJ-MM-TT] [--json]`
+  bzw. `GET /api/fehlerbericht?seit=...` (`eventlog.report()`) gruppiert die
+  Ereignisse -- rote Pruefungen je Pruefung+Lieferant, fehlende/Felder mit
+  Konfidenz unter `CONF_MIN` je Feld+Lieferant, Korrekturen je Feld+Lieferant
+  -- jeweils mit bis zu 5 Beispiel-Rechnungen, absteigend nach Haeufigkeit.
+  Reine Auswertung wie der Schattenbetrieb (§7k) -- aendert keine Pipeline-
+  Entscheidung.
+- Eigenstaendig von `shadow.py`: Schattenbetrieb misst "haette die Maschine
+  durchgelassen", dieses Protokoll sammelt die rohen Ereignisse fuer die
+  Fehlersuche -- unabhaengige Fragen auf denselben Ergebnissen.
 
 ## 8. Offene Punkte für v1.1
 
