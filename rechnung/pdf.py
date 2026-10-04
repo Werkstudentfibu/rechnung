@@ -71,3 +71,13 @@ def has_text_layer(path: str | Path) -> bool:
             if (p.extract_text() or "").strip():
                 return True
     return False
+
+
+def page_has_text(path: str | Path, index: int) -> bool:
+    """Hat GENAU diese Seite eine Textebene? Fuer gemischte PDFs (eingescannte
+    Seite zwischen Textseiten), SPEC Effizienz-Baustein 3: OCR soll nur die
+    Seiten treffen, die es wirklich brauchen."""
+    with pdfplumber.open(path) as pdf:
+        if index >= len(pdf.pages):
+            return False
+        return bool((pdf.pages[index].extract_text() or "").strip())

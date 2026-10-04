@@ -22,6 +22,20 @@ pypdfium2 = pytest.importorskip("pypdfium2")
 from rechnung.synth import make_invoice  # noqa: E402
 
 
+def _textless_pdf(path: Path) -> Path:
+    """Reine Vektorgrafik, kein Text -- fuer Tests, die bewusst eine Seite
+    OHNE Textebene brauchen (seit Effizienz-Baustein 3 wird eine Seite mit
+    Textebene gar nicht mehr per Tesseract erkannt, siehe ocr.page_has_text)."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+
+    c = canvas.Canvas(str(path), pagesize=A4)
+    c.line(10, 10, 100, 100)
+    c.showPage()
+    c.save()
+    return path
+
+
 # ---- needs_ocr --------------------------------------------------------
 
 def test_needs_ocr_image_suffixes(tmp_path: Path):
@@ -227,10 +241,12 @@ def test_ensure_text_corrupt_cache_meta_falls_back(tmp_path: Path, monkeypatch):
 
 def test_ensure_text_full_run_and_cache_reuse(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(ocr, "available", lambda: True)
-    # Der "Scan" ist hier eine normale Test-PDF -- es geht um den OCR-Ablauf
-    # (Rendern, Tesseract je Seite, Zusammenfuegen, Konfidenz), nicht um
-    # echte Bildqualitaet. Tesseract selbst wird unten gemockt.
-    src = make_invoice(tmp_path / "scan.pdf", rechnungsnr="RE-9")
+    # Der "Scan" ist hier eine Vektorgrafik-PDF ohne Textebene -- es geht um
+    # den OCR-Ablauf (Rendern, Tesseract je Seite, Zusammenfuegen, Konfidenz),
+    # nicht um echte Bildqualitaet. Tesseract selbst wird unten gemockt. Eine
+    # normale Test-Rechnung ginge seit Baustein 3 (Seiten mit Textebene
+    # werden uebersprungen) gar nicht mehr durch Tesseract.
+    src = _textless_pdf(tmp_path / "scan.pdf")
     produced = make_invoice(tmp_path / "ocr_out.pdf", rechnungsnr="RE-9")
 
     def fake_run(image, out_base, timeout):
@@ -263,7 +279,7 @@ def test_ensure_text_tesseract_timeout(tmp_path: Path, monkeypatch):
     import subprocess as sp
 
     monkeypatch.setattr(ocr, "available", lambda: True)
-    src = make_invoice(tmp_path / "scan.pdf", rechnungsnr="RE-1")
+    src = _textless_pdf(tmp_path / "scan.pdf")
 
     def fake_run(image, out_base, timeout):
         raise sp.TimeoutExpired(cmd="tesseract", timeout=timeout or 1)

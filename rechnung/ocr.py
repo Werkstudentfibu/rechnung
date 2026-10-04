@@ -28,8 +28,10 @@ import shutil
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
 
 from .textnorm import norm
 
@@ -56,6 +58,21 @@ def word_min_confidence() -> float:
         return float(os.environ.get("RECHNUNG_OCR_WORD_MIN_CONF", "60"))
     except ValueError:
         return 60.0
+
+
+def jobs() -> int:
+    """Parallelitaet fuer die Texterkennung mehrseitiger Rechnungen (SPEC
+    Effizienz-Baustein 3) -- ``RECHNUNG_OCR_JOBS``, Standard Kerne-1
+    (mindestens 1). Auf einem knappen Laptop ueber die Umgebungsvariable
+    sparsam einstellen (z.B. 1-2), siehe Laptop-Profil in
+    ``rechnung.env.example``."""
+    v = os.environ.get("RECHNUNG_OCR_JOBS", "").strip()
+    if v:
+        try:
+            return max(1, int(v))
+        except ValueError:
+            pass
+    return max(1, (os.cpu_count() or 2) - 1)
 
 
 # Standard-Installationsorte unter Windows (UB-Mannheim-Installer, siehe
@@ -211,24 +228,43 @@ def _parse_tsv(text: str, word_min: float) -> tuple[list[float], list[str]]:
     return confs, low
 
 
-def _merge(pdfs: list[Path], target: Path) -> None:
+def _merge_mixed(original: Path, page_pdfs: list[Path | None], skip: list[bool],
+                 target: Path) -> None:
+    """Fuegt das Ergebnis zusammen: Seiten mit eigener Textebene (``skip``)
+    kommen unveraendert aus dem ORIGINAL -- keine OCR-Bildschicht darueber,
+    keine OCR noetig gewesen (SPEC Effizienz-Baustein 3); die uebrigen aus
+    der jeweils per Tesseract erkannten Seiten-PDF."""
     import pypdfium2 as pdfium
 
     out = pdfium.PdfDocument.new()
+    src_orig = pdfium.PdfDocument(str(original)) if any(skip) else None
     try:
-        for p in pdfs:
-            src = pdfium.PdfDocument(str(p))
-            out.import_pages(src)
-            src.close()
+        for i, is_skip in enumerate(skip):
+            if is_skip:
+                out.import_pages(src_orig, pages=[i])
+            else:
+                src = pdfium.PdfDocument(str(page_pdfs[i]))
+                out.import_pages(src)
+                src.close()
         out.save(str(target))
     finally:
         out.close()
+        if src_orig is not None:
+            src_orig.close()
 
 
 def ensure_text(path: str | Path, cache_dir: str | Path,
                 timeout: float | None = None) -> OcrResult:
     """Original -> OCR-PDF mit Textebene (aus dem Cache, falls schon erzeugt).
-    ``timeout`` begrenzt die gesamte Erkennung (alle Seiten zusammen)."""
+    ``timeout`` begrenzt die gesamte Erkennung (alle Seiten zusammen).
+
+    SPEC Effizienz-Baustein 3: Seiten, die (bei einem PDF) bereits eine
+    eigene Textebene haben, werden nicht per Tesseract erkannt, sondern
+    unveraendert aus dem Original uebernommen -- typisch bei einer
+    gemischten Rechnung (z.B. eingescannter Lieferschein zwischen
+    Text-Seiten). Die verbleibenden Seiten laufen parallel ueber mehrere
+    Prozessorkerne (``jobs()``, konfigurierbar, auf dem Laptop-Profil
+    sparsam), statt streng nacheinander."""
     path = Path(path)
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
     cache_dir = Path(cache_dir)
@@ -251,31 +287,67 @@ def ensure_text(path: str | Path, cache_dir: str | Path,
         images = _page_images(path)
     except Exception as e:  # noqa: BLE001 -- defektes Bild/PDF
         return OcrResult(sha, error=f"OCR: Datei nicht lesbar ({type(e).__name__})")
+
+    # Bilder/TIFFs haben nie eine Textebene -- jede Seite/jeder Frame braucht
+    # OCR. Bei einem PDF je Seite einzeln pruefen (has_text_layer prueft nur
+    # die ersten drei Seiten des gesamten Dokuments, das reicht hier nicht).
+    from . import pdf as pdfmod
+
+    is_pdf = path.suffix.lower() == ".pdf"
+    try:
+        skip = [is_pdf and pdfmod.page_has_text(path, i) for i in range(len(images))]
+    except Exception:  # noqa: BLE001 -- im Zweifel lieber jede Seite erkennen
+        skip = [False] * len(images)
+    todo = [i for i, s in enumerate(skip) if not s]
+
     confs: list[float] = []
     low: list[str] = []
-    with tempfile.TemporaryDirectory(prefix="rechnung-ocr-") as tmp:
-        tmp = Path(tmp)
-        page_pdfs = []
-        for i, img in enumerate(images):
-            png = tmp / f"s{i:03d}.png"
-            img.save(png, dpi=(DPI, DPI))
-            base = tmp / f"s{i:03d}"
-            remaining = None if deadline is None else max(1.0, deadline - time.monotonic())
-            try:
-                _run_tesseract(png, base, remaining)
-            except subprocess.TimeoutExpired:
-                return OcrResult(sha, error="OCR: Zeitgrenze ueberschritten")
-            except (OSError, subprocess.SubprocessError) as e:
-                return OcrResult(sha, error=f"OCR fehlgeschlagen ({type(e).__name__})")
-            page_pdfs.append(base.with_suffix(".pdf"))
-            c, lw = _parse_tsv(base.with_suffix(".tsv").read_text("utf-8", "replace"),
-                               word_min_confidence())
-            confs += c
-            low += lw
+    page_pdfs: list[Path | None] = [None] * len(images)
+    errors: list[str] = []
+    lock = Lock()
+
+    def run_one(i: int, tmp: Path) -> None:
+        png = tmp / f"s{i:03d}.png"
+        images[i].save(png, dpi=(DPI, DPI))
+        base = tmp / f"s{i:03d}"
+        remaining = None if deadline is None else max(1.0, deadline - time.monotonic())
+        try:
+            _run_tesseract(png, base, remaining)
+        except subprocess.TimeoutExpired:
+            with lock:
+                errors.append("OCR: Zeitgrenze ueberschritten")
+            return
+        except (OSError, subprocess.SubprocessError) as e:
+            with lock:
+                errors.append(f"OCR fehlgeschlagen ({type(e).__name__})")
+            return
+        c, lw = _parse_tsv(base.with_suffix(".tsv").read_text("utf-8", "replace"),
+                           word_min_confidence())
+        with lock:
+            confs.extend(c)
+            low.extend(lw)
+            page_pdfs[i] = base.with_suffix(".pdf")
+
+    with tempfile.TemporaryDirectory(prefix="rechnung-ocr-") as tmp_dir:
+        tmp = Path(tmp_dir)
+        n_jobs = min(jobs(), len(todo)) if len(todo) > 1 else 1
+        if n_jobs > 1:
+            with ThreadPoolExecutor(max_workers=n_jobs) as ex:
+                list(ex.map(lambda i: run_one(i, tmp), todo))
+        else:
+            for i in todo:
+                run_one(i, tmp)
+        if errors:
+            return OcrResult(sha, error=errors[0])
         cache_dir.mkdir(parents=True, exist_ok=True)
-        _merge(page_pdfs, target)
-    res = OcrResult(sha, target, round(sum(confs) / len(confs), 1) if confs else 0.0,
-                    sorted(set(low)), len(images), round(time.monotonic() - t0, 2))
+        _merge_mixed(path, page_pdfs, skip, target)
+
+    # Keine Seite brauchte OCR (todo leer): "Konfidenz" ist dann keine
+    # sinnvolle Groesse -- None statt 0.0, sonst wuerde eine eigentlich
+    # textbasierte Rechnung faelschlich als OCR-unsicher markiert.
+    confidence = None if not todo else (round(sum(confs) / len(confs), 1) if confs else 0.0)
+    res = OcrResult(sha, target, confidence, sorted(set(low)), len(images),
+                    round(time.monotonic() - t0, 2))
     meta.write_text(json.dumps({"confidence": res.confidence, "low_words": res.low_words,
                                 "pages": res.pages, "seconds": res.seconds,
                                 "source": path.name}, ensure_ascii=False), "utf-8")
