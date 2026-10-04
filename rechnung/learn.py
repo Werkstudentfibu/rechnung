@@ -27,9 +27,10 @@ import re
 from dataclasses import dataclass, field
 
 from .pdf import Document, Word
-from .template import (STANDARD_FIELDS, FieldResult, FieldSpec, Template, apply_template,
-                       build_field_spec)
-from .textnorm import MAX_SPAN, norm, parse_amount, parse_date, same_value
+from .template import (STANDARD_FIELDS, FieldResult, FieldSpec, LineItemSpec, Template,
+                       apply_line_items, apply_template, build_field_spec,
+                       build_line_item_spec)
+from .textnorm import MAX_SPAN, norm, parse_amount, parse_date, parse_tax_summary, same_value
 
 # Felder, die als Anker+Region gelernt werden koennen. taxblock (USt-
 # Aufstellung) ist ein Mehrzeilen-Block, dafuer reicht "Wert wiederfinden"
@@ -206,6 +207,249 @@ def locate(doc: Document, fname: str, value, value_type: str
     return scored[0][1], scored[0][2], ""
 
 
+# ---- Positionstabelle + USt-Block selbst ableiten (Postfach-Baustein 11a) --
+# Heute lernt dieses Modul nur Kopffelder automatisch -- Positionstabelle und
+# USt-Aufstellung mussten von Hand angeklickt werden. Ziel: aus bestaetigten
+# Positionen/einer bestaetigten Aufstellung dieselbe Spec ableiten wie ein
+# Mensch sie anklicken wuerde, und nur speichern, wenn ein Probelauf die
+# bestaetigten Werte exakt reproduziert -- sonst weglassen statt raten.
+
+def _value_types(value) -> list[str]:
+    """Welche(r) Spaltentyp(en) zu einem bestaetigten Wert passen koennten,
+    probierte Reihenfolge. ``same_value``/``coerce`` unterscheiden "amount"
+    (Betrag, braucht Nachkommastellen -- sonst waere jede Hausnummer ein
+    Betrag) und "number" (Rohtext, z.B. Menge/MwSt-Satz als blanke Ziffer
+    "2"/"19") -- ein bestaetigter Wert allein (float 2.0 vs. String "2")
+    sagt nicht sicher, welcher Spaltentyp im PDF tatsaechlich gedruckt
+    steht, deshalb wird mit Fallback probiert."""
+    if isinstance(value, bool):
+        return ["text"]
+    if isinstance(value, float):
+        return ["amount", "number"] if value == int(value) else ["amount"]
+    if isinstance(value, int):
+        return ["number", "amount"]
+    if isinstance(value, str):
+        s = value.strip()
+        if re.fullmatch(r"-?\d+", s):
+            return ["number", "amount"]
+        if parse_amount(s) is not None:
+            return ["amount", "number"]
+    return ["text"]
+
+
+def _value_equiv(a, b) -> bool:
+    """Zahlenwerte tolerant vergleichen (0,01), sonst als Text -- unabhaengig
+    davon, ob ein Wert als float oder als Rohtext-String vorliegt (eine
+    gelernte Spalte liest je nach Typ mal so, mal so)."""
+    try:
+        return abs(float(a) - float(b)) <= 0.01
+    except (TypeError, ValueError):
+        return str(a).strip() == str(b).strip()
+
+
+def _items_equiv(got: list[dict], want: list[dict]) -> bool:
+    if len(got) != len(want):
+        return False
+    return all(all(_value_equiv(g.get(k), w.get(k)) for k in w if not k.startswith("_"))
+              for g, w in zip(got, want))
+
+
+def _spans_in_line(line: list[Word], value, value_type: str) -> list[list[Word]]:
+    """Wie ``find_value_spans``, aber nur innerhalb einer schon ermittelten
+    Textzeile -- fuer die Positions-Zeilensuche (_find_row)."""
+    hits: list[list[Word]] = []
+    for i in range(len(line)):
+        for n in range(1, MAX_SPAN + 1):
+            if i + n > len(line):
+                break
+            span = line[i:i + n]
+            if same_value(" ".join(w.text for w in span), value, value_type):
+                hits.append(span)
+                break
+    return hits
+
+
+def _find_row(doc: Document, item: dict, lines: list[list[Word]], skip: set[int]
+             ) -> tuple[int, dict[str, tuple[list[Word], str]]] | None:
+    """Textzeile, in der ALLE (nicht-leeren) Werte einer Position als eigene,
+    nicht ueberlappende Wortspannen vorkommen -> (Zeilenindex, Spalte ->
+    (Wortspanne, Spaltentyp))."""
+    for li, line in enumerate(lines):
+        if li in skip:
+            continue
+        found: dict[str, tuple[list[Word], str]] = {}
+        used: set[int] = set()
+        ok = True
+        for key, value in item.items():
+            if key.startswith("_") or value in (None, ""):
+                continue
+            hit = None
+            for vtype in _value_types(value):
+                cands = [s for s in _spans_in_line(line, value, vtype)
+                        if not ({id(w) for w in s} & used)]
+                if cands:
+                    hit = (cands[0], vtype)
+                    break
+            if hit is None:
+                ok = False
+                break
+            found[key] = hit
+            used |= {id(w) for w in hit[0]}
+        if ok and found:
+            return li, found
+    return None
+
+
+def _nearest_line(lines: list[list[Word]], page: int, ref_top: float, ref_bottom: float,
+                  h: float, above: bool, max_gap_lines: float = 4.0) -> list[Word] | None:
+    """Naechste Textzeile oberhalb (``above``) bzw. unterhalb einer
+    Referenzposition auf derselben Seite -- fuer Kopfzeile/Stoppwort."""
+    best, best_gap = None, None
+    for line in lines:
+        if not line or line[0].page != page:
+            continue
+        if above:
+            bottom = max(w.bottom for w in line)
+            if bottom > ref_top - 0.5:
+                continue
+            gap = ref_top - bottom
+        else:
+            top = min(w.top for w in line)
+            if top < ref_bottom - 0.5:
+                continue
+            gap = top - ref_bottom
+        if gap > h * max_gap_lines:
+            continue
+        if best_gap is None or gap < best_gap:
+            best_gap, best = gap, line
+    return best
+
+
+def _match_header_words(header_line: list[Word], col_spans: dict[str, list[Word]]
+                        ) -> dict[str, Word] | None:
+    """Je Spalte das am naechsten (x-Mitte) liegende Wort der Kopfzeile --
+    die Kopfzeile selbst wird nicht inhaltlich gedeutet, nur positionell den
+    schon bekannten Datenspalten zugeordnet."""
+    used: set[int] = set()
+    out: dict[str, Word] = {}
+    for key, span in col_spans.items():
+        cx = (span[0].x0 + span[-1].x1) / 2
+        cands = [w for w in header_line if id(w) not in used]
+        if not cands:
+            return None
+        w = min(cands, key=lambda w: abs(w.cx - cx))
+        out[key] = w
+        used.add(id(w))
+    return out
+
+
+def learn_line_items(doc: Document, items: list[dict]) -> LineItemSpec | None:
+    """``LineItemSpec`` aus bestaetigten Positionen ableiten: jede Position
+    im PDF wiederfinden (Werte -> Zeile), daraus die Kopfzeile (Label-
+    Woerter oberhalb der ersten Position), Spalten-x-Bereiche
+    (``template.build_line_item_spec``, Mitte zum Nachbarn) und das
+    Stoppwort (erste Zeile unterhalb der letzten Position). Nur wenn der
+    Probelauf (``apply_line_items``) die bestaetigten Positionen exakt
+    reproduziert -- sonst ``None`` statt geraten."""
+    if not items:
+        return None
+    lines = _lines(doc)
+    skip: set[int] = set()
+    rows: list[dict[str, tuple[list[Word], str]]] = []
+    for item in items:
+        hit = _find_row(doc, item, lines, skip)
+        if hit is None:
+            return None
+        li, found = hit
+        skip.add(li)
+        rows.append(found)
+
+    first_words = [w for span, _t in rows[0].values() for w in span]
+    last_words = [w for span, _t in rows[-1].values() for w in span]
+    page = first_words[0].page
+    h = max(w.bottom - w.top for w in first_words)
+    header_line = _nearest_line(lines, page, min(w.top for w in first_words), 0, h, above=True)
+    if not header_line:
+        return None
+    header_map = _match_header_words(header_line, {k: span for k, (span, _t) in rows[0].items()})
+    if header_map is None:
+        return None
+    stop_line = _nearest_line(lines, page, 0, max(w.bottom for w in last_words), h, above=False)
+
+    page_w = doc.pages[page].width
+    header_cols = [(header_map[key], key, rows[0][key][1]) for key in rows[0]]
+    spec = build_line_item_spec(header_cols, stop_line or [], page_w)
+    if not _items_equiv(apply_line_items(doc, spec), items):
+        return None
+    return spec
+
+
+def _amt_close(a, b, tol: float = 0.02) -> bool:
+    if a is None and b is None:
+        return True
+    if a is None or b is None:
+        return False
+    try:
+        return abs(float(a) - float(b)) <= tol
+    except (TypeError, ValueError):
+        return False
+
+
+def _tax_row_matches(a: dict, b: dict) -> bool:
+    return (_amt_close(a.get("satz"), b.get("satz"), 0.05) and _amt_close(a.get("netto"), b.get("netto"))
+           and _amt_close(a.get("ust"), b.get("ust")))
+
+
+def _taxrows_equiv(got, want: list[dict]) -> bool:
+    if not isinstance(got, list) or len(got) != len(want):
+        return False
+    g = sorted(got, key=lambda r: r.get("satz") or 0)
+    w = sorted(want, key=lambda r: r.get("satz") or 0)
+    return all(_tax_row_matches(x, y) for x, y in zip(g, w))
+
+
+def _label_in_line(line: list[Word], fname: str) -> Word | None:
+    cands = [w for w in line if _is_label(w) and _hint_score(fname, w) > 0]
+    return min(cands, key=lambda w: w.x0) if cands else None
+
+
+def learn_taxblock(doc: Document, rows: list[dict]) -> FieldSpec | None:
+    """``FieldSpec`` (``value_type="taxblock"``) aus einer bestaetigten
+    USt-Aufstellung ableiten: jede Zeile {satz, netto, ust} im PDF
+    wiederfinden (``textnorm.parse_tax_summary`` je Textzeile), Anker aus
+    einem Stichwort-Label INNERHALB der ERSTEN gefundenen Zeile (eine
+    Steuerzeile traegt ihr Label meist selbst, z.B. "Steuersatz 19 % ..."),
+    Blockgrenzen aus allen gefundenen Zeilen. Nur wenn der Probelauf exakt
+    reproduziert -- sonst ``None``."""
+    if not rows:
+        return None
+    remaining = list(rows)
+    matched: list[list[Word]] = []
+    for line in _lines(doc):
+        parsed = parse_tax_summary(" ".join(w.text for w in line))
+        hit = next((p for r in remaining for p in parsed if _tax_row_matches(p, r)), None)
+        if hit is None:
+            continue
+        matched.append(line)
+        remaining = [r for r in remaining if not _tax_row_matches(hit, r)]
+    if remaining or not matched:
+        return None
+    matched.sort(key=lambda line: min(w.top for w in line))
+    first_line = matched[0]
+    block_words = [w for line in matched for w in line]
+    anchor = _label_in_line(first_line, "ust_satz")
+    if anchor is None:
+        return None
+    pg = doc.pages[block_words[0].page]
+    spec = build_field_spec("ust_aufstellung", "taxblock", False, anchor, block_words,
+                            pg.width, pg.height)
+    probe = Template(id="_probe", supplier_id="_probe", fields=[spec])
+    result = apply_template(doc, probe).get("ust_aufstellung")
+    if result is None or result.source == "missing" or not _taxrows_equiv(result.value, rows):
+        return None
+    return spec
+
+
 # ---- Template bauen + pruefen -----------------------------------------
 def _reproduces(fr: FieldResult | None, want, value_type: str) -> bool:
     """Liefert die Extraktion exakt den bestaetigten Wert, mit voller Konfidenz?"""
@@ -238,14 +482,18 @@ def confirmed_values(fields: dict[str, FieldResult]) -> dict[str, object]:
 
 def learn_template(doc: Document, supplier_id: str, values: dict[str, object],
                    existing: Template | None = None, variant: str = "standard",
-                   template_id: str | None = None
+                   template_id: str | None = None,
+                   line_items: list[dict] | None = None,
+                   taxblock: list[dict] | None = None,
                    ) -> tuple[Template | None, LearnOutcome]:
     """Aus bestaetigten Werten ein Template ableiten bzw. ``existing`` ergaenzen.
     Speichert nichts -- liefert das Template (oder None, wenn sich nichts
     Verwertbares ergibt) plus Protokoll. ``template_id`` erzwingt eine Id fuer
     ein neues Template (ohne ``existing``) -- genutzt, wenn eine als veraltet
     markierte Vorlage fuer dieselbe Variante schon die Standard-Id belegt
-    (SPEC §7p: Layoutwechsel erkennen)."""
+    (SPEC §7p: Layoutwechsel erkennen). ``line_items``/``taxblock``:
+    bestaetigte Positionstabelle/USt-Aufstellung -- Postfach-Baustein 11a,
+    siehe ``learn_line_items``/``learn_taxblock``."""
     tid = existing.id if existing else (template_id or f"{supplier_id}__{variant}")
     outcome = LearnOutcome(template_id=tid, created=existing is None)
     tpl = (Template.from_dict(existing.to_dict()) if existing
@@ -277,6 +525,35 @@ def learn_template(doc: Document, supplier_id: str, values: dict[str, object],
             continue
         by_name[fname] = spec
         outcome.learned.append(fname)
+
+    if taxblock:
+        current_tb = by_name.get("ust_aufstellung") and current.get("ust_aufstellung")
+        if current_tb is not None and current_tb.source != "missing" \
+                and _taxrows_equiv(current_tb.value, taxblock):
+            outcome.kept.append("ust_aufstellung")
+        elif "ust_aufstellung" in by_name and tpl.secured:
+            outcome.skipped["ust_aufstellung"] = "gesichertes Template liefert anderen Wert"
+        else:
+            spec_tb = learn_taxblock(doc, taxblock)
+            if spec_tb is None:
+                outcome.skipped["ust_aufstellung"] = "nicht reproduzierbar/nicht gefunden"
+            else:
+                by_name["ust_aufstellung"] = spec_tb
+                outcome.learned.append("ust_aufstellung")
+
+    if line_items:
+        current_items = apply_line_items(doc, tpl.line_items) if tpl.line_items else []
+        if tpl.line_items is not None and _items_equiv(current_items, line_items):
+            outcome.kept.append("_positionen")
+        elif tpl.line_items is not None and tpl.secured:
+            outcome.skipped["_positionen"] = "gesichertes Template liefert andere Positionen"
+        else:
+            spec_li = learn_line_items(doc, line_items)
+            if spec_li is None:
+                outcome.skipped["_positionen"] = "nicht reproduzierbar/nicht gefunden"
+            else:
+                tpl.line_items = spec_li
+                outcome.learned.append("_positionen")
 
     if not outcome.learned:
         outcome.reason = outcome.reason or "nichts Neues gelernt"
@@ -412,8 +689,12 @@ def learn_from_confirmed(store, res, doc: Document, operator: str = "") -> Learn
         existing.confirmations = max(existing.confirmations,
                                      store.distinct_confirmations(existing.id))
 
+    tb_fr = res.fields.get("ust_aufstellung")
+    taxblock = (tb_fr.value if tb_fr is not None and tb_fr.source != "missing"
+               and isinstance(tb_fr.value, list) and tb_fr.value else None)
     tpl, outcome = learn_template(doc, res.supplier_id, confirmed_values(res.fields),
-                                  existing, variant, template_id=tid_override)
+                                  existing, variant, template_id=tid_override,
+                                  line_items=res.line_items or None, taxblock=taxblock)
     if tpl is None:
         if outcome.reason.startswith("Gesamtprobe"):
             # Bestehendes (z.B. gesichertes) Template liefert auf einer
