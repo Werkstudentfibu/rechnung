@@ -106,7 +106,7 @@ def test_write_output_json_and_csv(tmp_path: Path):
     assert p.exists()
     csv_path = p.with_suffix(".csv")
     assert csv_path.exists()
-    lines = csv_path.read_text("utf-8").splitlines()
+    lines = csv_path.read_text("utf-8-sig").splitlines()
     assert lines[0] == "feld;wert"
     assert "rechnungsnummer;RE-9" in lines
     assert "iban;" in lines

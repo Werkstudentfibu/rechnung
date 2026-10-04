@@ -115,7 +115,9 @@ def gruende(res) -> list[dict]:
     for why in res.hold_reasons or []:
         out.append({"art": _hold_art(why), "grund": why,
                     "felder": ["iban"] if _hold_art(why) == ART_IBAN else []})
-    if res.aborted:
+    # Abbruch (Zeitgrenze/Fehler) oder Text gar nicht lesbar (OCR nicht
+    # verfuegbar/aus): es gibt keine Felder -- die Rueckstellung ist der Grund.
+    if res.aborted or (res.ocr and res.ocr.get("error")):
         return out
     if res.status == DEFERRED and not out:
         out.append({"art": ART_ZURUECKGESTELLT, "grund": "zurueckgestellt", "felder": []})

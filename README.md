@@ -39,6 +39,9 @@ Daten (Lieferanten, Templates, Log) liegen unter `./data/` bzw. `$RECHNUNG_DATA`
 Bestätigte Rechnungen landen als `data/out/<name>.json` **und** `.csv`.
 
 Weitergabe als eine `.exe` ohne Python-Installation: siehe `build.md`.
+**Installation auf dem Windows-Firmenlaptop** (Build direkt dort, CPU,
+optional Tesseract + Ollama mit kleinem Modell): `build-windows.ps1`, Anleitung
+für Nicht-Entwickler in `INSTALL-WINDOWS.md`.
 Vollständige v1-Abgrenzung (für die IT-Abnahme): siehe `SPEC-v1.md`.
 
 ## Ablauf: Stufen 0–4
@@ -254,10 +257,14 @@ Linux/macOS (`crontab -e`):
 30 2 * * * cd /pfad/zum/programm && .venv/bin/rechnung --data ./data --samples ./samples nacht >> data/nacht.log 2>&1
 ```
 
-Windows (Aufgabenplanung, PowerShell-Einzeiler für `schtasks`):
+Windows (Aufgabenplanung) über das mitgelieferte `nachtlauf.cmd` neben
+`rechnung.exe` – es wechselt selbst in den Programmordner, liest
+`rechnung.env` und schreibt nach `data\nacht.log` (mit
+`MIT_VERARBEITUNG=1` vorher auch `fetch`, `scan`, `push`):
 ```
-schtasks /Create /TN "Rechnung Nachtlauf" /TR "C:\Pfad\zum\Programm\.venv\Scripts\rechnung.exe --data .\data --samples .\samples nacht" /SC DAILY /ST 02:30
+schtasks /Create /TN "Rechnung Nachtlauf" /TR "\"C:\Rechnung\nachtlauf.cmd\"" /SC DAILY /ST 02:30
 ```
+Details: `INSTALL-WINDOWS.md`.
 
 ## Rückmeldung aus JobRouter
 

@@ -872,7 +872,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         w.writerow(["SUMME", "", "", f"{tot['rechnungen']} Rechnungen", ""]
                    + [tot.get(c, "") for c in cols[5:8]]
                    + [tot.get(c, "") for c in cols[8:14]] + [""])
-        return Response(buf.getvalue(), media_type="text/csv",
+        # BOM voran: Excel unter Windows erkennt sonst UTF-8 nicht (Umlaute)
+        return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": "attachment; filename=journal.csv"})
 
     if _STATIC.exists():

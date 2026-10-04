@@ -511,7 +511,20 @@ def main(argv=None) -> int:
     sub.add_parser("demo", help="Selbsttest mit synthetischen Rechnungen").set_defaults(func=_cmd_demo)
 
     args = p.parse_args(argv)
+    _console_safe()
     return args.func(args)
+
+
+def _console_safe() -> None:
+    """Unter Windows ist die Ausgabe in eine Datei (z.B. ``>> nacht.log`` der
+    geplanten Aufgabe) cp1252 -- Zeichen wie "→" oder "Ø" wuerden dort mit
+    UnicodeEncodeError abbrechen. Nicht darstellbare Zeichen ersetzen statt
+    abzustuerzen."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 
 if __name__ == "__main__":

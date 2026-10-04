@@ -325,8 +325,9 @@ class Store:
         _atomic_write(p, json.dumps(data, indent=2, ensure_ascii=False))
 
         # Kopf-CSV: nur skalare Felder (Listen kommen in eigene Dateien)
+        # utf-8-sig (mit BOM): Excel unter Windows zeigt Umlaute sonst falsch an
         csv_path = p.with_suffix(".csv")
-        with csv_path.open("w", encoding="utf-8", newline="") as fh:
+        with csv_path.open("w", encoding="utf-8-sig", newline="") as fh:
             writer = csv.writer(fh, delimiter=";")
             writer.writerow(["feld", "wert"])
             for k, v in data.items():
@@ -339,7 +340,7 @@ class Store:
         if items:
             cols = list({k for it in items for k in it if not k.startswith("_")})
             with p.with_name(f"{name}.positionen.csv").open(
-                    "w", encoding="utf-8", newline="") as fh:
+                    "w", encoding="utf-8-sig", newline="") as fh:
                 w = csv.writer(fh, delimiter=";")
                 w.writerow(cols)
                 for it in items:
@@ -349,7 +350,7 @@ class Store:
         tax = data.get("_ust_aufstellung") or []
         if tax:
             with p.with_name(f"{name}.ust.csv").open(
-                    "w", encoding="utf-8", newline="") as fh:
+                    "w", encoding="utf-8-sig", newline="") as fh:
                 w = csv.writer(fh, delimiter=";")
                 w.writerow(["satz", "netto", "ust", "brutto"])
                 for r in tax:

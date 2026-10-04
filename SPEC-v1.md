@@ -713,6 +713,47 @@ einmal von einem Menschen freigegeben (zweite Freigabe als Sicherung).
   (ueber das Mapping zuordenbar) + Liste `warnings`. Das IBAN-Feld bleibt die
   Stammdaten-IBAN.
 
+## 7w. Laptop-Tauglichkeit: Windows, nur CPU (2026-10-04)
+
+Vorgabe: zuerst Installation und Kalibrierung auf dem Windows-Firmenlaptop
+des Auftraggebers (vermutlich ohne Grafikkarte, knappe Ressourcen), spaeter
+ein interner Server. Gebaut wird direkt auf dem Laptop (Adminrechte
+vorhanden), kein GitHub/CI.
+
+- Pfade: Dateinamen aus Ergebnissen werden mit `\` und `/` zerlegt
+  (`human.file_name`, genutzt von eventlog/shadow/UI); Training-UI-Liste
+  ebenso. Sonst durchgehend `pathlib`.
+- Zeitgrenze (§7m): Arbeitsprozess per `multiprocessing` "spawn" (unter
+  Windows die einzige Startart), `freeze_support()` in `run.py`.
+- Tesseract (§7n): `RECHNUNG_TESSERACT` > `PATH` > Windows-Standardpfade
+  (`%ProgramFiles%`, `%ProgramFiles(x86)%`, `%LOCALAPPDATA%\Programs`);
+  `CREATE_NO_WINDOW`, Ausgaben als UTF-8; `RECHNUNG_OCR_ENABLED=0` schaltet
+  die Texterkennung ab (Grund "OCR ausgeschaltet" -> Ordner §7u).
+- Lock-Datei (§7r): liegengebliebene Sperren (aelter als `lock.STALE_S`,
+  6 h, nach Aenderungszeit) werden ignoriert bzw. vom naechsten Nachtlauf
+  mit Warnung entfernt -- keine PID-Pruefung per `os.kill` (unter Windows
+  wuerde das den Prozess beenden).
+- Kodierung: Konsole/Logdatei mit `errors="replace"` (cp1252 bei
+  Umleitung), CSV-Ausgaben und `/api/journal.csv` mit UTF-8-BOM (Excel).
+- Windows-Skripte `windows/start-rechnung.cmd`, `windows/nachtlauf.cmd`
+  (ASCII, CRLF, `.gitattributes`): `cd /d "%~dp0"`, `rechnung.env` per
+  `for /f "eol=# ..."`, Daten `data\`, Eingang `eingang\` (=`RECHNUNG_INBOX`),
+  Nachtlauf-Log `data\nacht.log`, optional `MIT_VERARBEITUNG=1`
+  (fetch/scan/push vor `nacht`). Aufgabenplanung per `schtasks`.
+- Leichtes Laptop-Profil am Ende von `rechnung.env.example` (kleines Modell
+  `qwen2.5:1.5b-instruct`, `RECHNUNG_LLM_CTX=2048`, laengere Zeitgrenzen,
+  OCR an/aus).
+- Build: `build-windows.ps1` (Python pruefen/Hinweis, venv, Abhaengigkeiten,
+  Tests, PyInstaller ueber `rechnung.spec`, Starttest, Programmordner
+  `dist\Rechnung`; optional Tesseract mit `deu` + Testbild, Ollama + kleines
+  Modell + Testanfrage mit Zeitmessung), Anleitung `INSTALL-WINDOWS.md`.
+  **Nicht auf einem echten Windows-Rechner ausgefuehrt** (Entwicklung unter
+  Linux) -- geprueft sind Syntax-nahe Eigenschaften (ASCII/CRLF, referenzierte
+  Dateien, Spec kompilierbar) und das Windows-Verhalten des Python-Codes per
+  Tests mit simuliertem Windows. `rechnung.spec` wurde unter Linux mit
+  PyInstaller 6.22 gebaut und die Einzeldatei getestet (`modus`, `scan` mit
+  spawn-Arbeitsprozess, `menschlich`, `nacht`, `web` inkl. neuem Reiter).
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).

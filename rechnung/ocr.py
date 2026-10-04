@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -34,6 +35,7 @@ from .textnorm import norm
 
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
 OCR_UNAVAILABLE = "OCR nicht verfuegbar"
+OCR_DISABLED = "OCR ausgeschaltet (RECHNUNG_OCR_ENABLED=0)"
 LANG = "deu"
 DPI = 300
 
@@ -56,8 +58,52 @@ def word_min_confidence() -> float:
         return 60.0
 
 
+# Standard-Installationsorte unter Windows (UB-Mannheim-Installer, siehe
+# build.md/INSTALL-WINDOWS.md) -- greifen nur, wenn weder RECHNUNG_TESSERACT
+# gesetzt ist noch tesseract im PATH liegt.
+_WINDOWS_CANDIDATES = (
+    r"%ProgramFiles%\Tesseract-OCR\tesseract.exe",
+    r"%ProgramFiles(x86)%\Tesseract-OCR\tesseract.exe",
+    r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+)
+
+
+def enabled() -> bool:
+    """Texterkennung an/aus (``RECHNUNG_OCR_ENABLED``, Standard an). Aus
+    (z.B. auf einem schwachen Laptop): Scans werden zurueckgestellt und gehen
+    in den Ordner "Menschliche Bearbeitung"."""
+    return os.environ.get("RECHNUNG_OCR_ENABLED", "1").strip().lower() not in (
+        "0", "false", "no", "off", "nein")
+
+
+def _on_windows() -> bool:
+    return os.name == "nt"
+
+
+def _windows_fallback() -> str | None:
+    if not _on_windows():
+        return None
+    for cand in _WINDOWS_CANDIDATES:
+        # %VAR% selbst aufloesen (os.path.expandvars kann das nur unter Windows)
+        expanded = re.sub(r"%([^%]+)%", lambda m: os.environ.get(m.group(1), m.group(0)), cand)
+        if "%" not in expanded and Path(expanded).is_file():
+            return expanded
+    return None
+
+
 def tesseract_cmd() -> str | None:
-    return os.environ.get("RECHNUNG_TESSERACT") or shutil.which("tesseract")
+    """``RECHNUNG_TESSERACT`` > ``tesseract`` im PATH > Windows-Standardpfad."""
+    return (os.environ.get("RECHNUNG_TESSERACT") or shutil.which("tesseract")
+            or _windows_fallback())
+
+
+def _run(args: list[str], timeout: float | None, **kw):
+    """subprocess.run ohne aufblitzendes Konsolenfenster unter Windows
+    (das Programm laeuft dort als Fenster-Anwendung/geplante Aufgabe)."""
+    if _on_windows():
+        kw.setdefault("creationflags", getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return subprocess.run(args, capture_output=True, timeout=timeout, **kw)
 
 
 _avail: tuple[str, bool] | None = None
@@ -73,9 +119,10 @@ def available() -> bool:
     if _avail is not None and _avail[0] == cmd:
         return _avail[1]
     try:
-        out = subprocess.run([cmd, "--list-langs"], capture_output=True, text=True,
-                             timeout=15).stdout
-        ok = LANG in out.split()
+        # Aeltere Tesseract-Versionen schreiben die Liste nach stderr; die
+        # Ausgabe explizit als UTF-8 lesen (Windows-Konsole ist sonst cp1252).
+        p = _run([cmd, "--list-langs"], 15, text=True, encoding="utf-8", errors="replace")
+        ok = LANG in ((p.stdout or "") + "\n" + (getattr(p, "stderr", "") or "")).split()
     except (OSError, subprocess.SubprocessError):
         ok = False
     _avail = (cmd, ok)
@@ -134,9 +181,8 @@ def _page_images(path: Path):
 
 def _run_tesseract(image: Path, out_base: Path, timeout: float | None) -> None:
     """Eine Seite erkennen -> ``out_base.pdf`` + ``out_base.tsv``."""
-    subprocess.run([tesseract_cmd(), str(image), str(out_base), "-l", LANG,
-                    "--dpi", str(DPI), "pdf", "tsv"],
-                   check=True, capture_output=True, timeout=timeout)
+    _run([tesseract_cmd(), str(image), str(out_base), "-l", LANG,
+          "--dpi", str(DPI), "pdf", "tsv"], timeout, check=True)
 
 
 def _parse_tsv(text: str, word_min: float) -> tuple[list[float], list[str]]:
@@ -194,6 +240,8 @@ def ensure_text(path: str | Path, cache_dir: str | Path,
                              m.get("pages", 0), m.get("seconds", 0.0))
         except (json.JSONDecodeError, OSError):
             pass
+    if not enabled():
+        return OcrResult(sha, error=OCR_DISABLED)
     if not available():
         return OcrResult(sha, error=OCR_UNAVAILABLE)
 

@@ -171,7 +171,7 @@ async function loadList() {
     const div = document.createElement('div');
     div.className = 'row';
     div.dataset.file = r.file;
-    div.innerHTML = `<div>${esc(r.file.split('/').pop())}</div>
+    div.innerHTML = `<div>${esc(r.file.split(/[\\/]/).pop())}</div>
       <span class="badge ${r.status}" title="${esc((r.hold_reasons || []).join('; '))}">${esc((d.status_labels || {})[r.status] || r.status)}</span>
       ${r.supplier_name ? ' ' + esc(r.supplier_name) : ''}
       ${r.billing_address_name ? ' → ' + esc(r.billing_address_name) : ''}
