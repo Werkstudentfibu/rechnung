@@ -23,10 +23,11 @@ from .. import semantic
 from .. import shadow
 from ..billing import BillingAddress
 from ..guard import Guard
+from ..ocr import IMAGE_SUFFIXES
 from ..identify import FIXED_FIELD_TYPES, Supplier, identify, supplier_from_doc
 from ..pipeline import (CONF_MIN, EXTRACT_EINVOICE, EXTRACT_TEMPLATE, MASTER_FIELDS,
-                        STATUS_LABELS, invoice_files, journal_rows, journal_totals, origin,
-                        process)
+                        STATUS_LABELS, invoice_files, journal_rows, journal_totals,
+                        load_document, origin)
 from ..store import Store
 from ..suggest import similar_suppliers
 from ..template import (STANDARD_FIELDS, Anchor, Column, LineItemSpec, Template,
@@ -156,6 +157,13 @@ def create_app(store: Store, samples: Path) -> FastAPI:
     def _process(path: Path, use_llm: bool = True):
         return guard.process(path, use_llm=use_llm)
 
+    def _load(path: Path):
+        """PDF bzw. OCR-Arbeitskopie eines Scans/Bildes laden."""
+        doc, _o = load_document(path, store)
+        if doc is None:
+            raise HTTPException(409, _o.error)
+        return doc
+
     def _process_for_confirm(path: Path):
         res = _process(path)
         if res.aborted:
@@ -197,7 +205,11 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         path = _resolve(file)
         if einvoice.load(path) is not None:
             return JSONResponse(_einvoice_view(path))
-        doc = pdfmod.load(path)
+        doc, ocr_res = load_document(path, store)
+        if doc is None:
+            # Scan/Bild, aber OCR nicht moeglich -> zurueckgestellt, nichts
+            # zum Anklicken; der Mensch bearbeitet die Rechnung ausserhalb.
+            return JSONResponse(_einvoice_view(path, readable=False))
         pages = [
             {
                 "index": pg.index,
@@ -317,6 +329,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             res = _process(path, use_llm=False)
         for v in current.values():
             v["origin"] = origin(v["source"])
+            v["via"] = ("ocr" if ocr_res is not None
+                        and v["source"] not in ("library", "manual", "missing") else None)
 
         # Kein Template fuer diesen Lieferanten (oder Lieferant unbekannt):
         # aehnliche bekannte Lieferanten mit Template als Anlern-Starthilfe
@@ -363,16 +377,17 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "status_label": STATUS_LABELS.get(res.status, res.status),
             "hold_reasons": res.hold_reasons,
             "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in res.checks],
+            "ocr": res.ocr,
         })
 
-    def _einvoice_view(path: Path) -> dict:
+    def _einvoice_view(path: Path, readable: bool = True) -> dict:
         """E-Rechnung: Werte kommen aus dem XML, es gibt nichts anzulernen.
         Bei ZUGFeRD/Factur-X wird das PDF trotzdem als Seitenbild gezeigt,
         damit der Mensch beim Bestaetigen sieht, was er bestaetigt; bei
         reinem XML (XRechnung) gibt es keine Seiten."""
         res = _process(path)
         pages = []
-        if path.suffix.lower() == ".pdf":
+        if readable and path.suffix.lower() == ".pdf":
             doc = pdfmod.load(path)
             pages = [{"index": pg.index, "width": pg.width, "height": pg.height,
                       "scale": RENDER_SCALE,
@@ -393,7 +408,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         }
         return {
             "file": path.name,
-            "extraction": EXTRACT_EINVOICE,
+            "extraction": EXTRACT_EINVOICE if readable else res.extraction,
             "einvoice": inv,
             "status": res.status,
             "status_label": STATUS_LABELS.get(res.status, res.status),
@@ -424,6 +439,14 @@ def create_app(store: Store, samples: Path) -> FastAPI:
     @app.get("/api/page.png")
     def page_png(file: str, page: int = 0) -> Response:
         path = _resolve(file)
+        if path.suffix.lower() in IMAGE_SUFFIXES or (
+                path.suffix.lower() == ".pdf" and not pdfmod.has_text_layer(path)):
+            # Scan/Bild: die OCR-Arbeitskopie zeigen -- deren Woerter sind es,
+            # die angeklickt werden.
+            _doc, o = load_document(path, store)
+            if o is None or o.pdf is None:
+                raise HTTPException(409, (o.error if o else "") or "OCR nicht verfuegbar")
+            path = o.pdf
         return Response(_render_png(path, page), media_type="image/png")
 
     @app.post("/api/line-items/preview")
@@ -432,7 +455,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         Mapping auslesen -- damit die Uebersicht "was wurde bestellt" schon
         waehrend des Anlernens sichtbar ist, nicht erst nach dem Speichern."""
         path = _resolve(body.file)
-        doc = pdfmod.load(path)
+        doc = _load(path)
         li = body.line_items
         if not li.columns:
             return JSONResponse({"items": []})
@@ -445,7 +468,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
     @app.post("/api/template")
     def save_template(body: TemplatePost) -> JSONResponse:
         path = _resolve(body.file)
-        doc = pdfmod.load(path)
+        doc = _load(path)
         pages_words = [pg.words for pg in doc.pages]
 
         sup = store.supplier(body.supplier_id)
@@ -565,7 +588,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if tpl is None:
             raise HTTPException(404, "Template nicht gefunden")
         path = _resolve(body.file)
-        doc = pdfmod.load(path)
+        doc = _load(path)
         # Erst verarbeiten (mit Zeitgrenze): eine abgebrochene Rechnung wird
         # weder bestaetigt noch gezaehlt.
         res = _process_for_confirm(path)
@@ -608,7 +631,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             _log_confirmed(path, res, res.template_id, res.template_variant,
                            extraction=res.extraction)
         shadow.record(store, res, operator)
-        learned = learn.learn_from_confirmed(store, res, pdfmod.load(path), operator)
+        learned = learn.learn_from_confirmed(store, res, _load(path), operator)
         return JSONResponse({"confirmed": True, "status": res.status,
                              "confirmations": 0, "secured": False,
                              "learned": learned.to_dict()})
@@ -669,7 +692,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if src is None:
             raise HTTPException(404, "Quell-Template nicht gefunden")
         path = _resolve(body.file)
-        doc = pdfmod.load(path)
+        doc = _load(path)
 
         sup = store.supplier(body.target_supplier_id)
         if sup is None:

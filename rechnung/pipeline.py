@@ -11,6 +11,7 @@ import re
 from . import billing
 from . import einvoice
 from . import jobrouter
+from . import ocr
 from . import pdf as pdfmod
 from . import semantic
 from . import shadow
@@ -23,7 +24,7 @@ from .store import Store
 from .suggest import suggest_category
 from .template import (STANDARD_FIELDS, FieldResult, Template, apply_line_items,
                        apply_template)
-from .textnorm import coerce, compact, find_ibans
+from .textnorm import coerce, compact, find_ibans, norm
 from .validate import Check, run_all
 
 # Status
@@ -64,7 +65,7 @@ def origin(source: str) -> str | None:
         return None
     return "template" if source.startswith("template") else source
 
-INVOICE_SUFFIXES = (".pdf", ".xml")
+INVOICE_SUFFIXES = (".pdf", ".xml") + ocr.IMAGE_SUFFIXES
 
 CONF_MIN = 0.7
 
@@ -102,6 +103,9 @@ class Result:
     # ("zeitgrenze" / "fehler"), sonst leer
     duration_s: float = 0.0
     aborted: str = ""
+    # Texterkennung (ocr.py), falls der Text per OCR statt aus einer
+    # Textebene stammt -- dann tragen alle gelesenen Felder ``via: ocr``.
+    ocr: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -127,14 +131,67 @@ class Result:
             "tax_breakdown": self.tax_breakdown,
             "fields": {
                 k: {"value": v.value, "raw": v.raw, "confidence": v.confidence,
-                    "source": v.source, "origin": origin(v.source)}
+                    "source": v.source, "origin": origin(v.source),
+                    "via": "ocr" if self.ocr and v.source not in _NOT_READ else None}
                 for k, v in self.fields.items()
             },
+            "ocr": self.ocr,
             "llm_rejected": self.llm_rejected,
             "shadow": ({k: v for k, v in self.shadow.items() if k != "values"}
                        if self.shadow else None),
             "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in self.checks],
         }
+
+
+# Quellen, die nicht aus dem Rechnungstext gelesen sind (kein "via ocr")
+_NOT_READ = ("library", "manual", "missing", "einvoice")
+
+
+def load_document(path: str | Path, store: Store):
+    """-> (Document, OcrResult | None). Scans/Bilder laufen ueber die OCR-
+    Arbeitskopie; ``Document.sha256`` ist immer der Hash des Originals
+    (Korrekturen, Bestaetigung, Archiv). Ist OCR noetig, aber nicht moeglich,
+    ist das Document ``None`` und ``OcrResult.error`` nennt den Grund."""
+    from .config import process_timeout
+
+    path = Path(path)
+    if not ocr.needs_ocr(path):
+        return pdfmod.load(path), None
+    o = ocr.ensure_text(path, store.root / "ocr", process_timeout() or None)
+    if o.error:
+        return None, o
+    doc = pdfmod.load(o.pdf)
+    doc.sha256 = o.sha256
+    return doc, o
+
+
+def _ocr_adjust(res: "Result", o) -> None:
+    """Nach OCR: unsichere Woerter/Seiten an den Menschen. Ein Feld, dessen
+    Wert ein unsicher erkanntes Wort enthaelt, faellt unter CONF_MIN; ist die
+    mittlere Konfidenz der ganzen Rechnung niedrig, ist die Pruefung
+    ``ocr-konfidenz`` rot. Beides: nie ``auto``, nie "wuerde durchlassen"."""
+    if o is None:
+        return
+    res.ocr = o.to_dict()
+    low = set(o.low_words)
+    unsure = []
+    for name, fr in res.fields.items():
+        if fr.source in _NOT_READ or not fr.raw:
+            continue
+        if any(norm(t) in low for t in str(fr.raw).split()):
+            fr.confidence = min(fr.confidence, 0.5)
+            unsure.append(name)
+    chk = Check("ocr-konfidenz", not o.low,
+                f"Ø {o.confidence:g} (Schwelle {ocr.min_confidence():g})"
+                + (f", unsicher: {', '.join(unsure)}" if unsure else ""))
+    res.checks = _replace_check(res.checks, chk)
+    if o.low or unsure:
+        if res.status == AUTO:
+            res.status = REVIEW
+        if res.shadow is not None:
+            res.shadow["would_pass"] = False
+            res.shadow["reasons"] = list(res.shadow.get("reasons") or []) + [
+                "OCR unsicher" + (f": {', '.join(unsure)}" if unsure else "")]
 
 
 def _pick_template(doc, templates: list[Template],
@@ -559,13 +616,16 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     inv = einvoice.load(path)
     if inv is not None:
         return _process_einvoice(path, inv, store)
-    if path.suffix.lower() != ".pdf":
+    if path.suffix.lower() not in (".pdf",) + ocr.IMAGE_SUFFIXES:
         return Result(file=str(path), status=UNSUPPORTED)
 
-    if not pdfmod.has_text_layer(path):
-        return Result(file=str(path), status=SCAN)
-
-    doc = pdfmod.load(path)
+    # Scans/Bilder: Texterkennung (lokal, Tesseract), danach normal weiter.
+    doc, o = load_document(path, store)
+    if doc is None:
+        res = Result(file=str(path), sha256=o.sha256, status=DEFERRED,
+                     hold_reasons=[o.error], ocr=o.to_dict())
+        _apply_hold(res)
+        return res
     res = Result(file=str(path), sha256=doc.sha256)
 
     # Lieferant und Rechnungsadresse ausschliesslich per Abgleich mit der
@@ -576,6 +636,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     if not match:
         res.hold_reasons.insert(0, f"Lieferant: {why}")
         _finish_untemplated(res, doc, None, store, use_llm, [addr_check])
+        _ocr_adjust(res, o)
         _apply_hold(res)
         return res
 
@@ -589,6 +650,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
         res.status = NO_TEMPLATE
         _inject_library_fields(res.fields, supplier)
         _finish_untemplated(res, doc, supplier, store, use_llm, [addr_check])
+        _ocr_adjust(res, o)
         _apply_hold(res)
         return res
 
@@ -643,6 +705,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
         res.fields[f.name].source != "missing" for f in required if f.name in res.fields
     )
     res.status = AUTO if (tpl.secured and checks_ok and conf_ok) else REVIEW
+    _ocr_adjust(res, o)
     _apply_hold(res)
     return res
 
