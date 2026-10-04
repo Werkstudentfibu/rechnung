@@ -51,6 +51,12 @@ ART_PFLICHTFELD = "pflichtfeld"
 ART_PRUEFUNG = "pruefung"
 ART_UNSICHER = "unsicher"
 ART_NICHT_LESBAR = "nicht_lesbar"
+ART_MAIL = "mail"            # Postfach: Mail ohne verwertbaren Rechnungsanhang
+ART_ANHANG = "anhang"        # Anhang verschluesselt/zu gross/nicht zuzuordnen
+
+# Status eines Eintrags, der gar nicht erst durch die Pipeline lief
+# (ablegen_datei: Mail ohne Anhang, verschluesselter Anhang, ...)
+STATUS_NICHT_VERARBEITET = "nicht_verarbeitet"
 
 # Welche Felder eine rote Pruefung betrifft (fuer "betroffene Felder")
 _CHECK_FIELDS = {
@@ -265,6 +271,90 @@ def ablegen(store, res, grund_liste: list[dict] | None = None,
             "sha256": res.sha256, "datei": name,
             "gruende": [g["grund"] for g in grund_liste]}, op)
         eventlog.record_human(store, rec, eventlog.HUMAN_PLACED, op)
+    return rec
+
+
+def ablegen_datei(store, name: str, content: bytes, grund_liste: list[dict], *,
+                  beilagen: dict[str, bytes] | None = None, herkunft: dict | None = None,
+                  status: str = STATUS_NICHT_VERARBEITET, operator: str = "") -> dict | None:
+    """Etwas, das (noch) gar keine Rechnung im Sinne der Pipeline ist, an den
+    Menschen geben -- z.B. eine Mail ohne Rechnungsanhang (als ``.eml``),
+    eine im Mailtext stehende Rechnung (als PDF), ein verschluesselter oder
+    nicht zuzuordnender Anhang. Gleiches Format wie ``ablegen`` (Datei +
+    ``<datei>.grund.json``), ``sha256`` ist der Hash von ``content``.
+    ``beilagen`` (Suffix -> Inhalt, z.B. ``{".eml": rohmail}``) liegen als
+    ``<datei><suffix>`` daneben und verschwinden mit ``erledigt_sha``.
+    Bereits abgelegt (gleicher Hash) -> Begleitdatei nur aktualisiert."""
+    import hashlib
+
+    from . import eventlog
+    from .config import operator as _operator
+
+    if not grund_liste or not content:
+        return None
+    sha = hashlib.sha256(content).hexdigest()
+    folder = human_dir(store.root)
+    folder.mkdir(parents=True, exist_ok=True)
+    found = finde(store, sha)
+    name = found[1]["datei"] if found else _target_name(folder, file_name(name), sha)
+    if not (folder / name).exists():
+        (folder / name).write_bytes(content)
+    extra = []
+    for suffix, data in (beilagen or {}).items():
+        p = folder / (name + suffix)
+        if not p.exists():
+            p.write_bytes(data)
+        extra.append(p.name)
+    rec = {
+        "sha256": sha,
+        "datei": name,
+        "original": (herkunft or {}).get("original", ""),
+        "lieferant": None,
+        "lieferant_name": None,
+        "status": status,
+        "gruende": grund_liste,
+        "felder": [],
+        "vorschlaege": {},
+        "beilagen": extra,
+        "herkunft": herkunft or {},
+        "abgelegt": found[1].get("abgelegt") if found else _now(),
+        "aktualisiert": _now(),
+    }
+    _write(folder / (name + SIDECAR_SUFFIX), rec)
+    if not found:
+        op = operator or _operator()
+        store.audit("menschlich_abgelegt", {
+            "sha256": sha, "datei": name,
+            "gruende": [g["grund"] for g in grund_liste]}, op)
+        eventlog.record_human(store, rec, eventlog.HUMAN_PLACED, op)
+    return rec
+
+
+def erledigt_sha(store, sha256: str, operator: str = "", notiz: str = "") -> dict | None:
+    """Eintrag ohne Rechnungs-Ergebnis von Hand als erledigt markieren (z.B.
+    Mail ohne Anhang gesichtet, Rechnung per Link geholt und in den Eingang
+    gelegt). Wie ``erledigt``: Kopie + Beilagen weg, Begleitdatei mit
+    Vermerk nach ``erledigt/``, Audit + Ereignis."""
+    from . import eventlog
+    from .config import operator as _operator
+
+    found = finde(store, sha256)
+    if found is None:
+        return None
+    side, rec = found
+    folder = side.parent
+    op = operator or _operator()
+    rec = dict(rec, erledigt=_now(), bearbeiter=op, freigabe="mensch", notiz=notiz,
+               korrigiert=[])
+    done = folder / DONE_DIR
+    done.mkdir(parents=True, exist_ok=True)
+    _write(done / f"{sha256}.json", rec)
+    for n in [rec["datei"], *(rec.get("beilagen") or [])]:
+        (folder / n).unlink(missing_ok=True)
+    side.unlink(missing_ok=True)
+    store.audit("menschlich_erledigt", {"sha256": sha256, "datei": rec["datei"],
+                                        "notiz": notiz}, op)
+    eventlog.record_human(store, rec, eventlog.HUMAN_DONE, op)
     return rec
 
 

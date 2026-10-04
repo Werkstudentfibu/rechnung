@@ -29,6 +29,8 @@ def _cmd_fetch(args) -> int:
           + ("  [Trockenlauf]" if res.dry_run else ""))
     for s in res.saved:
         print(f"  {s}")
+    for h in res.human:
+        print(f"  -> Menschliche Bearbeitung: {h}")
     return 0
 
 
@@ -363,9 +365,16 @@ def _cmd_modus(args) -> int:
 
 def _cmd_menschlich(args) -> int:
     """Ordner "Menschliche Bearbeitung": offene Rechnungen mit Gruenden."""
-    from .human import human_dir, offen
+    from .human import erledigt_sha, human_dir, offen
 
     store = Store(args.data)
+    if getattr(args, "erledigt", None):
+        rec = erledigt_sha(store, args.erledigt, args.operator or "", args.notiz or "")
+        if rec is None:
+            print(f"Kein offener Eintrag mit sha256 {args.erledigt}")
+            return 1
+        print(f"erledigt: {rec['datei']}")
+        return 0
     rows = offen(store)
     if args.json:
         print(json.dumps({"ordner": str(human_dir(store.root)), "offen": rows},
@@ -592,6 +601,10 @@ def main(argv=None) -> int:
     me = sub.add_parser("menschlich",
                         help="Ordner 'Menschliche Bearbeitung': offene Rechnungen mit Gruenden")
     me.add_argument("--json", action="store_true")
+    me.add_argument("--erledigt", metavar="SHA256",
+                    help="Eintrag ohne Rechnungs-Ergebnis (z.B. Mail ohne Anhang) abschliessen")
+    me.add_argument("--notiz", default="", help="Vermerk zu --erledigt")
+    me.add_argument("--operator", default="", help="Bearbeiter (Audit)")
     me.set_defaults(func=_cmd_menschlich)
 
     na = sub.add_parser("nacht",
