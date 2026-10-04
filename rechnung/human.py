@@ -264,6 +264,8 @@ def ablegen(store, res, grund_liste: list[dict] | None = None,
         "gruende": grund_liste,
         "felder": felder,
         "vorschlaege": vorschlaege(res),
+        # Dublettenverdacht: Verweis auf die Ur-Rechnung (dubletten.py)
+        "ur_rechnung": getattr(res, "dublette", None),
         "abgelegt": found[1].get("abgelegt") if found else _now(),
         "aktualisiert": _now(),
     }

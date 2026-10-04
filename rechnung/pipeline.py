@@ -9,6 +9,7 @@ import hashlib
 import re
 
 from . import billing
+from . import dubletten
 from . import einvoice
 from . import jobrouter
 from . import ocr
@@ -122,6 +123,8 @@ class Result:
     sammel: dict | None = None
     # Seitenzahl (Zeitmessung je Seitenzahl, Postfach-Baustein 3)
     seiten: int = 0
+    # Dublettenverdacht (dubletten.py): Verweis auf die Ur-Rechnung
+    dublette: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -143,6 +146,7 @@ class Result:
             "warnungen": self.warnings,
             "verteilung": self.verteilung,
             "sammel": self.sammel,
+            "dublette": self.dublette,
             "duration_s": self.duration_s,
             "aborted": self.aborted,
             "stufenzeiten": self.stufenzeiten,
@@ -561,9 +565,13 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
         def checks_for(fields):
             cs = run_all(fields, supplier, store.seen_invoice, res.line_items)
             cs = [_einvoice_check(c, inv, res.line_items) for c in cs] + [pdf_check]
+            cs = _replace_check(cs, dubletten.check(
+                fields, supplier.id if supplier is not None else None, store, res.sha256,
+                text=pdf_text)[0])
             return _replace_check(cs, _iban_master_check(supplier, invoice_ibans, fields)) + [addr_check]
 
         res.checks = checks_for(res.fields)
+        _set_dublette(res, store, text=pdf_text)
         res.shadow = shadow.decide(machine, checks_for(machine) if corrections else res.checks,
                                    new_supplier=supplier is None)
 
@@ -639,6 +647,7 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
             return
         res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
         res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, extra)
+        _set_dublette(res, store, doc)
 
 
 def _all_checks(fields, supplier, store: Store, line_items, doc,
@@ -658,7 +667,16 @@ def _all_checks(fields, supplier, store: Store, line_items, doc,
                 checks.append(Check(cc["kind"], cc["ok"], cc["detail"]))
     invoice_ibans = extract_identifiers(doc)["ibans"] | find_ibans(doc.text)
     checks = _replace_check(checks, _iban_master_check(supplier, invoice_ibans, fields))
+    checks = _replace_check(checks, dubletten.check(
+        fields, supplier.id if supplier is not None else None, store, doc.sha256, doc)[0])
     return checks + list(extra or [])
+
+
+def _set_dublette(res: "Result", store: Store, doc=None, text: str = "") -> None:
+    """Verweis auf die Ur-Rechnung, falls die Dublettenpruefung rot ist."""
+    if any(c.name == dubletten.CHECK_NAME and c.ok is False for c in res.checks):
+        res.dublette = dubletten.check(res.fields, res.supplier_id, store, res.sha256,
+                                       doc, text)[1]
 
 
 def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
@@ -801,6 +819,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
         res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
 
         res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, [addr_check])
+        _set_dublette(res, store, doc)
         res.shadow = shadow.decide(
             machine, _all_checks(machine, supplier, store, res.line_items, doc, [addr_check])
             if corrections else res.checks, new_supplier=False)
