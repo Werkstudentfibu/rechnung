@@ -33,10 +33,11 @@ class ImapConfig:
     source_folder: str = os.environ.get("RECHNUNG_IMAP_FOLDER", "INBOX")
     # Nach erfolgreichem Abholen dorthin verschieben (leer = nur als gelesen markieren)
     done_folder: str = os.environ.get("RECHNUNG_IMAP_DONE_FOLDER", "")
-    # nur Anhaenge mit diesen Endungen (kommagetrennt)
+    # nur Anhaenge mit diesen Endungen (kommagetrennt). .xml fuer reine
+    # E-Rechnungen (XRechnung); ZUGFeRD steckt im PDF und braucht das nicht.
     extensions: tuple[str, ...] = tuple(
         e.strip().lower()
-        for e in os.environ.get("RECHNUNG_IMAP_EXTENSIONS", ".pdf").split(",")
+        for e in os.environ.get("RECHNUNG_IMAP_EXTENSIONS", ".pdf,.xml").split(",")
         if e.strip()
     )
 

@@ -55,16 +55,18 @@ def parse_date(s: str) -> date | None:
             return date(int(m.group(3)), _MONATE[m.group(2)], int(m.group(1)))
         except ValueError:
             return None
+    # ISO (2026-09-15) zuerst: sonst greift unten die Tag-zuerst-Regel auf
+    # den Teilstring "26-09-15" und macht daraus den 26.09.2015.
+    m = re.search(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)", s)
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
     m = re.search(r"\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}", s)
     if m:
         try:
             return _dateparser.parse(m.group(0), dayfirst=True).date()
-        except (ValueError, OverflowError):
-            return None
-    m = re.search(r"\d{4}-\d{2}-\d{2}", s)
-    if m:
-        try:
-            return _dateparser.parse(m.group(0)).date()
         except (ValueError, OverflowError):
             return None
     return None

@@ -224,7 +224,8 @@ class Store:
         if not sha:
             return None
         self._archive.mkdir(parents=True, exist_ok=True)
-        target = self._archive / f"{sha}.pdf"
+        suffix = Path(src).suffix.lower() or ".pdf"
+        target = self._archive / f"{sha}{suffix}"
         if not target.exists():
             shutil.copy2(src, target)
         return target

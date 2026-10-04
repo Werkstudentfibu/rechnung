@@ -6,6 +6,7 @@ Laeuft nur auf 127.0.0.1. Keine Auth (Einzelplatz-Werkzeug).
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 from pathlib import Path
 
@@ -15,11 +16,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import billing
+from .. import einvoice
 from .. import pdf as pdfmod
 from .. import semantic
 from ..billing import BillingAddress
 from ..identify import FIXED_FIELD_TYPES, Supplier, identify, supplier_from_doc
-from ..pipeline import CONF_MIN, journal_rows, journal_totals, process
+from ..pipeline import (CONF_MIN, EXTRACT_EINVOICE, invoice_files, journal_rows,
+                        journal_totals, process)
 from ..store import Store
 from ..suggest import similar_suppliers
 from ..template import (STANDARD_FIELDS, Anchor, Column, LineItemSpec, Template,
@@ -67,7 +70,7 @@ class LineItemPreviewPost(BaseModel):
 
 class ConfirmPost(BaseModel):
     file: str
-    template_id: str
+    template_id: str | None = None      # None nur bei E-Rechnungen (kein Template)
 
 
 class CorrectionPost(BaseModel):
@@ -119,6 +122,11 @@ class AddressPost(BaseModel):
     notes: str = ""
 
 
+def _sha(path: Path) -> str:
+    """Datei-Hash wie pdf.load().sha256 -- funktioniert auch fuer XML."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _render_png(path: Path, page_index: int) -> bytes:
     import pypdfium2 as pdfium
 
@@ -141,7 +149,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
     def _resolve(file: str) -> Path:
         p = (samples / Path(file).name).resolve()
         if not p.exists() or samples.resolve() not in p.parents:
-            raise HTTPException(404, "PDF nicht gefunden")
+            raise HTTPException(404, "Datei nicht gefunden")
         return p
 
     @app.get("/", response_class=HTMLResponse)
@@ -158,7 +166,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         # weiterhin beim Oeffnen einer einzelnen Rechnung (/api/invoice) und
         # beim tatsaechlichen Bestaetigen (/api/confirm).
         out = []
-        for p in sorted(samples.glob("*.pdf")):
+        for p in invoice_files(samples):
             r = process(p, store, use_llm=False)
             out.append(r.to_dict())
         return JSONResponse({
@@ -170,6 +178,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
     @app.get("/api/invoice")
     def invoice(file: str) -> JSONResponse:
         path = _resolve(file)
+        if einvoice.load(path) is not None:
+            return JSONResponse(_einvoice_view(path))
         doc = pdfmod.load(path)
         pages = [
             {
@@ -309,6 +319,59 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "similar_suppliers": similar,
         })
 
+    def _einvoice_view(path: Path) -> dict:
+        """E-Rechnung: Werte kommen aus dem XML, es gibt nichts anzulernen.
+        Bei ZUGFeRD/Factur-X wird das PDF trotzdem als Seitenbild gezeigt,
+        damit der Mensch beim Bestaetigen sieht, was er bestaetigt; bei
+        reinem XML (XRechnung) gibt es keine Seiten."""
+        res = process(path, store)
+        pages = []
+        if path.suffix.lower() == ".pdf":
+            doc = pdfmod.load(path)
+            pages = [{"index": pg.index, "width": pg.width, "height": pg.height,
+                      "scale": RENDER_SCALE,
+                      "image": f"/api/page.png?file={path.name}&page={pg.index}",
+                      "words": []}
+                     for pg in doc.pages]
+        supplier_obj = store.supplier(res.supplier_id) if res.supplier_id else None
+        inv = res.einvoice or {}
+        suggestion = {
+            "id": "", "name": inv.get("verkaeufer_name", ""),
+            "ustids": [inv["verkaeufer_ustid"]] if inv.get("verkaeufer_ustid") else [],
+            "ibans": list(inv.get("verkaeufer_iban") or []),
+            "domains": [], "fingerprint": [],
+            "address_lines": list(inv.get("verkaeufer_adresse") or []),
+            "bic": inv.get("verkaeufer_bic", ""),
+            "creditor_id": inv.get("verkaeufer_steuernummer", ""),
+            "currency": inv.get("waehrung") or "EUR",
+        }
+        return {
+            "file": path.name,
+            "extraction": EXTRACT_EINVOICE,
+            "einvoice": inv,
+            "status": res.status,
+            "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in res.checks],
+            "pages": pages,
+            "match": ({"id": res.supplier_id, "name": res.supplier_name,
+                       "score": res.match_score} if res.supplier_id else None),
+            "identifiers": suggestion,
+            "template_id": None,
+            "variant": "standard",
+            "template_fields": [],
+            "template_line_items": None,
+            "line_items": res.line_items,
+            "standard_fields": {k: {"value_type": v[0], "required": v[1]}
+                                for k, v in STANDARD_FIELDS.items()},
+            "fixed_field_types": FIXED_FIELD_TYPES,
+            "supplier": supplier_obj.to_dict() if supplier_obj else None,
+            "addresses": [a.to_dict() for a in store.addresses()],
+            "detected_address": None,
+            "suggested_terms": None,
+            "current": {k: {"value": v.value, "raw": v.raw, "confidence": v.confidence,
+                            "source": v.source} for k, v in res.fields.items()},
+            "similar_suppliers": [],
+        }
+
     @app.get("/api/page.png")
     def page_png(file: str, page: int = 0) -> Response:
         path = _resolve(file)
@@ -405,6 +468,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
     def confirm(body: ConfirmPost) -> JSONResponse:
         from ..config import operator as _operator
 
+        if body.template_id is None:
+            return _confirm_einvoice(body.file, _operator())
         tpl = store.template(body.template_id)
         if tpl is None:
             raise HTTPException(404, "Template nicht gefunden")
@@ -447,12 +512,40 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         store.write_output(path.stem, out)
         return JSONResponse({"confirmations": tpl.confirmations, "secured": tpl.secured})
 
+    def _confirm_einvoice(file: str, operator: str) -> JSONResponse:
+        path = _resolve(file)
+        res = process(path, store)
+        if res.extraction != EXTRACT_EINVOICE:
+            raise HTTPException(400, "Keine E-Rechnung -- Bestaetigen braucht ein Template")
+        store.mark_confirmed(res.sha256, operator)
+        fields = res.fields
+        if not store.seen_sha_template(res.sha256, None):
+            store.mark_processed({
+                "file": path.name, "sha256": res.sha256,
+                "supplier_id": res.supplier_id, "supplier_name": res.supplier_name,
+                "template_id": None, "variant": None, "extraction": EXTRACT_EINVOICE,
+                "billing_address_id": None, "billing_address_name": None,
+                "status": res.status,
+                "rechnungsnummer": fields["rechnungsnummer"].value if "rechnungsnummer" in fields else None,
+                "rechnungsdatum": fields["rechnungsdatum"].value if "rechnungsdatum" in fields else None,
+                "netto": fields["netto"].value if "netto" in fields else None,
+                "ust_betrag": fields["ust_betrag"].value if "ust_betrag" in fields else None,
+                "brutto": fields["brutto"].value if "brutto" in fields else None,
+                "tax_breakdown": res.tax_breakdown,
+                "line_items": res.line_items,
+            })
+        out = {k: v.value for k, v in fields.items()}
+        out["_positionen"] = res.line_items
+        out["_ust_aufstellung"] = res.tax_breakdown
+        store.write_output(path.stem, out)
+        return JSONResponse({"confirmed": True, "extraction": EXTRACT_EINVOICE,
+                             "status": res.status})
+
     @app.post("/api/correction")
     def save_correction_ep(body: CorrectionPost) -> JSONResponse:
         from ..config import operator
         path = _resolve(body.file)
-        doc = pdfmod.load(path)
-        store.save_correction(doc.sha256, body.field, body.value, operator())
+        store.save_correction(_sha(path), body.field, body.value, operator())
         return JSONResponse({"ok": True})
 
     @app.delete("/api/correction")
@@ -461,8 +554,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         extrahierten/festen Wert zurueck, statt den Tippfehler zu behalten."""
         from ..config import operator
         path = _resolve(file)
-        doc = pdfmod.load(path)
-        store.delete_correction(doc.sha256, field, operator())
+        store.delete_correction(_sha(path), field, operator())
         return JSONResponse({"ok": True})
 
     @app.post("/api/category")

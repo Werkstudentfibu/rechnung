@@ -5,13 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import hashlib
+import re
+
 from . import billing
+from . import einvoice
 from . import jobrouter
 from . import pdf as pdfmod
 from . import semantic
 from .config import jobrouter as _jr_cfg
 from .config import operator as _operator
-from .identify import DEFAULT_CURRENCY, EXPECTED_RATES, FIXED_FIELD_TYPES, cross_check, identify
+from .identify import (DEFAULT_CURRENCY, EXPECTED_RATES, FIXED_FIELD_TYPES, cross_check,
+                       identify, identify_einvoice)
 from .store import Store
 from .suggest import suggest_category
 from .template import (STANDARD_FIELDS, FieldResult, Template, apply_line_items,
@@ -25,6 +30,13 @@ REVIEW = "review"                # Template da, aber Konfidenz/Prüfung schwach
 NO_TEMPLATE = "no_template"      # Lieferant bekannt, kein Template -> anlernen
 UNKNOWN = "unknown_supplier"    # Lieferant unbekannt -> anlernen
 SCAN = "scan_no_textlayer"      # kein Textlayer -> OCR nötig (v1 nicht unterstützt)
+UNSUPPORTED = "unsupported_file"  # weder PDF noch lesbare E-Rechnung (z.B. fremdes XML)
+
+# Woher die Feldwerte stammen (Result.extraction)
+EXTRACT_TEMPLATE = "template"
+EXTRACT_EINVOICE = "einvoice"
+
+INVOICE_SUFFIXES = (".pdf", ".xml")
 
 CONF_MIN = 0.7
 
@@ -47,10 +59,14 @@ class Result:
     checks: list[Check] = field(default_factory=list)
     status: str = UNKNOWN
     overall_confidence: float = 0.0
+    extraction: str = EXTRACT_TEMPLATE
+    einvoice: dict | None = None     # Rohdaten der E-Rechnung (Stufe 0), sonst None
 
     def to_dict(self) -> dict:
         return {
             "file": self.file,
+            "extraction": self.extraction,
+            "einvoice": self.einvoice,
             "sha256": self.sha256,
             "supplier_id": self.supplier_id,
             "supplier_name": self.supplier_name,
@@ -200,8 +216,148 @@ def _inject_library_fields(fields: dict[str, FieldResult], supplier) -> None:
         fields[fname] = FieldResult(fname, fval, fval, 0.99, "library")
 
 
+# Felder, die bei einer E-Rechnung gesetzt sein muessen, damit sie ohne
+# Rueckfrage als "sieht sicher aus" (AUTO) gilt.
+_EINVOICE_REQUIRED = ("rechnungsnummer", "rechnungsdatum", "netto", "ust_betrag", "brutto")
+
+
+def _amount_variants(v: float) -> list[str]:
+    """1234.5 -> ["1.234,50", "1234,50", "1,234.50", "1234.50"] -- so wie ein
+    Betrag in einem deutschen oder englischen PDF stehen kann."""
+    en = f"{abs(v):,.2f}"
+    de = en.replace(",", "X").replace(".", ",").replace("X", ".")
+    return list({de, de.replace(".", ""), en, en.replace(",", "")})
+
+
+def _check_pdf_matches_xml(path: Path, inv) -> Check:
+    """Hybrid-Rechnung (ZUGFeRD/Factur-X): stimmen sichtbares PDF und
+    eingebettetes XML ueberein? Rechtlich massgeblich ist das XML -- weicht das
+    PDF ab (anderer Betrag, falsches/veraltetes XML angehaengt), soll ein
+    Mensch draufschauen statt dass das XML still gewinnt."""
+    if not inv.source.startswith("pdf:"):
+        return Check("pdf-xml-abgleich", None, "reine XML-Datei")
+    try:
+        if not pdfmod.has_text_layer(path):
+            return Check("pdf-xml-abgleich", None, "PDF ohne Textlayer")
+        text = pdfmod.load(path).text
+    except Exception:
+        return Check("pdf-xml-abgleich", None, "PDF nicht lesbar")
+    flat = text.replace(" ", "")
+    missing = []
+    if inv.rechnungsnummer and inv.rechnungsnummer.replace(" ", "") not in flat:
+        missing.append(f"Rechnungsnummer {inv.rechnungsnummer}")
+    if inv.brutto is not None and not any(
+            re.search(r"(?<![\d.,])" + re.escape(a) + r"(?!\d)", flat)
+            for a in _amount_variants(inv.brutto)):
+        missing.append(f"Brutto {inv.brutto:.2f}")
+    if missing:
+        return Check("pdf-xml-abgleich", False, "im PDF nicht gefunden: " + ", ".join(missing))
+    return Check("pdf-xml-abgleich", True, "PDF und XML stimmen ueberein")
+
+
+def _einvoice_check(c: Check, inv, line_items: list[dict]) -> Check:
+    """Allgemeine Pruefungen dort ersetzen, wo die E-Rechnung es genauer weiss.
+
+    - positionen-summe: Positionen gegen BT-106 (Summe der Positionen), nicht
+      gegen den Nettobetrag -- der enthaelt Rabatte/Zuschlaege auf
+      Belegebene, die keine Position sind (sonst Fehlalarm bei jeder
+      Rechnung mit Skonto-/Mengenrabatt).
+    - betraege-plausibel: bei Korrektur/Gutschrift sind negative Betraege
+      richtig; geprueft wird dann nur, dass die Summen aufgehen.
+    """
+    if c.name == "positionen-summe" and inv.summe_positionen is not None and line_items:
+        total = round(sum(p.get("netto") or 0 for p in line_items), 2)
+        ok = abs(total - inv.summe_positionen) <= 0.05
+        return Check(c.name, ok, f"Σ {total:.2f} vs Positionssumme {inv.summe_positionen:.2f}")
+    if c.name == "betraege-plausibel" and inv.is_correction and c.ok is False:
+        if None not in (inv.netto, inv.ust_betrag, inv.brutto) and \
+                abs(inv.netto + inv.ust_betrag - inv.brutto) <= 0.02:
+            return Check(c.name, True, f"Korrekturbeleg (Typ {inv.type_code}), negative Betraege zulaessig")
+    return c
+
+
+def _process_einvoice(path: Path, inv, store: Store) -> Result:
+    """Stufe 0: Werte direkt aus dem XML, kein Template, keine KI.
+
+    Konfidenz 1.0 je vorhandenem Feld -- der Wert ist nicht geraten, sondern
+    vom Absender strukturiert geliefert. Die Plausibilitaetspruefungen laufen
+    trotzdem (ein Absender kann auch falsch rechnen), und bestaetigt werden
+    muss wie jede andere Rechnung auch (§7b)."""
+    res = Result(file=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                 extraction=EXTRACT_EINVOICE, einvoice=inv.to_dict())
+
+    match = identify_einvoice(inv, store.suppliers())
+    supplier = None
+    if match:
+        supplier, res.match_score = match
+        res.supplier_id = supplier.id
+        res.supplier_name = supplier.name
+    else:
+        res.supplier_name = inv.verkaeufer_name or None
+
+    def put(name: str, value, raw: str | None = None) -> None:
+        if value is None or value == "" or value == []:
+            return
+        res.fields[name] = FieldResult(name, value, raw if raw is not None else str(value),
+                                       1.0, EXTRACT_EINVOICE)
+
+    put("rechnungsnummer", inv.rechnungsnummer)
+    put("rechnungsdatum", inv.rechnungsdatum)
+    put("netto", inv.netto)
+    put("ust_betrag", inv.ust_betrag)
+    put("brutto", inv.brutto)
+    rates = {t["satz"] for t in inv.steuern if t.get("satz") is not None}
+    if len(rates) == 1:
+        put("ust_satz", rates.pop())
+    put("bestellnummer", inv.bestellnummer)
+    put("faelligkeit", inv.faelligkeit)
+    put("zahlbetrag", inv.zahlbetrag)
+    put("waehrung", inv.waehrung)
+    put("leitweg_id", inv.leitweg_id)
+    put("zahlungsbedingungen", inv.zahlungsbedingungen)
+    if inv.is_credit_note:
+        put("belegart", "Gutschrift", inv.type_code)
+    # Stammdaten aus dem XML selbst; der Abgleich mit dem gepflegten
+    # Lieferanten-Datensatz passiert in den Pruefungen (iban-/ustid-stammdaten).
+    put("iban", inv.verkaeufer_iban[0] if inv.verkaeufer_iban else "")
+    put("ustid", inv.verkaeufer_ustid)
+    put("steuernummer", inv.verkaeufer_steuernummer)
+    put("adresse", ", ".join(inv.verkaeufer_adresse))
+    if inv.steuern:
+        put("ust_aufstellung", [{"satz": t["satz"], "netto": t["netto"], "ust": t["ust"]}
+                                for t in inv.steuern], "")
+    if supplier is not None:
+        _inject_library_fields(res.fields, supplier)
+
+    for fname, fval in store.corrections(res.sha256).items():
+        vtype = STANDARD_FIELDS.get(fname, ("text",))[0]
+        value, ok = coerce(str(fval), vtype)
+        res.fields[fname] = FieldResult(fname, value if ok else fval, str(fval), 1.0, "manual")
+
+    res.line_items = [dict(p) for p in inv.positionen]
+    res.tax_breakdown = _tax_breakdown(res.fields, [])
+    res.checks = run_all(res.fields, supplier, store.seen_invoice, res.line_items)
+    res.checks = [_einvoice_check(c, inv, res.line_items) for c in res.checks]
+    res.checks.append(_check_pdf_matches_xml(path, inv))
+
+    present = [n for n in _EINVOICE_REQUIRED if n in res.fields]
+    res.overall_confidence = 1.0 if len(present) == len(_EINVOICE_REQUIRED) else 0.5
+    checks_ok = all(c.ok is not False for c in res.checks)
+    res.status = AUTO if (supplier is not None and checks_ok
+                          and res.overall_confidence >= CONF_MIN) else REVIEW
+    return res
+
+
 def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     path = Path(path)
+    # Stufe 0: E-Rechnung (eigenes XML oder in ein PDF eingebettet). Hat
+    # Vorrang vor allem anderen -- dort steht nichts, was geraten werden muss.
+    inv = einvoice.load(path)
+    if inv is not None:
+        return _process_einvoice(path, inv, store)
+    if path.suffix.lower() != ".pdf":
+        return Result(file=str(path), status=UNSUPPORTED)
+
     if not pdfmod.has_text_layer(path):
         return Result(file=str(path), status=SCAN)
 
@@ -293,7 +449,14 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
 
 def scan_folder(folder: str | Path, store: Store) -> list[Result]:
     folder = Path(folder)
-    return [process(p, store) for p in sorted(folder.glob("*.pdf"))]
+    return [process(p, store) for p in invoice_files(folder)]
+
+
+def invoice_files(folder: str | Path) -> list[Path]:
+    """Alle Rechnungsdateien eines Ordners: PDFs und E-Rechnungs-XML."""
+    folder = Path(folder)
+    return sorted(p for p in folder.iterdir()
+                  if p.is_file() and p.suffix.lower() in INVOICE_SUFFIXES)
 
 
 def _fv(fields: dict, key: str):
@@ -305,7 +468,8 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
              to_jobrouter: bool = True) -> dict:
     """Eine geprüfte Rechnung in die Bücher übernehmen.
 
-    1. Original-PDF unverändert archivieren (``data/archive/<sha>.pdf`` – GoBD).
+    1. Original unverändert archivieren (``data/archive/<sha>.pdf|.xml`` – GoBD;
+       bei E-Rechnungen ist das XML das rechtlich maßgebliche Original).
     2. Audit-Eintrag (wer / wann / was) in ``data/audit.jsonl``.
     3. Journal-Datensatz in ``data/processed.jsonl`` (append-only).
     4. Ergebnis als JSON/CSV nach ``data/out/``.

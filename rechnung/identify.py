@@ -198,3 +198,25 @@ def supplier_from_doc(doc: Document, supplier_id: str, name: str) -> Supplier:
         domains=sorted(ids["domains"]), fingerprint=sorted(ids["fingerprint"]),
         currency=_detect_currency(doc.text),
     )
+
+
+def identify_einvoice(inv, suppliers: list[Supplier]):
+    """Lieferant einer E-Rechnung ueber die strukturierten Verkaeufer-Daten
+    finden -> (Supplier, score) oder None. USt-IdNr/IBAN sind eindeutig; der
+    Name allein zaehlt nur bei exakter (normalisierter) Gleichheit und nur,
+    wenn genau ein Lieferant so heisst -- sonst lieber "unbekannt" als raten."""
+    ustid = (inv.verkaeufer_ustid or "").replace(" ", "").upper()
+    ibans = {i.replace(" ", "").upper() for i in inv.verkaeufer_iban}
+    hits = [s for s in suppliers
+            if (ustid and ustid in set(s.ustids)) or (ibans & set(s.ibans))]
+    if len(hits) == 1:
+        return hits[0], 1.0
+    if len(hits) > 1:
+        both = [s for s in hits if ustid in set(s.ustids) and ibans & set(s.ibans)]
+        return (both[0], 1.0) if len(both) == 1 else None
+    name = norm(inv.verkaeufer_name or "")
+    if name:
+        by_name = [s for s in suppliers if s.name and norm(s.name) == name]
+        if len(by_name) == 1:
+            return by_name[0], 0.6
+    return None
