@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from .. import billing
 from .. import einvoice
 from .. import eventlog
+from .. import human
 from .. import learn
 from .. import pdf as pdfmod
 from .. import semantic
@@ -27,8 +28,8 @@ from ..guard import Guard
 from ..ocr import IMAGE_SUFFIXES
 from ..identify import FIXED_FIELD_TYPES, Supplier, identify, supplier_from_doc
 from ..pipeline import (CONF_MIN, EXTRACT_EINVOICE, EXTRACT_TEMPLATE, MASTER_FIELDS,
-                        STATUS_LABELS, invoice_files, journal_rows, journal_totals,
-                        load_document, origin)
+                        STATUS_LABELS, dispatch, invoice_files, journal_rows,
+                        journal_totals, load_document, origin)
 from ..store import Store
 from ..suggest import similar_suppliers
 from ..template import (STANDARD_FIELDS, Anchor, Column, LineItemSpec, Template,
@@ -172,10 +173,16 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         return res
 
     def _resolve(file: str) -> Path:
-        p = (samples / Path(file).name).resolve()
-        if not p.exists() or samples.resolve() not in p.parents:
-            raise HTTPException(404, "Datei nicht gefunden")
-        return p
+        """Erst der Eingangsordner, dann die Arbeitskopien im Ordner
+        "Menschliche Bearbeitung" (human.py)."""
+        name = human.file_name(file)
+        p = (samples / name).resolve()
+        if p.exists() and samples.resolve() in p.parents:
+            return p
+        hp = human.datei_pfad(store, name)
+        if hp is not None:
+            return hp
+        raise HTTPException(404, "Datei nicht gefunden")
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -193,6 +200,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         out = []
         for p in invoice_files(samples):
             r = _process(p, use_llm=False)
+            # Unsichere Rechnungen in den Ordner "Menschliche Bearbeitung"
+            dispatch(r, store)
             out.append(r.to_dict())
         return JSONResponse({
             "results": out,
@@ -613,6 +622,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         # Stufe 1: aus den eben bestaetigten Werten das Template ergaenzen/
         # praezisieren (gesicherte Templates werden nur ergaenzt).
         learned = learn.learn_from_confirmed(store, res, doc, _operator())
+        # Lag die Rechnung im Ordner "Menschliche Bearbeitung", verlaesst sie
+        # ihn jetzt (erst NACH dem Lernen -- die Arbeitskopie wird entfernt).
+        human.erledigt(store, res, _operator())
         return JSONResponse({"confirmations": tpl.confirmations, "secured": tpl.secured,
                              "learned": learned.to_dict()})
 
@@ -635,6 +647,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         shadow.record(store, res, operator)
         eventlog.record(store, res, operator)
         learned = learn.learn_from_confirmed(store, res, _load(path), operator)
+        human.erledigt(store, res, operator)
         return JSONResponse({"confirmed": True, "status": res.status,
                              "confirmations": 0, "secured": False,
                              "learned": learned.to_dict()})
@@ -646,6 +659,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             _log_confirmed(path, res, None, None, extraction=EXTRACT_EINVOICE)
         shadow.record(store, res, operator)
         eventlog.record(store, res, operator)
+        human.erledigt(store, res, operator)
         return JSONResponse({"confirmed": True, "extraction": EXTRACT_EINVOICE,
                              "status": res.status})
 
@@ -799,6 +813,13 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         return JSONResponse({"ok": True})
 
     # ---- Buchungsjournal -----------------------------------------
+    @app.get("/api/menschlich")
+    def menschlich_ep() -> JSONResponse:
+        """Ordner "Menschliche Bearbeitung": was wartet auf wen und warum
+        (Gruende, betroffene Felder, Vorschlagswerte mit Herkunft)."""
+        return JSONResponse({"ordner": str(human.human_dir(store.root)),
+                             "offen": human.offen(store)})
+
     @app.get("/api/shadow")
     def shadow_stats() -> JSONResponse:
         """Schattenbetrieb je Lieferant: Rechnungen / wuerde durchlassen /

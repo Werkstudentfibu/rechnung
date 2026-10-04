@@ -722,7 +722,9 @@ def scan_folder(folder: str | Path, store: Store, guard=None) -> list[Result]:
     (guard.py), damit eine haengende Rechnung die Schlange nicht blockiert.
     Jedes Ergebnis (auch ein Abbruch durch Zeitgrenze/OCR-Fehler) haengt ein
     Ereignis an ``data/events.jsonl`` -- Grundlage fuer den Fehlerbericht
-    (eventlog.py), unabhaengig davon, ob die Rechnung spaeter bestaetigt wird."""
+    (eventlog.py), unabhaengig davon, ob die Rechnung spaeter bestaetigt wird.
+    Danach wird jede Rechnung verteilt (``dispatch``): unsichere in den Ordner
+    "Menschliche Bearbeitung" (human.py)."""
     from . import eventlog
     from .guard import Guard
 
@@ -736,7 +738,25 @@ def scan_folder(folder: str | Path, store: Store, guard=None) -> list[Result]:
             guard.close()
     for res in results:
         eventlog.record(store, res)
+        dispatch(res, store)
     return results
+
+
+def dispatch(res: Result, store: Store) -> dict:
+    """Was passiert mit einer frisch verarbeiteten Rechnung? Bereits
+    uebernommene Rechnungen bleiben unberuehrt; jede unsichere (human.py:
+    zurueckgestellt, Pflichtfeld fehlt, rote Pruefung, OCR unsicher, Wert
+    unsicher) geht in den Ordner "Menschliche Bearbeitung" -- nichts wird
+    geraten. Sichere warten auf den Bestaetigungs-Klick im Training-UI."""
+    from . import human
+
+    if res.sha256 and store.seen_sha(res.sha256):
+        return {"aktion": "bereits_uebernommen"}
+    gruende = human.gruende(res)
+    if gruende:
+        human.ablegen(store, res, gruende)
+        return {"aktion": "mensch", "gruende": gruende}
+    return {"aktion": "bestaetigung"}
 
 
 def invoice_files(folder: str | Path) -> list[Path]:

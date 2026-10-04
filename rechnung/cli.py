@@ -220,7 +220,7 @@ def _cmd_fehlerbericht(args) -> int:
     if args.json:
         print(json.dumps(data, indent=2, ensure_ascii=False))
         return 0
-    if not (data["pruefungen"] or data["felder"] or data["korrekturen"]):
+    if not (data["pruefungen"] or data["felder"] or data["korrekturen"] or data["menschlich"]):
         print("Keine Ereignisse" + (f" seit {args.seit}" if args.seit else "") + ".")
         return 0
     tag = f" seit {args.seit}" if args.seit else ""
@@ -239,6 +239,29 @@ def _cmd_fehlerbericht(args) -> int:
     section("Pruefungen (rot)", data["pruefungen"], "pruefung")
     section("Felder (fehlend/niedrige Konfidenz)", data["felder"], "feld")
     section("Korrekturen", data["korrekturen"], "feld")
+    section("An Mensch gegeben (Ordner Menschliche Bearbeitung)", data["menschlich"], "art")
+    return 0
+
+
+def _cmd_menschlich(args) -> int:
+    """Ordner "Menschliche Bearbeitung": offene Rechnungen mit Gruenden."""
+    from .human import human_dir, offen
+
+    store = Store(args.data)
+    rows = offen(store)
+    if args.json:
+        print(json.dumps({"ordner": str(human_dir(store.root)), "offen": rows},
+                         indent=2, ensure_ascii=False, default=str))
+        return 0
+    print(f"Ordner: {human_dir(store.root)}")
+    if not rows:
+        print("Nichts offen.")
+        return 0
+    for r in rows:
+        who = r.get("lieferant_name") or r.get("lieferant") or "(Lieferant unbekannt)"
+        print(f"{r['datei']:40.40s} {who:30.30s} seit {(r.get('abgelegt') or '')[:16]}")
+        for g in r.get("gruende") or []:
+            print(f"   >> {g['grund']}")
     return 0
 
 
@@ -414,6 +437,11 @@ def main(argv=None) -> int:
     fb.add_argument("--seit", help="nur Ereignisse ab diesem Datum (YYYY-MM-DD)")
     fb.add_argument("--json", action="store_true")
     fb.set_defaults(func=_cmd_fehlerbericht)
+
+    me = sub.add_parser("menschlich",
+                        help="Ordner 'Menschliche Bearbeitung': offene Rechnungen mit Gruenden")
+    me.add_argument("--json", action="store_true")
+    me.set_defaults(func=_cmd_menschlich)
 
     na = sub.add_parser("nacht",
                         help="Nachtlauf: JobRouter-Rueckmeldungen, Layoutwechsel, Berichte, Gesundheitschecks")

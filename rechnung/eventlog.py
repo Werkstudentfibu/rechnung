@@ -26,8 +26,14 @@ from __future__ import annotations
 
 import time
 
+from .human import file_name
+
 TYPE_PROCESSED = "verarbeitung"
 TYPE_CORRECTION = "korrektur"
+# Ordner "Menschliche Bearbeitung" (human.py): abgelegt / erledigt
+TYPE_HUMAN = "menschlich"
+HUMAN_PLACED = "abgelegt"
+HUMAN_DONE = "erledigt"
 
 # wie viele Beispiel-Rechnungen je Haeufungs-Gruppe im Fehlerbericht stehen
 MAX_EXAMPLES = 5
@@ -50,7 +56,7 @@ def record(store, res, operator: str = "") -> dict:
     rec = {
         "type": TYPE_PROCESSED,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "file": res.file.rsplit("/", 1)[-1] if res.file else "",
+        "file": file_name(res.file),
         "sha256": res.sha256,
         "supplier_id": res.supplier_id,
         "supplier_name": res.supplier_name,
@@ -93,6 +99,28 @@ def record_correction(store, sha256: str, field: str, alt, neu, operator: str = 
     return rec
 
 
+def record_human(store, rec: dict, aktion: str, operator: str = "") -> dict:
+    """Ordner "Menschliche Bearbeitung" (human.py): eine Rechnung wurde
+    abgelegt (``HUMAN_PLACED``, mit Gruenden) bzw. hat ihn nach Bearbeitung
+    wieder verlassen (``HUMAN_DONE``, mit korrigierten Feldern)."""
+    ev = {
+        "type": TYPE_HUMAN,
+        "aktion": aktion,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "sha256": rec.get("sha256"),
+        "file": rec.get("datei", ""),
+        "supplier_id": rec.get("lieferant"),
+        "supplier_name": rec.get("lieferant_name"),
+        "gruende": [{"art": g.get("art"), "grund": g.get("grund")}
+                    for g in rec.get("gruende") or []],
+        "korrigiert": rec.get("korrigiert") or [],
+        "freigabe": rec.get("freigabe"),
+        "operator": operator or "?",
+    }
+    store.event_append(ev)
+    return ev
+
+
 def _group(rows: dict, key: tuple, **defaults) -> dict:
     row = rows.get(key)
     if row is None:
@@ -120,8 +148,20 @@ def report(store, since: str | None = None) -> dict:
     checks: dict[tuple, dict] = {}
     fields: dict[tuple, dict] = {}
     corrections: dict[tuple, dict] = {}
+    human: dict[tuple, dict] = {}
 
     for e in events:
+        if e.get("type") == TYPE_HUMAN:
+            if e.get("aktion") != HUMAN_PLACED:
+                continue
+            for g in e.get("gruende") or []:
+                key = (g.get("art"), e.get("supplier_id") or "")
+                row = _group(human, key, art=g.get("art"),
+                            lieferant=e.get("supplier_id") or "(unbekannt)",
+                            lieferant_name=e.get("supplier_name") or "")
+                row["anzahl"] += 1
+                _add_example(row, e.get("file", ""), e.get("sha256", ""), g.get("grund", ""))
+            continue
         if e.get("type") == TYPE_CORRECTION:
             key = (e.get("field"), e.get("supplier_id") or "")
             row = _group(corrections, key, feld=e.get("field"),
@@ -163,4 +203,6 @@ def report(store, since: str | None = None) -> dict:
         "pruefungen": sorted_rows(checks),
         "felder": sorted_rows(fields),
         "korrekturen": sorted_rows(corrections),
+        # an den Menschen gegeben (Ordner "Menschliche Bearbeitung") je Art+Lieferant
+        "menschlich": sorted_rows(human),
     }

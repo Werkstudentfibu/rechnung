@@ -70,6 +70,7 @@
 <header>
   <b>Rechnung</b>
   <button id="nav-scan" class="active" onclick="show('scan')">Rechnungen</button>
+  <button id="nav-human" onclick="show('human')">Menschliche Bearbeitung <span id="human-count"></span></button>
   <button id="nav-suppliers" onclick="show('suppliers')">Lieferanten</button>
   <button id="nav-addresses" onclick="show('addresses')">Rechnungsadressen</button>
   <button id="nav-categories" onclick="show('categories')">Kategorien</button>
@@ -81,6 +82,15 @@
   <div id="v-scan" class="view active">
     <div id="list"></div>
     <div id="work"><p class="hint">Links eine Rechnung wählen.</p></div>
+  </div>
+
+  <div id="v-human" class="view pane">
+    <h2>Menschliche Bearbeitung</h2>
+    <p class="hint">Rechnungen, bei denen das Programm <b>nicht sicher</b> ist – es rät nicht,
+      sondern legt sie hier ab (Ordner <code id="human-dir"></code>). Zeile anklicken, Werte
+      prüfen/korrigieren und bestätigen: die Rechnung verlässt die Liste, das Programm lernt
+      daraus und kann die nächste Rechnung dieses Lieferanten selbst.</p>
+    <div id="human-table"></div>
   </div>
 
   <div id="v-suppliers" class="view pane">
@@ -134,6 +144,7 @@ function show(v) {
   $('#v-'+v).classList.add('active');
   document.querySelectorAll('header button').forEach(e => e.classList.remove('active'));
   $('#nav-'+v).classList.add('active');
+  if (v === 'human') loadHuman();
   if (v === 'suppliers') loadSuppliers();
   if (v === 'addresses') loadAddresses();
   if (v === 'categories') loadCategories();
@@ -149,6 +160,8 @@ async function loadList() {
   const d = await api('/api/scan');
   const auto = d.results.filter(r => r.status === 'auto').length;
   $('#stats').textContent = `${d.results.length} PDF · ${auto} auto`;
+  api('/api/menschlich').then(h =>
+    $('#human-count').textContent = h.offen.length ? `(${h.offen.length})` : '');
   LIST_FILES = d.results.map(r => r.file);
   const list = $('#list'); list.innerHTML = '';
   for (const r of d.results) {
@@ -728,6 +741,36 @@ document.addEventListener('keydown', (ev) => {
   ev.preventDefault();
   confirmTpl();
 });
+
+/* ================= Menschliche Bearbeitung ================= */
+async function loadHuman() {
+  const d = await api('/api/menschlich');
+  $('#human-dir').textContent = d.ordner;
+  $('#human-count').textContent = d.offen.length ? `(${d.offen.length})` : '';
+  if (!d.offen.length) {
+    $('#human-table').innerHTML = '<p class="hint">Nichts offen – alle Rechnungen waren sicher oder sind bearbeitet.</p>';
+    return;
+  }
+  const t = document.createElement('table');
+  t.innerHTML = `<tr><th>Datei</th><th>Lieferant</th><th>seit</th><th>Gründe</th>
+    <th>betroffene Felder</th><th>Vorschläge (Herkunft)</th></tr>`;
+  for (const r of d.offen) {
+    const tr = document.createElement('tr'); tr.className = 'clickable';
+    const vs = Object.entries(r.vorschlaege || {})
+      .filter(([n]) => (r.felder || []).includes(n))
+      .map(([n, v]) => `${esc(n)}: ${esc(typeof v.wert === 'object' ? JSON.stringify(v.wert) : v.wert)}
+        <span class="badge ${esc(v.herkunft)}">${esc(v.herkunft)}${v.via ? ' · ' + esc(v.via) : ''}</span>`);
+    tr.innerHTML = `<td>${esc(r.datei)}</td>
+      <td>${esc(r.lieferant_name || r.lieferant || '–')}</td>
+      <td>${esc((r.abgelegt || '').slice(0, 16).replace('T', ' '))}</td>
+      <td>${(r.gruende || []).map(g => esc(g.grund)).join('<br>')}</td>
+      <td>${esc((r.felder || []).join(', '))}</td>
+      <td>${vs.join('<br>')}</td>`;
+    tr.onclick = () => { show('scan'); openInvoice(r.datei, null); };
+    t.appendChild(tr);
+  }
+  $('#human-table').innerHTML = ''; $('#human-table').appendChild(t);
+}
 
 /* ================= Lieferanten ================= */
 async function loadSuppliers() {

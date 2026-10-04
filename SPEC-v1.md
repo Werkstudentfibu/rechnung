@@ -619,6 +619,48 @@ nicht mehr gedeckt und muessen nachgezogen werden:
    werden, sobald echte Zugangsdaten vom Kunden kommen (siehe README-
    Checkliste in §7s).
 
+## 7u. Ordner "Menschliche Bearbeitung" (2026-10-04)
+
+`rechnung/human.py`. Grundsatz: nichts wird geraten oder mit unsicheren
+Werten weitergegeben. `human.gruende(res)` bestimmt, warum das Programm bei
+einer Rechnung nicht sicher ist (leere Liste = sicher), je Grund
+`{"art", "grund", "felder"}`:
+
+| Art | Ausloeser |
+|---|---|
+| `zurueckgestellt` | Hold-Grund aus §7l (Lieferant/Rechnungsadresse nicht eindeutig) |
+| `iban` | IBAN weicht von den Stammdaten ab (ersetzt die rote `iban-stammdaten`-Pruefung, keine Doppelmeldung) |
+| `zeitgrenze` / `fehler` | Abbruch durch `guard.py` (§7m) |
+| `ocr` | OCR nicht verfuegbar/fehlgeschlagen oder Pruefung `ocr-konfidenz` rot (§7n) |
+| `pruefung` | jede andere rote Pruefung, betroffene Felder ueber eine feste Zuordnung (z.B. `netto+ust=brutto` -> netto/ust_betrag/brutto) |
+| `pflichtfeld` | Pflichtfeld (`shadow.REQUIRED`) fehlt |
+| `unsicher` | gelesener Wert (nicht Stammdaten/manuell) unter `CONF_MIN` 0,7 -- z.B. reiner KI-Wert (gedeckelt 0,6) oder unsicheres OCR-Wort |
+| `nicht_lesbar` | weder PDF noch lesbare E-Rechnung |
+
+`pipeline.dispatch(res, store)` (aufgerufen von `scan_folder` und
+`/api/scan`): bereits uebernommene Rechnungen (`store.seen_sha`) bleiben
+unberuehrt; unsichere legt `human.ablegen` als Arbeitskopie in den Ordner
+(`RECHNUNG_MENSCHLICH`, Standard `<data>/menschlich/`) mit Begleitdatei
+`<datei>.grund.json` (sha256, Original-Pfad, Lieferant, Status, Gruende,
+betroffene Felder, Vorschlagswerte mit Herkunft/Konfidenz/`via`, Zeitpunkt
+der ersten Ablage). Erneute Verarbeitung aktualisiert die Begleitdatei,
+legt aber kein zweites Ereignis an; bereits bestaetigte Rechnungen werden
+nie (wieder) abgelegt; bei Namensgleichheit mit einer anderen Rechnung wird
+der Hash-Anfang vorangestellt statt zu ueberschreiben. Originale im
+Eingangsordner bleiben unveraendert.
+
+Training-UI: Reiter "Menschliche Bearbeitung" (`GET /api/menschlich`),
+CLI `rechnung menschlich [--json]`. Dateinamen werden im UI zuerst im
+Eingangsordner, dann im Ordner gesucht -- eine Rechnung laesst sich also
+auch bearbeiten, wenn der Eingangsordner schon geleert ist. Beim
+Bestaetigen (alle drei Pfade: Template, ohne Template, E-Rechnung) laeuft
+erst das Lernen (§7i), dann `human.erledigt`: Kopie + Begleitdatei werden
+entfernt, die Begleitdatei mit Bearbeiter, Zeitpunkt und korrigierten
+Feldern (`shadow.corrected_fields`) unter `<ordner>/erledigt/<sha>.json`
+abgelegt, Audit `menschlich_abgelegt`/`menschlich_erledigt`, Ereignis
+`type: "menschlich"` (`aktion: abgelegt|erledigt`) in `events.jsonl`;
+der Fehlerbericht zaehlt die Ablagen je Art und Lieferant (`menschlich`).
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).

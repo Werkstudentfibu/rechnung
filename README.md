@@ -22,6 +22,7 @@ rechnung suppliers                  # bekannte Lieferanten
 rechnung templates                  # gespeicherte Templates
 rechnung schatten                   # Schattenbetrieb: haette das Programm allein richtig gelegen?
 rechnung fehlerbericht              # haeufigste wiederkehrende Fehler/Korrekturen
+rechnung menschlich                 # Ordner "Menschliche Bearbeitung": was wartet und warum
 rechnung nacht                      # Nachtlauf: JobRouter, Layoutwechsel, Berichte, Gesundheit
 rechnung imap-test                  # IONOS: Anmeldung/Ordner/ungelesen pruefen, ohne abzuholen
 rechnung jobrouter-test              # JobRouter: Erreichbarkeit/Anmeldung pruefen, ohne anzulegen
@@ -117,6 +118,30 @@ Bestätigungspflicht oben gilt uneingeschränkt weiter, bis das explizit
 
 `scan_no_textlayer` ist historisch und wird nicht mehr vergeben – Scans laufen
 seit der Texterkennung (siehe unten) automatisch durch.
+
+## Ordner „Menschliche Bearbeitung“
+
+Das Programm rät nicht. Jede Rechnung, bei der es **nicht sicher** ist, legt
+`rechnung scan` bzw. „Neu scannen“ im Training-UI als Kopie in einen eigenen
+Ordner (`RECHNUNG_MENSCHLICH`, Standard `data/menschlich/`) – daneben eine
+kleine Begleitdatei `<datei>.grund.json` mit den Gründen, den betroffenen
+Feldern und den Vorschlagswerten samt Herkunft (`einvoice`/`template`/`llm`/
+`library`, ggf. `via: ocr`).
+
+Nicht sicher heißt: zurückgestellt (kein eindeutiger Lieferant/keine
+eindeutige Rechnungsadresse, IBAN weicht von den Stammdaten ab, OCR nicht
+verfügbar, Zeitgrenze, Verarbeitungsfehler), Pflichtfeld fehlt, Prüfung rot
+(Summen, IBAN-Prüfziffer, Datum, Dublette …), OCR unsicher oder ein gelesener
+Wert unter der Mindestkonfidenz 0,7 (z.B. ein reiner KI-Vorschlag).
+
+Im Training-UI zeigt der Reiter **„Menschliche Bearbeitung“** die Liste mit
+diesen Gründen (`GET /api/menschlich`, CLI `rechnung menschlich`). Klick auf
+eine Zeile öffnet die Rechnung; nach Korrektur und **Bestätigung** verlässt
+sie den Ordner (Begleitdatei mit Bearbeiter und korrigierten Feldern unter
+`data/menschlich/erledigt/<sha>.json`), Stufe 1 lernt daraus die
+Vorlage/Variante, und Ablage wie Erledigung stehen im Fehlerprotokoll
+(`events.jsonl`, Fehlerbericht-Abschnitt „An Mensch gegeben“). Die Originale
+im Eingangsordner bleiben unverändert.
 
 ## Texterkennung für Scans (OCR)
 

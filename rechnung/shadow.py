@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import time
 
+from .human import file_name
 from .template import STANDARD_FIELDS, FieldResult
 
 REQUIRED = tuple(n for n, (_t, req) in STANDARD_FIELDS.items() if req)
@@ -97,7 +98,7 @@ def record(store, res, operator: str = "") -> dict:
     rec = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "sha256": res.sha256,
-        "file": res.file.rsplit("/", 1)[-1],
+        "file": file_name(res.file),
         "supplier_id": res.supplier_id,
         "supplier_name": res.supplier_name,
         "extraction": res.extraction,
