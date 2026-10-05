@@ -173,6 +173,13 @@ const api = (u, opt) => fetch(u, opt).then(r => r.json());
 // sobald der Lieferant erkannt ist -- kein Duplikat als "fester Wert" noetig.
 const FIXED_FIELDS = ['bestellnummer', 'ust_satz'];
 const LI_TYPES = ['text', 'amount', 'number', 'date'];
+// Standard-Spaltennamen der Positionstabelle (SPEC Baustein 1,
+// rechnung/positionen.py STANDARD_COLUMNS) -- als Auswahlliste statt
+// Freitext, ein anderer Name wird beim Speichern trotzdem auf den
+// Standardnamen abgebildet (bzw. unveraendert uebernommen, wenn er keinem
+// Standardnamen entspricht, z.B. "rabatt_prozent").
+const LI_COLUMNS = ['pos', 'beschreibung', 'menge', 'einzelpreis_netto', 'gesamt_netto',
+                    'mwst_satz', 'waehrung', 'einheit'];
 let STATE = null;
 let LIST_FILES = [];  // Reihenfolge der zuletzt geladenen Liste, fuer "naechste Rechnung"
 
@@ -562,7 +569,8 @@ function renderLiPanel() {
     <div class="hint">1. Spalte anlegen → 2. in der Tabelle auf die <b>Kopfzelle</b> klicken.
       Alt+Klick markiert ein <b>Stopp-Wort</b> (z.B. „Zwischensumme“), an dem die Tabelle endet.</div>
     <div style="margin:6px 0">
-      <input id="li-name" placeholder="Spaltenname z.B. bezeichnung" size="18">
+      <input id="li-name" list="li-name-list" placeholder="Spaltenname (Liste oder frei)" size="22">
+      <datalist id="li-name-list">${LI_COLUMNS.map(c => `<option value="${c}">`).join('')}</datalist>
       <select id="li-type">${LI_TYPES.map(t => `<option>${t}</option>`).join('')}</select>
       <button class="blue" onclick="addLiCol()">+ Spalte</button>
     </div>

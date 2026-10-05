@@ -50,12 +50,12 @@ def _client(tmp_path: Path):
 # ---- Rechen-Pruefungen je Zeile ------------------------------------------
 
 def test_zeile_rot_gruen():
-    assert line_item_row({"menge": "2", "einzelpreis": 150.0, "gesamtpreis": 300.0})[0] is True
-    ok, grund = line_item_row({"bezeichnung": "Wartung", "menge": "2", "einzelpreis": 150.0,
-                               "gesamtpreis": 310.0})
+    assert line_item_row({"menge": "2", "einzelpreis_netto": 150.0, "gesamt_netto": 300.0})[0] is True
+    ok, grund = line_item_row({"beschreibung": "Wartung", "menge": "2", "einzelpreis_netto": 150.0,
+                               "gesamt_netto": 310.0})
     assert ok is False and "erwartet 300.00" in grund and "310.00" in grund
     # Pauschale: nicht beanstandet
-    assert line_item_row({"bezeichnung": "Pauschale", "gesamtpreis": 50.0})[0] is None
+    assert line_item_row({"beschreibung": "Pauschale", "gesamt_netto": 50.0})[0] is None
 
 
 def test_steuerzeile_rot_gruen():
@@ -73,8 +73,8 @@ def test_rechen_pruefungen_live_markiert_genau_die_falsche_zeile():
                                              [{"satz": 19.0, "netto": 300.0, "ust": 57.0},
                                               {"satz": 7.0, "netto": 200.0, "ust": 15.0}],
                                              "", 1.0, "manual")}
-    items = [{"menge": "2", "einzelpreis": 150.0, "betrag": 300.0, "mwst": "19"},
-             {"menge": "1", "einzelpreis": 200.0, "betrag": 210.0, "mwst": "7"}]
+    items = [{"menge": "2", "einzelpreis_netto": 150.0, "gesamt_netto": 300.0, "mwst_satz": "19"},
+             {"menge": "1", "einzelpreis_netto": 200.0, "gesamt_netto": 210.0, "mwst_satz": "7"}]
     out = rechen_pruefungen(fields, items)
     assert [z["ok"] for z in out["positionen"]] == [True, False]
     assert [z["ok"] for z in out["ust"]] == [True, False]
@@ -158,13 +158,15 @@ def test_pruefen_endpoint_zeigt_falsche_zeile(tmp_path: Path):
 def test_tabellen_korrektur_wird_gespeichert_protokolliert_und_angezeigt(tmp_path: Path):
     client, store, samples = _client(tmp_path)
     make_invoice(samples / "a.pdf", items=_ITEMS_PDF)
+    # "einzelpreis"/"gesamtpreis" sind Aliase -- die Korrektur kommt als
+    # Standardnamen zurueck/gespeichert (SPEC Baustein 1, positionen.py).
     rows = [{"beschreibung": "Wartung Server", "menge": "2", "einzelpreis": "150,00",
              "gesamtpreis": "300,00", "_intern": "weg"},
             {"beschreibung": "", "menge": "", "einzelpreis": ""}]   # leere Zeile faellt weg
     r = client.post("/api/tabelle", json={"file": "a.pdf", "art": "positionen", "rows": rows,
                                           "quelle_vorher": "llm"}).json()
     assert r["rows"] == [{"beschreibung": "Wartung Server", "menge": "2",
-                          "einzelpreis": 150.0, "gesamtpreis": 300.0}]
+                          "einzelpreis_netto": 150.0, "gesamt_netto": 300.0}]
     sha = pdfmod.load(samples / "a.pdf").sha256
     assert store.corrections(sha)[POSITIONEN_KEY] == r["rows"]
 
@@ -197,14 +199,16 @@ def test_ungueltige_tabellenart_abgelehnt(tmp_path: Path):
 
 def test_korrigierte_tabelle_wird_beim_bestaetigen_gelernt(tmp_path: Path):
     """Mensch korrigiert die (vorgeschlagene) Positionstabelle -- inkl. einer
-    neu zugeordneten Spalte -- und bestaetigt; die naechste Rechnung desselben
-    Layouts wird ohne weiteres Anklicken korrekt gelesen."""
+    frei benannten Spalte ("betrag" statt "gesamtpreis") -- und bestaetigt;
+    gelernt wird der Standardname (SPEC Baustein 1: Vorlagen-Spaltennamen
+    werden beim Anlernen auf die Standardnamen abgebildet), die naechste
+    Rechnung desselben Layouts wird damit korrekt UND einheitlich gelesen."""
     client, store, samples = _client(tmp_path)
     make_invoice(samples / "a.pdf", rechnungsnr="RE-2026-00042", items=_ITEMS_PDF)
     for feld, wert in [("rechnungsnummer", "RE-2026-00042"), ("rechnungsdatum", "14.02.2026"),
                        ("netto", "500.00"), ("ust_betrag", "71.00"), ("brutto", "571.00")]:
         client.post("/api/correction", json={"file": "a.pdf", "field": feld, "value": wert})
-    # Spalte "gesamtpreis" vom Menschen als "betrag" zugeordnet
+    # Spalte frei als "betrag" benannt -- wird auf "gesamt_netto" abgebildet.
     rows = [{"beschreibung": "Wartung Server", "menge": "2", "einzelpreis": "150,00",
              "betrag": "300,00"},
             {"beschreibung": "Schulung Grundlagen", "menge": "1", "einzelpreis": "200,00",
@@ -218,8 +222,8 @@ def test_korrigierte_tabelle_wird_beim_bestaetigen_gelernt(tmp_path: Path):
     assert "_positionen" in learned["learned"]
     tpl = store.template(learned["template_id"])
     assert tpl.line_items is not None
-    assert {c.name for c in tpl.line_items.columns} >= {"beschreibung", "menge",
-                                                         "einzelpreis", "betrag"}
+    assert {c.name for c in tpl.line_items.columns} == {"beschreibung", "menge",
+                                                         "einzelpreis_netto", "gesamt_netto"}
 
     make_invoice(samples / "b.pdf", rechnungsnr="RE-2026-00043", items=[
         {"beschreibung": "Beratung vor Ort", "menge": 3, "einzelpreis": 100.0,
@@ -229,6 +233,6 @@ def test_korrigierte_tabelle_wird_beim_bestaetigen_gelernt(tmp_path: Path):
     assert len(d["line_items"]) == 1
     it = d["line_items"][0]
     assert it["beschreibung"] == "Beratung vor Ort"
-    assert float(it["betrag"]) == 300.0 and float(it["einzelpreis"]) == 100.0
+    assert float(it["gesamt_netto"]) == 300.0 and float(it["einzelpreis_netto"]) == 100.0
     assert d["markierungen"]["positionen"][0] is not None
     assert d["pruefung_live"]["positionen"][0]["ok"] is True

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .billing import BillingAddress
 from .identify import Supplier
+from .positionen import ordered_columns
 from .template import Template
 from .textnorm import norm
 
@@ -349,10 +350,12 @@ class Store:
                     continue
                 writer.writerow([k, "" if v is None else v])
 
-        # Positionen als eigene Tabelle
+        # Positionen als eigene Tabelle -- feste Reihenfolge (SPEC Baustein 1:
+        # Standardspalten zuerst, Rest stabil alphabetisch -- vorher ein
+        # ``set()`` mit zufaelliger Reihenfolge je Lauf).
         items = data.get("_positionen") or []
         if items:
-            cols = list({k for it in items for k in it if not k.startswith("_")})
+            cols = ordered_columns(items)
             with p.with_name(f"{name}.positionen.csv").open(
                     "w", encoding="utf-8-sig", newline="") as fh:
                 w = csv.writer(fh, delimiter=";")

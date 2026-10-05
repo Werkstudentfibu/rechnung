@@ -22,6 +22,7 @@ from .. import eventlog
 from .. import human
 from .. import learn
 from .. import pdf as pdfmod
+from .. import positionen
 from .. import semantic
 from .. import split
 from .. import shadow
@@ -583,7 +584,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if not li.columns:
             return JSONResponse({"items": []})
         words = doc.pages[li.page].words
-        header_cols = [(words[c.header_word], c.name, c.value_type) for c in li.columns]
+        header_cols = [(words[c.header_word], positionen.canonical_name(c.name), c.value_type)
+                       for c in li.columns]
         stop = [words[i] for i in li.stop_words]
         spec = build_line_item_spec(header_cols, stop, doc.pages[li.page].width)
         return JSONResponse({"items": apply_line_items(doc, spec)})
@@ -645,8 +647,13 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if body.line_items and body.line_items.columns:
             li = body.line_items
             words = pages_words[li.page]
-            header_cols = [(words[c.header_word], c.name, c.value_type)
-                           for c in li.columns]
+            # Spaltenname beim Anlernen auf den Standardnamen abbilden (SPEC
+            # Baustein 1) -- das UI erlaubt zwar noch Freitext, das Template
+            # merkt sich aber nur noch Standardnamen (Altvorlagen mit
+            # Freitext-Namen werden beim Anwenden ueber
+            # ``positionen.normalize_columns`` ebenso umgeschluesselt).
+            header_cols = [(words[c.header_word], positionen.canonical_name(c.name),
+                           c.value_type) for c in li.columns]
             stop = [words[i] for i in li.stop_words]
             tpl.line_items = build_line_item_spec(header_cols, stop,
                                                   doc.pages[li.page].width)
@@ -819,6 +826,10 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                        if str(k).strip() and not str(k).startswith("_")}
                 if any(v is not None for v in row.values()):
                     rows.append(row)
+            # Spaltenname (ggf. frei vom Menschen vergeben) sofort auf den
+            # Standardnamen abbilden (SPEC Baustein 1) -- validate.py und
+            # das Lernen (learn_line_items) kennen nur noch Standardnamen.
+            rows = positionen.normalize_columns(rows)
         else:
             key = "ust_aufstellung"
             rows = [z for z in (_ust_zeile(r) for r in body.rows) if z is not None]
@@ -851,7 +862,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         tax_rows = [z for z in (_ust_zeile(r) for r in body.ust_aufstellung) if z is not None]
         if tax_rows:
             fields["ust_aufstellung"] = FieldResult("ust_aufstellung", tax_rows, "", 1.0, "manual")
-        items = [{k: _zelle(v) for k, v in r.items()} for r in body.line_items]
+        items = positionen.normalize_columns([{k: _zelle(v) for k, v in r.items()}
+                                              for r in body.line_items])
         return JSONResponse(rechen_pruefungen(fields, items, text))
 
     @app.delete("/api/correction")

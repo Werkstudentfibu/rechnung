@@ -17,6 +17,7 @@ from . import einvoice
 from . import jobrouter
 from . import ocr
 from . import pdf as pdfmod
+from . import positionen
 from . import semantic
 from . import shadow
 from . import split
@@ -294,9 +295,8 @@ def _tax_breakdown(fields: dict, line_items: list[dict]) -> list[dict]:
     if line_items:
         agg: dict[float, dict] = {}
         for it in line_items:
-            rate = _to_amount(it.get("ust_satz") or it.get("mwst") or it.get("ust"))
-            base = _to_amount(it.get("netto") or it.get("summe") or it.get("betrag")
-                              or it.get("gesamt") or it.get("gesamtpreis"))
+            rate = _to_amount(it.get("mwst_satz"))
+            base = _to_amount(it.get("gesamt_netto"))
             if rate is None or base is None:
                 continue
             slot = agg.setdefault(rate, {"satz": rate, "netto": 0.0, "ust": 0.0})
@@ -325,7 +325,11 @@ def _suggest_categories(line_items: list[dict], tpl: Template, store: Store) -> 
     Feld, wird nicht in CSV/UI-Spalten aufgelistet."""
     if not tpl.line_items:
         return
-    text_cols = [c.name for c in tpl.line_items.columns if c.value_type == "text"]
+    # ``line_items`` ist schon umbenannt (positionen.normalize_columns) --
+    # die Vorlagen-Spaltennamen (ggf. noch eine Altvorlage mit Freitext-
+    # Namen) muessen daher erst auf den Standardnamen abgebildet werden.
+    text_cols = [positionen.canonical_name(c.name) for c in tpl.line_items.columns
+                if c.value_type == "text"]
     if not text_cols:
         return
     first_text_col = text_cols[0]
@@ -500,7 +504,7 @@ def _einvoice_check(c: Check, inv, line_items: list[dict]) -> Check:
       richtig; geprueft wird dann nur, dass die Summen aufgehen.
     """
     if c.name == "positionen-summe" and inv.summe_positionen is not None and line_items:
-        total = round(sum(p.get("netto") or 0 for p in line_items), 2)
+        total = round(sum(p.get("gesamt_netto") or 0 for p in line_items), 2)
         ok = abs(total - inv.summe_positionen) <= 0.05
         return Check(c.name, ok, f"Σ {total:.2f} vs Positionssumme {inv.summe_positionen:.2f}")
     if c.name == "betraege-plausibel" and inv.is_correction and c.ok is False:
@@ -582,7 +586,7 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
     zahlung.apply(res.fields, inv.zahlungsbedingungen or "", res.hinweise)
 
     with timer.stage("pruefungen"):
-        res.line_items = [dict(p) for p in inv.positionen]
+        res.line_items = positionen.normalize_columns([dict(p) for p in inv.positionen])
         res.tax_breakdown = _tax_breakdown(res.fields, [])
         pdf_check = _check_pdf_matches_xml(path, inv)
 
@@ -649,7 +653,8 @@ def _apply_line_item_correction(res: "Result", corrections: dict) -> None:
     learn.learn_line_items die Tabellen-Spec."""
     items = corrections.get(POSITIONEN_KEY)
     if isinstance(items, list):
-        res.line_items = [dict(it) for it in items if isinstance(it, dict)]
+        res.line_items = positionen.normalize_columns(
+            [dict(it) for it in items if isinstance(it, dict)])
 
 
 def _llm_full(res: Result, doc) -> None:
@@ -665,7 +670,7 @@ def _llm_full(res: Result, doc) -> None:
     # Bewusst KEIN res.supplier_name aus der KI: die Lieferanten-Identitaet
     # kommt ausschliesslich aus der Bibliothek.
     if full.line_items and not res.line_items:
-        res.line_items = full.line_items
+        res.line_items = positionen.normalize_columns(full.line_items)
     if full.fields:
         res.extraction = EXTRACT_LLM
 
@@ -709,9 +714,7 @@ def _gegencheck_mismatch(name: str, vorlage, ki) -> bool:
 
 
 def _item_total(it: dict) -> float | None:
-    v = it.get("netto") or it.get("summe") or it.get("betrag") or it.get("gesamt") \
-        or it.get("gesamtpreis")
-    return _to_amount(v)
+    return _to_amount(it.get("gesamt_netto"))
 
 
 def _gegencheck(res: "Result", doc, tpl: Template, store: Store, timer: StageTimer,
@@ -1007,7 +1010,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
                             f"(Seiten {', '.join(str(i + 1) for i in o.missing_pages)})")
     elif tpl.line_items:
         with timer.stage("vorlage"):
-            res.line_items = apply_line_items(doc, tpl.line_items)
+            res.line_items = positionen.normalize_columns(apply_line_items(doc, tpl.line_items))
         _suggest_categories(res.line_items, tpl, store)
     machine_items = res.line_items
     _apply_line_item_correction(res, corrections)

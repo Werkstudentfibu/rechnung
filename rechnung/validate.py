@@ -8,13 +8,11 @@ from datetime import date, timedelta
 
 from .textnorm import iban_valid, norm_ustid, parse_amount, parse_date
 
-# Spaltennamen einer Positionstabelle sind frei vom Menschen vergeben (keine
-# feste Vorgabe im UI) -- diese Listen sind eine Heuristik ueber die in der
-# Praxis haeufigsten Bezeichnungen, dieselbe wie in pipeline._tax_breakdown.
-_QTY_KEYS = ("menge", "anzahl", "stueck", "qty", "quantity")
-_PRICE_KEYS = ("einzelpreis", "preis", "ep", "unit_price", "unitprice", "price")
-_TOTAL_KEYS = ("gesamt", "summe", "betrag", "netto", "total", "zeilensumme", "gesamtpreis")
-_RATE_KEYS = ("ust_satz", "mwst", "satz", "steuersatz", "ust")
+# Positionsspalten kommen seit Baustein 1 (positionen.normalize_columns)
+# bereits zentral umbenannt an -- menge/einzelpreis_netto/gesamt_netto/
+# mwst_satz sind hier Standardnamen, keine Alias-Suche mehr noetig. Rabatt/
+# Nachlass ist (noch) keine Standardspalte, deshalb bleibt dafuer eine
+# kleine Alias-Liste.
 _DISCOUNT_PCT_KEYS = ("rabatt_prozent", "nachlass_prozent", "rabatt_pct", "discount_percent",
                      "rabatt_%")
 _DISCOUNT_AMT_KEYS = ("rabatt_betrag", "nachlass_betrag", "rabatt", "nachlass", "discount")
@@ -23,6 +21,13 @@ _DISCOUNT_AMT_KEYS = ("rabatt_betrag", "nachlass_betrag", "rabatt", "nachlass", 
 # dann darf die Positionssumme gegen BRUTTO geprueft werden (Baustein 9b)
 _BRUTTO_HINT_RE = re.compile(r"(?i)inkl(?:usive)?\.?\s*(?:mwst|ust)|brutto[- ]?preise?|"
                              r"preise\s+brutto")
+
+
+def looks_like_brutto_prices(text: str) -> bool:
+    """Weist der Rechnungstext auf Bruttopreis-Positionen hin ("inkl. MwSt"/
+    "Bruttopreise")? Oeffentliche Form von ``_BRUTTO_HINT_RE`` fuer die
+    Rechenstufe (rechnen.py, Baustein 2)."""
+    return bool(_BRUTTO_HINT_RE.search(text or ""))
 
 
 def _first(item: dict, keys: tuple[str, ...]) -> float | None:
@@ -38,6 +43,19 @@ def _first(item: dict, keys: tuple[str, ...]) -> float | None:
             amt = parse_amount(v)
             if amt is not None:
                 return amt
+    return None
+
+
+def _num(item: dict, key: str) -> float | None:
+    """Wert EINER Standardspalte als Zahl, oder ``None`` (Rohtext wie
+    "19"/"2,50" wird geparst, ein float/int-Wert direkt uebernommen)."""
+    if key not in item:
+        return None
+    v = item[key]
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str) and v.strip():
+        return parse_amount(v)
     return None
 
 
@@ -164,7 +182,7 @@ def check_line_items_total(fields: dict, line_items: list[dict] | None,
     total = 0.0
     n = 0
     for it in line_items:
-        v = _first(it, _TOTAL_KEYS)
+        v = _num(it, "gesamt_netto")
         if v is not None:
             total += v
             n += 1
@@ -192,8 +210,8 @@ def line_item_row(it: dict, i: int = 1, tol: float = 0.01) -> tuple[bool | None,
     """Rechen-Pruefung EINER Position (menge * einzelpreis abzueglich Rabatt =
     Zeilensumme) -> (ok, Grund). ``None``: Pauschale ohne Menge/Einzelpreis,
     nicht pruefbar. Auch fuer die Live-Anzeige je Zeile im UI (Baustein 11b)."""
-    menge, preis = _first(it, _QTY_KEYS), _first(it, _PRICE_KEYS)
-    zeile = _first(it, _TOTAL_KEYS)
+    menge, preis = _num(it, "menge"), _num(it, "einzelpreis_netto")
+    zeile = _num(it, "gesamt_netto")
     if menge is None or preis is None or zeile is None:
         return None, "keine Menge/Einzelpreis/Zeilensumme"
     erwartet = menge * preis
@@ -204,7 +222,7 @@ def line_item_row(it: dict, i: int = 1, tol: float = 0.01) -> tuple[bool | None,
     elif amt is not None:
         erwartet -= amt
     if abs(round(erwartet, 2) - zeile) > tol:
-        bez = it.get("beschreibung") or it.get("bezeichnung") or f"Position {i}"
+        bez = it.get("beschreibung") or f"Position {i}"
         return False, f"{bez}: erwartet {erwartet:.2f}, gefunden {zeile:.2f}"
     return True, "ok"
 
@@ -232,7 +250,7 @@ def check_line_item_math(line_items: list[dict] | None, tol: float = 0.01) -> Ch
 def _sums_by_rate(line_items: list[dict] | None) -> dict[float, float]:
     by_rate: dict[float, float] = {}
     for it in line_items or []:
-        rate, base = _first(it, _RATE_KEYS), _first(it, _TOTAL_KEYS)
+        rate, base = _num(it, "mwst_satz"), _num(it, "gesamt_netto")
         if rate is None or base is None:
             continue
         by_rate[round(float(rate), 2)] = round(by_rate.get(round(float(rate), 2), 0.0) + base, 2)
