@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from . import rechnen
 from .pdf import Document, Word
 from .template import (STANDARD_FIELDS, FieldResult, FieldSpec, LineItemSpec, Template,
                        apply_line_items, apply_template, build_field_spec,
@@ -804,12 +805,17 @@ def learn_from_confirmed(store, res, doc: Document, operator: str = "") -> Learn
         existing.confirmations = max(existing.confirmations,
                                      store.distinct_confirmations(existing.id))
 
+    # Nur GELESENE Werte werden als Anker gelernt -- ``errechnet``/``kopf``
+    # (Rechenstufe, rechnung/rechnen.py) sind nicht im PDF belegt und duerfen
+    # nie eine Tabellen-Spec/einen Taxblock-Anker begruenden (SPEC Baustein 2).
     tb_fr = res.fields.get("ust_aufstellung")
-    taxblock = (tb_fr.value if tb_fr is not None and tb_fr.source != "missing"
+    taxblock = (rechnen.nur_gelesene_werte(tb_fr.value)
+               if tb_fr is not None and tb_fr.source != "missing"
                and isinstance(tb_fr.value, list) and tb_fr.value else None)
+    gelesene_items = rechnen.nur_gelesene_werte(res.line_items) or None
     tpl, outcome = learn_template(doc, res.supplier_id, confirmed_values(res.fields),
                                   existing, variant, template_id=tid_override,
-                                  line_items=res.line_items or None, taxblock=taxblock)
+                                  line_items=gelesene_items, taxblock=taxblock)
 
     if used_tpl is not None and used_tpl.secured:
         _track_field_corrections(store, used_tpl, outcome, res, operator)

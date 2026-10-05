@@ -240,8 +240,13 @@ def test_pipeline_unknown_supplier_full_extraction(monkeypatch, tmp_path: Path):
     d = res.to_dict()
     assert d["fields"]["netto"]["origin"] == "llm"
     assert d["fields"]["iban"]["origin"] == "llm"
-    assert "brutto" not in d["fields"] and "brutto" in d["llm_rejected"]
-    assert any(c.name == "netto+ust=brutto" for c in res.checks)
+    # Das vom Modell behauptete Brutto (5,00) ist nicht im PDF belegt und
+    # bleibt verworfen -- die Rechenstufe (Baustein 2) ergaenzt das Feld aber
+    # selbst aus den gelesenen netto/ust_betrag (1000,00 + 190,00 = 1190,00).
+    assert "brutto" in d["llm_rejected"]
+    assert d["fields"]["brutto"]["value"] == 1190.0
+    assert d["fields"]["brutto"]["origin"] == "errechnet"
+    assert next(c for c in res.checks if c.name == "netto+ust=brutto").ok is True
 
     # Korrektur gewinnt gegen das Modell
     store.save_correction(res.sha256, "brutto", "1.190,00")

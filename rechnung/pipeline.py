@@ -18,6 +18,7 @@ from . import jobrouter
 from . import ocr
 from . import pdf as pdfmod
 from . import positionen
+from . import rechnen
 from . import semantic
 from . import shadow
 from . import split
@@ -274,46 +275,6 @@ def _to_amount(v) -> float | None:
     if isinstance(v, (int, float)):
         return float(v)
     return coerce(str(v or ""), "amount")[0]
-
-
-def _tax_breakdown(fields: dict, line_items: list[dict]) -> list[dict]:
-    """USt-Aufstellung je Steuersatz. Prioritaet:
-    1. explizit markierter ``ust_aufstellung``-Block
-    2. aus den Positionen aufsummiert (Spalten ``ust_satz``/``netto``)
-    3. Einzelsatz aus den Kopf-Feldern netto/ust_betrag/ust_satz
-    """
-    fr = fields.get("ust_aufstellung")
-    if fr is not None and isinstance(fr.value, list) and fr.value:
-        rows = []
-        for r in fr.value:
-            netto = _to_amount(r.get("netto"))
-            ust = _to_amount(r.get("ust"))
-            rows.append({"satz": r.get("satz"), "netto": netto, "ust": ust,
-                         "brutto": round((netto or 0) + (ust or 0), 2)})
-        return rows
-
-    if line_items:
-        agg: dict[float, dict] = {}
-        for it in line_items:
-            rate = _to_amount(it.get("mwst_satz"))
-            base = _to_amount(it.get("gesamt_netto"))
-            if rate is None or base is None:
-                continue
-            slot = agg.setdefault(rate, {"satz": rate, "netto": 0.0, "ust": 0.0})
-            slot["netto"] = round(slot["netto"] + base, 2)
-            slot["ust"] = round(slot["ust"] + base * rate / 100, 2)
-        rows = [dict(v, brutto=round(v["netto"] + v["ust"], 2))
-                for v in agg.values()]
-        if rows:
-            return sorted(rows, key=lambda r: r["satz"])
-
-    netto = _to_amount(fields["netto"].value) if "netto" in fields else None
-    ust = _to_amount(fields["ust_betrag"].value) if "ust_betrag" in fields else None
-    satz = _to_amount(fields["ust_satz"].value) if "ust_satz" in fields else None
-    if netto is not None or ust is not None:
-        return [{"satz": satz, "netto": netto, "ust": ust,
-                 "brutto": round((netto or 0) + (ust or 0), 2)}]
-    return []
 
 
 def _suggest_categories(line_items: list[dict], tpl: Template, store: Store) -> None:
@@ -587,7 +548,9 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
 
     with timer.stage("pruefungen"):
         res.line_items = positionen.normalize_columns([dict(p) for p in inv.positionen])
-        res.tax_breakdown = _tax_breakdown(res.fields, [])
+        rk = rechnen.rechne(res.fields, res.line_items, pdf_text)
+        res.fields, res.line_items, res.tax_breakdown = rk.fields, rk.line_items, rk.tax_breakdown
+        res.hinweise.extend(g for g in rk.gruende if g not in res.hinweise)
         pdf_check = _check_pdf_matches_xml(path, inv)
 
         def checks_for(fields):
@@ -808,7 +771,9 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
                          + waehrung.checks(res.fields, doc.text)
                          + swissqr.checks(res.fields, qr, supplier))
             return
-        res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
+        rk = rechnen.rechne(res.fields, res.line_items, doc.text)
+        res.fields, res.line_items, res.tax_breakdown = rk.fields, rk.line_items, rk.tax_breakdown
+        res.hinweise.extend(g for g in rk.gruende if g not in res.hinweise)
         res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, extra, qr)
         _set_dublette(res, store, doc)
 
@@ -1018,7 +983,9 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     _gegencheck(res, doc, tpl, store, timer, use_llm)
 
     with timer.stage("pruefungen"):
-        res.tax_breakdown = _tax_breakdown(res.fields, res.line_items)
+        rk = rechnen.rechne(res.fields, res.line_items, doc.text)
+        res.fields, res.line_items, res.tax_breakdown = rk.fields, rk.line_items, rk.tax_breakdown
+        res.hinweise.extend(g for g in rk.gruende if g not in res.hinweise)
 
         res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, [addr_check],
                                  qr_obj)

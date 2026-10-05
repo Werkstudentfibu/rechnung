@@ -176,7 +176,11 @@ def test_tabellen_korrektur_wird_gespeichert_protokolliert_und_angezeigt(tmp_pat
                                                           "ust": 57.0}]
 
     d = client.get("/api/invoice", params={"file": "a.pdf"}).json()
-    assert d["line_items"] == r["rows"]
+    # Die Rechenstufe (Baustein 2) ergaenzt die Waehrung aus dem Kopf in jede
+    # Zeile (Herkunft "kopf") -- die uebrigen Spalten bleiben wie gespeichert.
+    assert {k: v for k, v in d["line_items"][0].items() if k in r["rows"][0]} == r["rows"][0]
+    assert d["line_items"][0]["waehrung"] == "EUR"
+    assert d["line_items"][0]["_herkunft"]["waehrung"] == "kopf"
     assert d["positionen_korrigiert"] is True
     assert d["current"]["ust_aufstellung"]["value"] == [{"satz": 19.0, "netto": 300.0,
                                                          "ust": 57.0}]
