@@ -845,6 +845,187 @@ setzte dabei u.a. eine Positionszeile als `kostenstelle` ein -- im Text
 belegt, aber sachlich falsch. Jetzt werden nur Pflicht- und Vorlagenfelder
 nachgefragt.
 
+## 7y. Postfach: Abholung, Anhang-Auswahl, CHF/Schweiz (2026-10-05)
+
+Erweiterung des IONOS-Postfachs (`ingest.py`) und der PDF-Extraktion um
+Rechnungen, die nicht als einzelner, eindeutig beschrifteter PDF-Anhang
+direkt an die Pipeline übergeben werden können. Bibliothek weiterhin
+einzige Quelle für Lieferant/Rechnungsadresse (§7l), "nicht raten" (§7b)
+und die 120-s-Zeitgrenze (§7m) bleiben unverändert verbindlich.
+
+0. **Jede Mail führt zu einem Ergebnis:** `fetch` holt mit `BODY.PEEK[]`
+   statt `RFC822` (setzt nicht implizit `\Seen`). Eine Mail ohne
+   verwertbaren Anhang geht -- mit Grund + die Mail selbst als `.eml` --
+   in den Ordner „Menschliche Bearbeitung“, statt nach dem Abholen für
+   `UNSEEN` für immer verloren zu sein. Erst danach `\Seen`/Verschieben.
+   Eine Rechnung im Mailtext (HTML/Text) wird als lesbares PDF gesichert.
+1. **Anhang-Sonderfälle:** ZIP-Anhänge werden im Speicher entpackt
+   (`ZIP_MAX_FILES`/`ZIP_MAX_FILE_BYTES`/`ZIP_MAX_TOTAL_BYTES`/
+   `ZIP_MAX_RATIO` gegen Zip-Bomben, Pfadanteile verworfen -- kein
+   Pfad-Traversal, kein ZIP-im-ZIP). Passwortgeschützte PDFs/ZIPs gehen
+   einzeln mit Grund an den Menschen, der Rest der Mail läuft normal
+   weiter.
+2. **Sammel-PDF nur an sicheren Grenzen aufteilen** (`split.py`): neue
+   Rechnungsnummer im Seitenkopf + neu beginnender Seitenzähler + neuer
+   Summenblock davor. Im Zweifel bleibt die Datei ganz und geht an den
+   Menschen ("möglicherweise mehrere Rechnungen"). Teile tragen den
+   Verweis auf das Original (sha256, `data/teile/<sha>.json`).
+3. **Lange Scans schnell genug:** OCR erkennt bei langen Scans zuerst nur
+   Kopf-/Fußseiten (für die Feld-Extraktion), der Rest (Positionen/Archiv)
+   folgt außerhalb der 120-s-Grenze als Hintergrundschritt
+   (`complete_background_ocr`). Zeitmessung (§7x.0) protokolliert die
+   Seitenzahl.
+4. **Dubletten besser erkennen** (`dubletten.py`): zusätzlich zu sha256
+   und (Lieferant, Rechnungsnummer) auch die normalisierte
+   Rechnungsnummer (`norm_number`), gleicher Lieferant + gleicher
+   Bruttobetrag + gleiches Datum, und eine Mahnung/Zahlungserinnerung mit
+   Verweis auf eine bekannte Rechnungsnummer. Jeder Verdacht geht mit
+   Verweis auf die Ur-Rechnung an den Menschen, nie automatisch weiter an
+   JobRouter.
+5. **Fälligkeit und Skonto auch aus PDFs** (`zahlung.py`): Zahlungsziel/
+   Fälligkeitsdatum (absolut oder relativ, z.B. "30 Tage netto") und
+   Skonto-Prozent + -Frist (absolut oder "X Tage") als Felder
+   `faelligkeit`/`skonto_prozent`/`skonto_frist`/`zahlungsziel_tage`/
+   `skonto_tage` -- per Textregel, lernbar wie jedes Feld (eine gelernte
+   Vorlage hat Vorrang). Widersprüchliche/relative Angaben ohne
+   Rechnungsdatum bleiben leer, mit Hinweis statt Raten.
+6. **Gutschriften/Rechnungskorrekturen auch bei PDFs** (`belegart.py`):
+   Belegart (Rechnung/Gutschrift/Rechnungskorrektur/Storno/Mahnung/
+   Abschlags-/Schlussrechnung) aus dem Titel der ersten Seite bzw. dem
+   E-Rechnungs-Typcode; Feld `belegart`. Gutschrift/Storno werden in
+   Ausgabe/Journal/JobRouter einheitlich mit **negativen** Beträgen
+   geführt (`signed`), unabhängig vom gedruckten Vorzeichen; gemischte
+   Vorzeichen zwischen Netto/USt/Brutto -> Prüfung `vorzeichen` rot.
+   Verweis auf die Ursprungsrechnung als Feld `bezug_rechnungsnummer`,
+   sonst Hinweis.
+7. **CHF / Schweizer Rechnungen:**
+   - Währung pro Rechnung aus dem Text erkannt (`waehrung.py`: CHF/Fr./
+     SFr. vs. EUR/Euro/€) als Feld `waehrung`, **keine Umrechnung**.
+     Mehrdeutig (beide Hinweise) oder eine andere Währung als EUR/CHF ->
+     Prüfung `waehrung` rot -> Mensch. Kein Hinweis im Text: wie bisher
+     stillschweigend EUR angenommen.
+   - Schweizer Zahlenformat (`1'234.50`, `1’234.50`, `120.–`) wird von
+     `textnorm.parse_amount` erkannt (`ch_number`).
+   - Schweizer MWST-Sätze (aktuell 8,1/2,6/3,8 %, vorher 7,7/2,5/3,7 %)
+     sind über die generische Prozent-Erkennung ohnehin zulässig;
+     `identify.EXPECTED_RATES["CHF"]` führt beide Generationen für die
+     Journal-Spalten.
+   - Schweizer UID/MWST-Nummer (`CHE-123.456.789`, mit gültiger
+     Prüfziffer, `textnorm.che_valid`/`find_ustids`) wird wie eine
+     USt-IdNr. gegen die Bibliothek abgeglichen (`textnorm.norm_ustid`
+     normalisiert Schreibweise auf beiden Seiten).
+   - **Swiss QR-Rechnung** (`swissqr.py`): der QR-Zahlteil wird aus den
+     letzten Seiten gelesen (nur, wenn der Text danach aussieht --
+     "Zahlteil"/"QR-IBAN" -- teures Rendern wird sonst übersprungen),
+     über die optionale Abhängigkeit `zxing-cpp` dekodiert und als SPC
+     geparst (IBAN/QR-IBAN, Zahlungsempfänger, Betrag, Währung,
+     Referenztyp QRR/SCOR + Referenz, Debitor). Referenz-Prüfziffer
+     (QRR/SCOR) eigene Prüfung; IBAN/Betrag gegen Text/Bibliothek
+     geprüft, Abweichung -> Mensch wie beim bestehenden Betrugsschutz.
+     Referenz als Feld `zahlungsreferenz`. Fehlt `zxing-cpp`, degradiert
+     `swissqr.read()` sauber auf `None` -- keine Prüfung, kein Absturz.
+8. **Anhänge nach Beschriftung auswählen** (`belegart.aus_dateiname`/
+   `belegart.ANLAGEN`, `anlagen.py`): Belegart zuerst am Dateinamen, dann
+   am Dokumenttitel der ersten Seite (nur wörtliche Treffer, keine
+   KI-Klassifikation). Nur Beleg-Anhänge (`belegart.BELEGARTEN`, über
+   `RECHNUNG_BELEGARTEN` einschränkbar) werden als eigene Rechnung
+   verarbeitet. Andere beschriftete Anhänge derselben Mail (AGB,
+   Lieferschein, Auftragsbestätigung, Datenblatt, ...) werden NICHT
+   verarbeitet, sondern an jeden Beleg dieser Mail gehängt (Registry
+   `data/anlagen/<beleg-sha>.json`, Dateien darunter) und bei der
+   JobRouter-Übergabe als `attachments` (`{dateiname, art}`) mitgegeben.
+   Kein einziger erkannter Beleg in der Mail -> die ganze Mail an den
+   Menschen; ein einzelner nicht zuzuordnender Anhang (weder Belegart
+   noch bekannte Beschriftung) geht einzeln an den Menschen, der Rest der
+   Mail läuft normal weiter -- nie stillschweigend verworfen.
+
+## 7z. Rechen-Prüfungen, Gegencheck, Selbstlernen von Tabelle/USt-Block (2026-10-05)
+
+9. **Rechen-Prüfungen streng** (`validate.py`):
+   - `positionen-rechnung` (neu): je Position `menge * einzelpreis`
+     (abzüglich erkanntem Rabatt/Nachlass, Prozent oder Betrag) =
+     Zeilensumme, Toleranz nur Rundung (0,01 je Zeile). Zeilen ohne
+     Menge/Einzelpreis (Pauschalen) werden nicht beanstandet.
+   - `positionen-summe`: Positionen müssen zum **Netto** passen (Toleranz
+     0,02 + 0,01 je Position -- nicht mehr 1 % des Betrags); gegen
+     **Brutto** nur, wenn die Rechnung erkennbar Bruttopreise ausweist
+     ("inkl. MwSt"/"Bruttopreise" im Text) -- nicht mehr "netto ODER
+     brutto, was passt".
+   - `steuersatz-positionen` (neu): je Steuersatz Summe der Positionen
+     gegen die Zeile der USt-Aufstellung (netto) und USt-Betrag = netto ×
+     Satz (Rundungstoleranz).
+   - Jede rote Rechen-Prüfung -> Mensch mit konkretem Grund (welche
+     Zeile/welcher Satz, erwartet/gefunden), nie weiter an JobRouter.
+     Fehlende Positionstabelle ist **kein** Fehler (Check bleibt `None`).
+10. **Gegencheck in der Testphase** (`pipeline._gegencheck`): hat die
+    verwendete Vorlage noch weniger als `config.gegencheck_min()`
+    Bestätigungen (`RECHNUNG_GEGENCHECK_MIN`, Standard 5), liest
+    zusätzlich die KI **unabhängig** (kein Vorlagenwert als Hinweis im
+    Prompt) dieselbe Rechnung, gezielt auf Pflichtfelder + von der
+    Vorlage gelernte Felder. Weichen Vorlage und KI bei einem
+    Pflichtfeld, einem Betrag oder der (aus den Positionen aufsummierten)
+    Positionssumme ab, geht die Rechnung mit beiden Werten nebeneinander
+    im Rückstellgrund an den Menschen -- die Korrektur fließt über den
+    bestehenden Stale-/Versions-Mechanismus (§7p) in die Vorlage. Reicht
+    das 120-s-Budget (Summe der bisherigen Stufenzeiten + Sicherheitsmarge)
+    nicht mehr, wird der Gegencheck übersprungen und als Hinweis vermerkt
+    (`res.hinweise`, geht ins Ereignisprotokoll). Aktiv in der Testphase;
+    im Modus `autonom` per Schalter `config.gegencheck_autonom()`
+    (`RECHNUNG_GEGENCHECK_AUTONOM`, Standard aus). Ab `GEGENCHECK_MIN`
+    Bestätigungen fällt er für diese Vorlage weg.
+11. **Positionstabelle und USt-Block selbst lernen** (`learn.py`):
+    - `learn_line_items`: jede bestätigte Position wird im PDF
+      wiedergefunden (Werte -> Textzeile), daraus die Kopfzeile
+      (Label-Wörter oberhalb der ersten Position, positionell den
+      Datenspalten zugeordnet -- die Kopfzeile selbst wird nicht
+      inhaltlich gedeutet), Spalten-x-Bereiche
+      (`template.build_line_item_spec`, Mitte zum Nachbarn) und das
+      Stoppwort (erste Zeile unterhalb der letzten Position).
+    - `learn_taxblock`: jede Zeile `{satz, netto, ust}` wird über
+      `textnorm.parse_tax_summary` je Textzeile wiedergefunden, Anker aus
+      einem Stichwort-Label innerhalb der ERSTEN gefundenen Zeile (eine
+      Steuerzeile trägt ihr Label meist selbst, z.B. "Steuersatz 19 %
+      ..."), Blockgrenzen aus allen gefundenen Zeilen.
+    - Beides wird nur gespeichert, wenn ein Probelauf (`apply_line_items`/
+      `apply_template`) die bestätigten Werte exakt reproduziert -- sonst
+      weggelassen statt geraten. Ein gesichertes Template wird dabei nie
+      stillschweigend umgeschrieben (wie bei einzelnen Feldern, §7i).
+    - **Fortschritt messbar**: jede Korrektur trägt Vorlage (`template_id`)
+      und die Herkunft des Werts davor (`quelle_vorher`) ins
+      Ereignisprotokoll (`eventlog.record_correction`). Der Fehlerbericht
+      (`eventlog.report`) liefert zusätzlich `korrekturen_trend`: je
+      Lieferant Korrekturen pro Rechnung über die Zeit (letzte 10 vs.
+      davor) und die am häufigsten korrigierten Felder. Wird dasselbe
+      Feld einer **gesicherten** Vorlage wiederholt in Folge korrigiert
+      (`Template.field_correction_streak`, Schwelle
+      `config.stale_feld_schwelle()`, Standard 2), wird die Vorlage über
+      denselben Stale-/Versions-Mechanismus wie bei einem Layoutwechsel
+      (§7p) neu gelernt -- gesicherte Vorlagen werden weiterhin nie still
+      umgeschrieben, nur eine neue Version entsteht.
+    - **UI: Programm schlägt vor, Mensch korrigiert** (Training-UI):
+      `/api/invoice` liefert `markierungen` (`learn.markierungen`) --
+      Rahmen je vorausgefülltem Feld (KI/Vorlage/E-Rechnung, ausgewähltes
+      Feld orange) und je Positions-/Steuerzeile; ein Wert, der mehrfach
+      im PDF steht und dessen Label nicht entscheidet, bekommt **keinen**
+      Rahmen statt eines geratenen. Positionstabelle und USt-Aufstellung
+      sind editierbar (Zelle ändern, Zeile hinzufügen/löschen, Spalte
+      umbenennen = neu zuordnen) und werden als Ganzes über
+      `/api/tabelle` als Korrektur gespeichert (Schlüssel `_positionen`
+      bzw. `ust_aufstellung`, Ereignisprotokoll wie jede Korrektur, ↺ nimmt
+      sie zurück). Die Pipeline übernimmt diese Korrektur wie jede andere
+      (Schattenstatistik rechnet weiter mit dem Maschinenstand); beim
+      Bestätigen lernt `learn_line_items`/`learn_taxblock` daraus die
+      Tabellen-Spec bzw. den USt-Block. Programmseitige Vorschläge
+      (Kategorie) werden dabei nicht als Tabellenwert gespeichert.
+      Rechen-Prüfungen (Nr. 9) laufen live (`/api/pruefen`,
+      `validate.rechen_pruefungen`): rot/grün je Positions- und
+      Steuerzeile mit Grund, Summen-Prüfungen als Leiste; eine fehlende
+      Positionstabelle erscheint nur als Hinweis.
+    - Grenze: die Live-Prüfung im UI ist reine Anzeige -- entschieden wird
+      wie bisher in der Pipeline beim Verarbeiten/Bestätigen. Bei
+      E-Rechnungen sind die Positionen nicht editierbar (sie kommen aus dem
+      XML).
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).

@@ -16,5 +16,8 @@
   "iban": "IBAN",
   "ustid": "VATID",
   "steuernummer": "TaxNumber",
-  "adresse": "Address"
+  "adresse": "Address",
+  "belegart": "DocumentType",
+  "bezug_rechnungsnummer": "ReferencedInvoiceNumber",
+  "zahlungsreferenz": "PaymentReference"
 }

@@ -19,7 +19,9 @@ powershell -ExecutionPolicy Bypass -File .\build-windows.ps1 [-MitTesseract] [-M
    Microsoft-Store-Platzhalter zählt nicht), sonst Hinweis bzw. mit
    `-PythonInstallieren` per `winget`.
 2. `.venv` anlegen (eine mitkopierte Linux-venv ohne `Scripts\python.exe`
-   wird ersetzt), `pip install -e ".[dev]" pyinstaller`.
+   wird ersetzt), `pip install -e ".[dev]" pyinstaller`, danach
+   `pip install -e ".[qr]"` (QR-Zahlteil Swiss-QR-Rechnung; schlägt das
+   fehl, nur ein Hinweis).
 3. `pytest -q` – Abbruch bei roten Tests (`-TestsIgnorieren` nur nach
    Rücksprache, `-OhneTests` zum Überspringen).
 4. `python -m PyInstaller --noconfirm --clean rechnung.spec` → `dist\rechnung.exe`,
@@ -46,7 +48,7 @@ Statt einer langen Kommandozeile steht die Build-Beschreibung in
 (neue Module wie `human.py`/`modus.py` und dynamisch geladene wie
 `rechnung.pipeline` im Zeitgrenzen-Arbeitsprozess kommen automatisch mit),
 `uvicorn`-Submodule, `collect_all` für pdfplumber, pdfminer, pypdfium2(_raw),
-webview, clr_loader, pythonnet (nicht installierte werden übersprungen),
+webview, clr_loader, pythonnet, zxingcpp (nicht installierte werden übersprungen),
 `rechnung/web/static` als Daten. UPX aus (weniger Virenscanner-Fehlalarme),
 Konsolenprogramm. Von Hand:
 

@@ -11,6 +11,11 @@ python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 ```
 
+Optional, für Swiss-QR-Rechnungen (QR-Zahlteil lesen, siehe „Postfach“
+unten): `.venv/bin/pip install -e ".[qr]"` (`zxing-cpp`). Fehlt das Paket,
+degradiert `swissqr.py` sauber auf „nicht geprüft“ -- der Rest der
+Rechnung läuft normal weiter.
+
 ## Nutzung
 
 ```
@@ -328,8 +333,15 @@ dahin ist alles Trockenlauf (`RECHNUNG_JOBROUTER_ENABLED` bleibt `0`) und
   Rechnung angelegt werden soll
 - Die JobRouter-Feldnamen für unsere Felder (`rechnungsnummer`,
   `rechnungsdatum`, `netto`, `ust_betrag`, `ust_satz`, `brutto`,
-  `bestellnummer`, `iban`, `ustid`, `steuernummer`, `adresse`, ...) für
-  `jobrouter-mapping.json`
+  `bestellnummer`, `iban`, `ustid`, `steuernummer`, `adresse`,
+  `waehrung` (EUR/CHF, keine Umrechnung), `faelligkeit`, `skonto_prozent`,
+  `skonto_frist`, `belegart` (Rechnung/Gutschrift/Rechnungskorrektur/
+  Storno/Mahnung/Abschlags-/Schlussrechnung), `bezug_rechnungsnummer`
+  (Verweis auf die Ursprungsrechnung bei Gutschrift/Storno/Mahnung),
+  `zahlungsreferenz` (QRR/SCOR aus einer Schweizer QR-Rechnung), ...) für
+  `jobrouter-mapping.json`. `attachments` (andere beschriftete
+  Mail-Anhänge wie AGB/Lieferschein, siehe „Postfach“ unten) kommt als
+  Liste `{dateiname, art}` mit, kein eigenes Mapping-Feld nötig.
 - Der Rückmelde-Weg: wie/wo trägt ein Sachbearbeiter eine Korrektur oder
   Ablehnung in JobRouter ein, und wie liest unser Programm das zurück
   (REST-Endpunkt, Format) -- siehe "Rückmeldung aus JobRouter" oben
@@ -347,7 +359,89 @@ Ereignis an. Rein additiv wie `audit.jsonl`/`shadow.jsonl`.
 `GET /api/fehlerbericht?seit=...` werten das aus: häufigste wiederkehrende
 rote Prüfungen und fehlende/unsichere Felder je Prüfung/Feld und Lieferant,
 sowie häufige Korrekturen je Feld -- jeweils mit Beispiel-Rechnungen,
-absteigend nach Häufigkeit sortiert.
+absteigend nach Häufigkeit sortiert. Zusätzlich `korrekturen_trend`: je
+Lieferant Korrekturen pro Rechnung über die Zeit (letzte 10 vs. davor --
+zeigt, ob eine Vorlage tatsächlich besser wird) und die am häufigsten
+korrigierten Felder. Jede Korrektur trägt dafür Vorlage (`template_id`)
+und Herkunft des Werts davor (`quelle_vorher`, z.B. `template-anchor`/
+`llm`/`missing`) mit.
+
+## Postfach: Abholung, Anhang-Auswahl, CHF/Schweiz (2026-10-05)
+
+Ergänzungen rund um das IONOS-Postfach (`ingest.py`), siehe `SPEC-v1.md`
+§7y für Details je Baustein:
+
+- **Jede Mail führt zu einem Ergebnis** (BODY.PEEK[] statt RFC822): eine
+  Mail ohne passenden Anhang wird nicht mehr still übersprungen, sondern
+  geht mit Grund in den Ordner „Menschliche Bearbeitung“.
+- **ZIP-Anhänge** werden entpackt (Grenzen gegen Zip-Bomben, kein
+  Pfad-Traversal); **passwortgeschützte PDFs/ZIPs** gehen mit Grund an den
+  Menschen.
+- **Anhänge nach Beschriftung auswählen** (`belegart.py`, `anlagen.py`):
+  nur Beleg-Anhänge (Rechnung/Gutschrift/Rechnungskorrektur/Storno/
+  Mahnung/Abschlags-/Schlussrechnung) werden verarbeitet; andere
+  beschriftete Anhänge derselben Mail (AGB, Lieferschein, ...) hängen als
+  Anlage am Beleg (Archiv + JobRouter-Feld `attachments`). Kein erkannter
+  Beleg oder ein nicht zuzuordnender Anhang -> Mensch, nie stillschweigend
+  verworfen.
+- **Sammel-PDFs** werden nur an sicheren Grenzen aufgeteilt (neue
+  Rechnungsnummer + neuer Seitenzähler + neuer Summenblock); im Zweifel
+  bleibt die Datei ganz und geht an den Menschen. **Lange Scans**: OCR
+  liest zuerst Kopf/Fuß (120-s-Budget), der Rest folgt im Hintergrund.
+- **Dubletten**: zusätzlich zu sha256/(Lieferant, Rechnungsnummer) auch
+  normalisierte Rechnungsnummer, gleicher Lieferant+Betrag+Datum, und
+  Mahnungen/Zahlungserinnerungen mit Verweis auf die bekannte Rechnung.
+- **Fälligkeit/Skonto** (`zahlung.py`) und **Belegart/Vorzeichen**
+  (`belegart.py`) werden auch aus reinen PDFs gelesen (Felder `faelligkeit`,
+  `skonto_prozent`, `skonto_frist`, `belegart`, `bezug_rechnungsnummer`).
+- **CHF/Schweizer Rechnungen**: Währung sicher aus dem Text erkennen
+  (`waehrung.py`, Feld `waehrung`, **keine Umrechnung**), Schweizer
+  Zahlenformat (`1'234.50`, `120.–`), Schweizer MWST-Sätze (8,1/2,6/3,8 %
+  und die alten 7,7/2,5/3,7 %), Schweizer UID (`CHE-123.456.789`) wie eine
+  USt-IdNr. gegen die Bibliothek abgeglichen. **Swiss QR-Rechnung**
+  (`swissqr.py`): QR-Zahlteil lesen (optionale Abhängigkeit `zxing-cpp`,
+  degradiert ohne sie sauber auf „nicht geprüft“), IBAN/Betrag gegen Text
+  und Bibliothek geprüft (Abweichung -> Mensch wie beim Betrugsschutz),
+  Zahlungsreferenz als Feld `zahlungsreferenz`. Andere Währungen als
+  EUR/CHF gehen immer an den Menschen.
+
+## Rechen-Prüfungen, Gegencheck, Selbstlernen von Tabelle/USt-Block
+
+- **Rechen-Prüfungen** (`validate.py`): je Position `menge * einzelpreis`
+  (abzüglich erkanntem Rabatt/Nachlass) = Zeilensumme (Prüfung
+  `positionen-rechnung`); Positionssumme gegen **Netto** (Toleranz 0,02 +
+  0,01 je Position), gegen **Brutto** nur mit erkennbarem
+  Bruttopreis-Kennzeichen im Text (`positionen-summe`); je Steuersatz
+  Positionssumme gegen die Zeile der USt-Aufstellung und USt-Betrag =
+  netto × Satz (`steuersatz-positionen`). Jede rote Prüfung -> Mensch mit
+  konkretem Grund; eine fehlende Positionstabelle ist kein Fehler.
+- **Gegencheck in der Testphase** (`pipeline._gegencheck`): solange eine
+  Vorlage unter `GEGENCHECK_MIN` Bestätigungen hat (Standard 5,
+  `RECHNUNG_GEGENCHECK_MIN`), liest zusätzlich die KI unabhängig dieselbe
+  Rechnung; weichen Vorlage und KI bei einem Pflichtfeld, einem Betrag
+  oder der Positionssumme ab, geht die Rechnung mit beiden Werten
+  nebeneinander an den Menschen. Reicht das 120-s-Budget nicht mehr, wird
+  der Gegencheck übersprungen (Hinweis im Ereignisprotokoll). Aktiv in der
+  Testphase; im autonomen Modus per Schalter `RECHNUNG_GEGENCHECK_AUTONOM`
+  (Standard aus).
+- **Positionstabelle und USt-Block selbst lernen** (`learn.py`,
+  `learn_line_items`/`learn_taxblock`): aus bestätigten Positionen bzw.
+  einer bestätigten USt-Aufstellung wird dieselbe Spec abgeleitet wie beim
+  manuellen Anklicken -- nur gespeichert, wenn ein Probelauf die
+  bestätigten Werte exakt reproduziert, sonst weggelassen statt geraten.
+  Wird dasselbe Feld einer **gesicherten** Vorlage wiederholt in Folge
+  korrigiert (Schwelle `RECHNUNG_STALE_FELD_SCHWELLE`, Standard 2), wird
+  die Vorlage über den bestehenden Stale-/Versions-Mechanismus neu
+  gelernt -- gesicherte Vorlagen werden nie still umgeschrieben.
+- **Im UI: vorschlagen statt anklicken**: Vorschläge (KI/Vorlage/
+  E-Rechnung) stehen vorausgefüllt in der Feldtabelle und sind im PDF
+  umrahmt (mehrdeutige Werte bewusst ohne Rahmen). Positionstabelle und
+  USt-Aufstellung sind direkt editierbar (Zelle, Zeile +/−, Spalte
+  umbenennen) und werden mit „Positionen/USt-Aufstellung übernehmen“ als
+  Korrektur gespeichert (`/api/tabelle`); beim Bestätigen lernt das
+  Programm daraus die Tabelle für die nächste Rechnung. Die
+  Rechen-Prüfungen laufen dabei live mit (rot/grün je Zeile,
+  `/api/pruefen`).
 
 ## Härtung (v1.3)
 

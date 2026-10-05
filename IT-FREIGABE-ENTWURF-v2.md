@@ -144,6 +144,7 @@ für die Weitergabe gebauter Programme; nur Build-Werkzeug).
 | fastapi, uvicorn, jinja2, python-multipart | lokale Bedienoberfläche | MIT / BSD-3 / BSD-3 / Apache-2.0 |
 | pywebview | eigenes Programmfenster (Edge WebView2) | BSD-3 |
 | pythonnet | Brücke zu WebView2 unter Windows | MIT |
+| zxing-cpp (optional) | QR-Zahlteil einer Schweizer QR-Rechnung lesen | Apache-2.0 |
 
 **Zusätzliche Programme (separat installiert, optional):**
 

@@ -255,6 +255,11 @@ if (-not $NurPruefen) {
             "Internetverbindung pruefen (pip laedt von pypi.org).`nIm Firmennetz mit Proxy vorher setzen, z.B.:`n  `$env:HTTPS_PROXY = 'http://proxy.firma.local:8080'`nDie genaue Fehlermeldung steht weiter oben bzw. in $LogFile."
     }
     Ok "Abhaengigkeiten installiert"
+    # QR-Zahlteil Schweizer QR-Rechnungen (optional): fehlt das Paket, laeuft
+    # das Programm ohne diese Zusatzpruefung weiter -- kein Abbruch.
+    $rc = Aufruf $VenvPy @("-m", "pip", "install", "-e", ".[qr]")
+    if ($rc -ne 0) { Hinweis "zxing-cpp (QR-Zahlteil) nicht installiert (Code $rc) -- Swiss-QR-Rechnungen werden ohne QR-Pruefung gelesen" }
+    else { Ok "QR-Leser (zxing-cpp) installiert" }
 }
 
 # ---------------------------------------------------------------------------

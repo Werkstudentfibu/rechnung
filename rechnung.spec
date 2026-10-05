@@ -20,10 +20,11 @@ binaries = []
 hiddenimports = collect_submodules("rechnung") + collect_submodules("uvicorn")
 
 # pdfminer: CMap-Daten; pypdfium2(_raw): pdfium.dll; webview/clr_loader/
-# pythonnet: Fenster ueber Edge WebView2. Fehlt ein Paket (z.B. pythonnet
-# ausserhalb von Windows), wird es uebersprungen statt den Build abzubrechen.
+# pythonnet: Fenster ueber Edge WebView2; zxingcpp: QR-Zahlteil (optional).
+# Fehlt ein Paket (z.B. pythonnet ausserhalb von Windows), wird es
+# uebersprungen statt den Build abzubrechen.
 for pkg in ("pdfplumber", "pdfminer", "pypdfium2", "pypdfium2_raw",
-            "webview", "clr_loader", "pythonnet"):
+            "webview", "clr_loader", "pythonnet", "zxingcpp"):
     if importlib.util.find_spec(pkg) is None:
         print(f"[rechnung.spec] Paket {pkg} nicht installiert -- uebersprungen")
         continue

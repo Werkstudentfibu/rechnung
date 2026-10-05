@@ -66,11 +66,17 @@ Fehlermeldung samt „Was tun?“):
 | Python prüfen | Version 3.11 oder neuer vorhanden? |
 | `.venv` anlegen | eigene, abgeschlossene Python-Umgebung im Projektordner |
 | Abhängigkeiten | Programmbibliotheken aus dem Internet laden (pypi.org) |
-| Tests | rund 280 automatische Prüfungen – alle müssen grün sein |
+| Tests | rund 500 automatische Prüfungen – alle müssen grün sein |
 | `rechnung.exe` bauen | eine einzelne Programmdatei, danach Starttest |
 | Programmordner | `dist\Rechnung` mit Programm, Startdateien, Vorlage `rechnung.env.example` |
 | Tesseract (optional) | Installation, deutsches Sprachpaket, Testbild erkennen |
 | Ollama (optional) | Installation, kleines Modell `qwen2.5:1.5b-instruct` (~1 GB) laden, Testanfrage mit Zeitmessung |
+
+Zusätzlich (kein eigener Schalter, direkt nach den Abhängigkeiten):
+`zxing-cpp` zum Lesen des QR-Zahlteils einer Schweizer QR-Rechnung.
+Schlägt diese Installation fehl, erscheint nur ein Hinweis -- das Programm
+liest Swiss-QR-Rechnungen dann ohne diese zusätzliche Prüfung weiter, kein
+Abbruch.
 
 Dauer: 10–30 Minuten, je nach Internet und Laptop.
 
