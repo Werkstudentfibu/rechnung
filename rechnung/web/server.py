@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import io
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -30,13 +31,15 @@ from ..guard import Guard
 from ..ocr import IMAGE_SUFFIXES
 from ..identify import FIXED_FIELD_TYPES, Supplier, identify, supplier_from_doc
 from ..pipeline import (CONF_MIN, EXTRACT_EINVOICE, EXTRACT_TEMPLATE, MASTER_FIELDS,
-                        STATUS_LABELS, dispatch, invoice_files, journal_rows,
+                        POSITIONEN_KEY, STATUS_LABELS, dispatch, invoice_files, journal_rows,
                         journal_totals, load_document, origin)
 from ..store import Store
 from ..suggest import similar_suppliers
-from ..template import (STANDARD_FIELDS, Anchor, Column, LineItemSpec, Template,
-                        apply_line_items, apply_template, build_field_spec,
+from ..template import (STANDARD_FIELDS, Anchor, Column, FieldResult, LineItemSpec,
+                        Template, apply_line_items, apply_template, build_field_spec,
                         build_line_item_spec)
+from ..textnorm import parse_amount
+from ..validate import rechen_pruefungen
 
 RENDER_SCALE = 2.0
 _STATIC = Path(__file__).parent / "static"
@@ -112,6 +115,26 @@ class CorrectionPost(BaseModel):
     quelle_vorher: str | None = None
 
 
+class TabellePost(BaseModel):
+    """Korrigierte Positionstabelle bzw. USt-Aufstellung aus dem UI
+    (Postfach-Baustein 11b): Zelle geaendert, Zeile hinzugefuegt/geloescht,
+    Spalte neu zugeordnet -- es kommt immer die ganze Tabelle."""
+    file: str
+    art: str                            # "positionen" | "ust"
+    rows: list[dict]
+    template_id: str | None = None
+    quelle_vorher: str | None = None
+
+
+class PruefenPost(BaseModel):
+    """Aktueller (ggf. noch ungespeicherter) Stand im UI fuer die Live-
+    Anzeige der Rechen-Pruefungen."""
+    file: str | None = None
+    fields: dict[str, object] = {}
+    line_items: list[dict] = []
+    ust_aufstellung: list[dict] = []
+
+
 class CategoryPost(BaseModel):
     text: str
     kategorie: str
@@ -158,6 +181,46 @@ class AddressPost(BaseModel):
 def _sha(path: Path) -> str:
     """Datei-Hash wie pdf.load().sha256 -- funktioniert auch fuer XML."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# Zelle "1.234,50"/"300,00" -> Betrag; ganze Zahlen ("2", "19") bleiben Text
+# wie bei einer gelernten "number"-Spalte (apply_line_items).
+_BETRAG_RE = re.compile(r"[-+]?[\d.,'’ ]*\d[.,]\d{1,2}")
+
+
+def _zelle(v):
+    if isinstance(v, str):
+        v = v.strip()
+        if not v:
+            return None
+        if _BETRAG_RE.fullmatch(v):
+            amt = parse_amount(v)
+            return amt if amt is not None else v
+    return v
+
+
+def _ust_zeile(r: dict) -> dict | None:
+    out = {}
+    for k in ("satz", "netto", "ust"):
+        v = r.get(k)
+        if isinstance(v, str):
+            v = parse_amount(v) if v.strip() else None
+        out[k] = None if v is None else float(v)
+    return out if any(v is not None for v in out.values()) else None
+
+
+def _live_fields(values: dict) -> dict[str, FieldResult]:
+    """UI-Werte -> FieldResult wie in der Pipeline, nur fuer die Rechen-
+    Pruefungen (Betraege als Zahl)."""
+    out = {}
+    for name, v in values.items():
+        if v is None or v == "":
+            continue
+        if STANDARD_FIELDS.get(name, ("text",))[0] == "amount" and isinstance(v, str):
+            amt = parse_amount(v)
+            v = amt if amt is not None else v
+        out[name] = FieldResult(name, v, str(v), 1.0, "manual")
+    return out
 
 
 def _render_png(path: Path, page_index: int) -> bytes:
@@ -347,8 +410,13 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         # Manuelle Korrekturen gewinnen immer -- auch ohne Template: dann sind
         # sie die Werte, die der Mensch bestaetigt und aus denen Stufe 1 die
         # Vorlage lernt (learn.py).
-        for fname, fval in store.corrections(doc.sha256).items():
+        corr = store.corrections(doc.sha256)
+        for fname, fval in corr.items():
+            if fname.startswith("_"):
+                continue
             current[fname] = {"value": fval, "raw": str(fval), "confidence": 1.0, "source": "manual"}
+        if isinstance(corr.get(POSITIONEN_KEY), list):
+            line_items = corr[POSITIONEN_KEY]
 
         if tid is None:
             # Ohne Template genau das zeigen, was beim Bestaetigen uebernommen
@@ -387,9 +455,19 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                     "templates": [{"id": t.id, "variant": t.variant, "secured": t.secured}
                                   for t in s_tpls],
                 })
+        tax_rows = (current.get("ust_aufstellung") or {}).get("value")
+        tax_rows = tax_rows if isinstance(tax_rows, list) else []
         return JSONResponse({
             "file": path.name,
             "pages": pages,
+            # Vorschlaege im PDF umrahmen + Rechen-Pruefungen je Zeile (11b)
+            "markierungen": learn.markierungen(doc, current, line_items, tax_rows),
+            "positionen_korrigiert": isinstance(corr.get(POSITIONEN_KEY), list),
+            "pruefung_live": rechen_pruefungen(
+                _live_fields({k: v.get("value") for k, v in current.items()
+                              if not isinstance(v.get("value"), list)}
+                             | ({"ust_aufstellung": tax_rows} if tax_rows else {})),
+                line_items, doc.text),
             "match": ({"id": match[0].id, "name": match[0].name, "score": match[1]}
                       if match else None),
             "identifiers": suggestion,
@@ -424,6 +502,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         reinem XML (XRechnung) gibt es keine Seiten."""
         res = _process(path)
         pages = []
+        doc = None
         if readable and path.suffix.lower() == ".pdf":
             doc = pdfmod.load(path)
             pages = [{"index": pg.index, "width": pg.width, "height": pg.height,
@@ -443,9 +522,18 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "creditor_id": inv.get("verkaeufer_steuernummer", ""),
             "currency": inv.get("waehrung") or "EUR",
         }
+        current = {k: {"value": v.value, "raw": v.raw, "confidence": v.confidence,
+                       "source": v.source, "origin": origin(v.source)}
+                   for k, v in res.fields.items()}
+        tb = res.fields.get("ust_aufstellung")
+        tax_rows = tb.value if tb is not None and isinstance(tb.value, list) else []
         return {
             "file": path.name,
             "extraction": EXTRACT_EINVOICE if readable else res.extraction,
+            # ZUGFeRD: auch die XML-Werte im Seitenbild umrahmen (11b)
+            "markierungen": (learn.markierungen(doc, current, res.line_items, tax_rows)
+                             if doc is not None else None),
+            "pruefung_live": rechen_pruefungen(res.fields, res.line_items),
             "einvoice": inv,
             "status": res.status,
             "status_label": STATUS_LABELS.get(res.status, res.status),
@@ -467,9 +555,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "addresses": [a.to_dict() for a in store.addresses()],
             "detected_address": None,
             "suggested_terms": None,
-            "current": {k: {"value": v.value, "raw": v.raw, "confidence": v.confidence,
-                            "source": v.source, "origin": origin(v.source)}
-                        for k, v in res.fields.items()},
+            "current": current,
             "similar_suppliers": [],
         }
 
@@ -713,6 +799,60 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                                    file=path.name, template_id=body.template_id,
                                    quelle_vorher=body.quelle_vorher)
         return JSONResponse({"ok": True})
+
+    @app.post("/api/tabelle")
+    def save_tabelle_ep(body: TabellePost) -> JSONResponse:
+        """Positionstabelle bzw. USt-Aufstellung als Ganzes korrigieren (11b).
+        Gespeichert wie jede Korrektur dieser Rechnung (sha256) -- beim
+        Bestaetigen lernt learn.py daraus Tabellen-Spec bzw. USt-Block."""
+        from ..config import operator
+        if body.art not in ("positionen", "ust"):
+            raise HTTPException(400, "art muss 'positionen' oder 'ust' sein")
+        path = _resolve(body.file)
+        sha = _sha(path)
+        op = operator()
+        if body.art == "positionen":
+            key = POSITIONEN_KEY
+            rows = []
+            for r in body.rows:
+                row = {str(k).strip(): _zelle(v) for k, v in r.items()
+                       if str(k).strip() and not str(k).startswith("_")}
+                if any(v is not None for v in row.values()):
+                    rows.append(row)
+        else:
+            key = "ust_aufstellung"
+            rows = [z for z in (_ust_zeile(r) for r in body.rows) if z is not None]
+        alt = store.corrections(sha).get(key)
+        store.save_correction(sha, key, rows, op)
+        sup_id = sup_name = None
+        try:
+            match = identify(_load(path), store.suppliers(), index=store.supplier_index())
+            if match:
+                sup_id, sup_name = match[0].id, match[0].name
+        except HTTPException:
+            pass
+        eventlog.record_correction(store, sha, key, alt, rows, op,
+                                   supplier_id=sup_id, supplier_name=sup_name,
+                                   file=path.name, template_id=body.template_id,
+                                   quelle_vorher=body.quelle_vorher)
+        return JSONResponse({"ok": True, "rows": rows})
+
+    @app.post("/api/pruefen")
+    def pruefen_ep(body: PruefenPost) -> JSONResponse:
+        """Rechen-Pruefungen (Baustein 9) live auf dem aktuellen UI-Stand,
+        rot/gruen je Zeile -- reine Anzeige, speichert nichts."""
+        text = ""
+        if body.file:
+            try:
+                text = _load(_resolve(body.file)).text
+            except HTTPException:
+                text = ""
+        fields = _live_fields({k: v for k, v in body.fields.items() if not isinstance(v, list)})
+        tax_rows = [z for z in (_ust_zeile(r) for r in body.ust_aufstellung) if z is not None]
+        if tax_rows:
+            fields["ust_aufstellung"] = FieldResult("ust_aufstellung", tax_rows, "", 1.0, "manual")
+        items = [{k: _zelle(v) for k, v in r.items()} for r in body.line_items]
+        return JSONResponse(rechen_pruefungen(fields, items, text))
 
     @app.delete("/api/correction")
     def delete_correction_ep(file: str, field: str) -> JSONResponse:

@@ -65,6 +65,23 @@
   .box h4 { margin: 0 0 6px; }
   td.abw { background: #fff1b8; outline: 1px solid #faad14; }
   td.aus, th.aus { opacity: .45; text-decoration: line-through; }
+  /* Vorschlaege im PDF (Baustein 11b): Rahmen je Feld, Tabellenzeilen hervorgehoben */
+  .mk { position: absolute; border: 2px solid #2f6fd0; border-radius: 2px; pointer-events: none; }
+  .mk span { position: absolute; top: -15px; left: -2px; font-size: 10px; line-height: 13px;
+             background: #2f6fd0; color: #fff; padding: 0 3px; border-radius: 2px; white-space: nowrap; }
+  .mk.active { border-color: #fa8c16; box-shadow: 0 0 0 3px rgba(250,140,22,.35); }
+  .mk.active span { background: #fa8c16; }
+  .mk.row { border-width: 1px; background: rgba(70,130,220,.08); }
+  .mk.row.ok { border-color: #389e0d; background: rgba(56,158,13,.08); }
+  .mk.row.bad { border-color: #cf1322; background: rgba(207,19,34,.12); }
+  .mk.row span { display: none; }
+  tr.ok td.st { color: #389e0d; } tr.bad td { background: #fff1f0; } tr.bad td.st { color: #cf1322; }
+  td.st { white-space: nowrap; font-size: 12px; }
+  .edit td input { width: 100%; border: 1px solid transparent; background: transparent; font: inherit; padding: 1px 3px; }
+  .edit td input:focus { border-color: #2f6fd0; background: #fff; outline: none; }
+  .edit th input { width: 100%; font-weight: 600; border: 1px dashed #bbb; background: #fff; padding: 1px 3px; }
+  .chk { display: inline-block; margin: 2px 6px 2px 0; font-size: 12px; }
+  .chk.ok { color: #389e0d; } .chk.bad { color: #cf1322; } .chk.na { color: #888; }
   .li-col { display: inline-block; background: #eef4fb; border: 1px solid #cfe0f4; border-radius: 4px; padding: 2px 6px; margin: 2px; }
 </style>
 </head>
@@ -220,7 +237,15 @@ function applyInvoiceData(d) {
     addresses: d.addresses || [], defs, selField: null, assign: {},
     current: d.current || {}, supplier: d.supplier, identifiers: d.identifiers || {},
     match: d.match,
-    lineItems: d.line_items || [], taxRows: null,
+    lineItems: (d.line_items || []).map(it => ({ ...it })),
+    taxRows: ((d.current || {}).ust_aufstellung && Array.isArray(d.current.ust_aufstellung.value))
+      ? d.current.ust_aufstellung.value.map(r => ({ ...r })) : [],
+    markierungen: d.markierungen || null,
+    pruefung: d.pruefung_live || null,
+    positionenKorrigiert: !!d.positionen_korrigiert,
+    // E-Rechnung: Positionen kommen aus dem XML, dort gibt es nichts zu korrigieren
+    positionenFest: d.extraction === 'einvoice',
+    tabDirty: { positionen: false, ust: false },
     similar: d.similar_suppliers || [],
     li: { active: false, page: 0, columns: [], stop_words: [], selCol: null },
   };
@@ -354,6 +379,7 @@ function renderInvoice(d) {
   if (STATE.li.active) fbox.appendChild(renderLiPanel());
   w.appendChild(fbox);
 
+  w.appendChild(renderPruefBox());
   w.appendChild(renderLiPreviewBox(STATE.lineItems));
   w.appendChild(renderTaxPreview(d));
 
@@ -374,7 +400,46 @@ function renderInvoice(d) {
     }
     w.appendChild(wrap);
   }
+  paintMarkierungen();
   paint();
+}
+
+/* -------- Vorschlaege im PDF umrahmen (Baustein 11b) -------- */
+// Rahmen je vorausgefuelltem Feld (KI/Vorlage/E-Rechnung) und je Tabellenzeile,
+// die Zeilen rot/gruen nach der Rechen-Pruefung. Wo der Server einen Wert nicht
+// eindeutig im PDF wiederfindet, gibt es bewusst keinen Rahmen.
+function paintMarkierungen() {
+  document.querySelectorAll('.mk').forEach(e => e.remove());
+  const m = STATE.markierungen; if (!m) return;
+  const wraps = document.querySelectorAll('.pdfwrap');
+  const add = (box, cls, label, title) => {
+    const pg = STATE.pages[box.page]; const wrap = wraps[box.page];
+    if (!pg || !wrap) return null;
+    const el = document.createElement('div'); el.className = 'mk ' + cls;
+    el.style.left = (box.x0 * pg.scale - 2) + 'px';
+    el.style.top = (box.top * pg.scale - 2) + 'px';
+    el.style.width = ((box.x1 - box.x0) * pg.scale + 4) + 'px';
+    el.style.height = ((box.bottom - box.top) * pg.scale + 4) + 'px';
+    if (label) el.innerHTML = `<span>${esc(label)}</span>`;
+    if (title) el.title = title;
+    wrap.appendChild(el);
+    return el;
+  };
+  for (const [f, box] of Object.entries(m.felder || {})) {
+    const el = add(box, '', f);
+    if (el) { el.dataset.field = f; if (STATE.selField === f) el.classList.add('active'); }
+  }
+  const pr = STATE.pruefung || {};
+  (m.positionen || []).forEach((box, i) => {
+    if (!box) return;
+    const st = (pr.positionen || [])[i] || {};
+    add(box, 'row ' + (st.ok === false ? 'bad' : st.ok ? 'ok' : ''), '', st.detail || `Position ${i + 1}`);
+  });
+  (m.ust || []).forEach((box, i) => {
+    if (!box) return;
+    const st = (pr.ust || [])[i] || {};
+    add(box, 'row ' + (st.ok === false ? 'bad' : st.ok ? 'ok' : ''), '', st.detail || 'USt-Zeile');
+  });
 }
 
 function renderNewSupplierBox(ids) {
@@ -454,6 +519,10 @@ function selectField(name, tr) {
   STATE.selField = name;
   document.querySelectorAll('#fields tr').forEach(x => x.classList.remove('sel'));
   tr.classList.add('sel');
+  document.querySelectorAll('.mk[data-field]').forEach(e =>
+    e.classList.toggle('active', e.dataset.field === name));
+  const mk = document.querySelector(`.mk[data-field="${CSS.escape(name)}"]`);
+  if (mk) mk.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
 function markInPdf(name) {
@@ -482,6 +551,7 @@ function renderCurrent() {
               identifiers: { ustids: [] }, pages: STATE.pages, supplier: STATE.supplier,
               current: STATE.current, line_items: STATE.lineItems };
   renderInvoice(d);
+  refreshPruefung();
 }
 
 /* -------- Positionstabelle -------- */
@@ -526,22 +596,50 @@ function wordText(page, i) {
   const pg = STATE.pages[page]; const wd = pg && pg.words[i]; return wd ? wd.text : '?';
 }
 
+// Spalten, die nicht aus dem PDF gelesen sind, sondern Vorschlaege des
+// Programms (Kategorie) -- werden nicht als Tabellen-Korrektur gespeichert
+// (sonst koennte learn.py die Tabelle nie im PDF wiederfinden).
+const LI_NICHT_SPEICHERN = ['kategorie', 'kategorie_konfidenz'];
+function liCols(items) {
+  const cols = [];
+  for (const it of items) for (const c of Object.keys(it))
+    if (!c.startsWith('_') && c !== 'kategorie_konfidenz' && !cols.includes(c)) cols.push(c);
+  return cols;
+}
+function stCell(st) {
+  if (!st || st.ok == null) return `<td class="st" title="${esc(st ? st.detail : '')}">–</td>`;
+  return `<td class="st" title="${esc(st.detail)}">${st.ok ? '✓' : '✗ ' + esc(st.detail)}</td>`;
+}
+function rowCls(st) { return st && st.ok === false ? 'bad' : st && st.ok ? 'ok' : ''; }
+
 function renderLiPreviewBox(items) {
   // Immer sichtbar (nicht erst nach dem Speichern) -- Ueberblick "was wurde
-  // bestellt" soll jederzeit da sein, auch waehrend die Spalten noch
-  // angelernt werden.
+  // bestellt" soll jederzeit da sein. Editierbar (Baustein 11b): Zelle
+  // aendern, Zeile hinzufuegen/loeschen, Spalte umbenennen (= neu zuordnen);
+  // "Positionen übernehmen" speichert die Korrektur, beim Bestaetigen lernt
+  // das Programm daraus die Tabelle selbst.
   const box = document.createElement('div'); box.className = 'box'; box.id = 'li-preview-box';
+  const cols = liCols(items || []);
+  const pr = (STATE.pruefung || {}).positionen || [];
+  const bar = STATE.positionenFest ? '' : `<div style="margin-top:6px">
+      <button class="ghost" onclick="liAddRow()">+ Zeile</button>
+      <button class="ghost" onclick="liAddCol()">+ Spalte</button>
+      <button onclick="saveTabelle('positionen')" ${STATE.tabDirty.positionen ? '' : 'class="ghost"'}>Positionen übernehmen</button>
+      ${STATE.positionenKorrigiert ? `<button class="danger" title="Korrektur zurücknehmen" onclick="clearCorrection('_positionen')">↺</button>` : ''}
+      <span class="hint">${STATE.tabDirty.positionen ? 'geändert – noch nicht übernommen' : ''}</span>
+    </div>`;
   if (!items || !items.length) {
     box.innerHTML = `<h4>Positionen</h4>
-      <div class="hint">Noch keine Position erkannt – Spalten der Positionstabelle anlegen und
-        deren Kopfzelle anklicken, die Übersicht aktualisiert sich dann automatisch.</div>`;
+      <div class="hint">Noch keine Position erkannt – Zeilen hier eintragen (das Programm findet
+        die Spalten beim Bestätigen selbst im PDF) oder Spalten der Positionstabelle anlegen und
+        deren Kopfzelle anklicken.</div>` + bar;
     return box;
   }
-  // interne Felder (Unterstrich) und die Konfidenz-Begleitspalte separat behandeln
-  const cols = Object.keys(items[0]).filter(c => !c.startsWith('_') && c !== 'kategorie_konfidenz');
-  box.innerHTML = `<h4>Positionen (${items.length})</h4>
-    <table><tr>${cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr>
-    ${items.map(it => `<tr>${cols.map(c => {
+  box.innerHTML = `<h4>Positionen (${items.length})${STATE.positionenKorrigiert ? ' <span class="badge manual">manual</span>' : ''}</h4>
+    <table class="edit"><tr>${cols.map((c, ci) => c === 'kategorie' ? `<th>kategorie</th>` :
+        `<th><input value="${esc(c)}" title="Spaltenname – ändern ordnet die Spalte neu zu"
+               onchange="liRenameCol(${ci}, this.value)"></th>`).join('')}<th>Prüfung</th><th></th></tr>
+    ${items.map((it, ri) => `<tr class="${rowCls(pr[ri])}">${cols.map(c => {
         if (c === 'kategorie') {
           const conf = it.kategorie_konfidenz;
           return `<td>
@@ -550,10 +648,41 @@ function renderLiPreviewBox(items) {
             ${conf != null ? `<span class="hint">(${conf})</span>` : ''}
           </td>`;
         }
-        return `<td class="${typeof it[c] === 'number' ? 'num' : ''}">${esc(nz(it[c]))}</td>`;
-      }).join('')}</tr>`).join('')}
-    </table>`;
+        return `<td class="${typeof it[c] === 'number' ? 'num' : ''}"><input value="${esc(nz(it[c]))}"
+                  onchange="liSetCell(${ri}, '${esc(c)}', this.value)"></td>`;
+      }).join('')}${stCell(pr[ri])}
+      <td><button class="danger" style="padding:0 4px" title="Zeile löschen" onclick="liDelRow(${ri})">×</button></td></tr>`).join('')}
+    </table>` + bar;
   return box;
+}
+function liRedraw() {
+  const old = $('#li-preview-box');
+  if (old) old.replaceWith(renderLiPreviewBox(STATE.lineItems));
+}
+function liTouched() { STATE.tabDirty.positionen = true; liRedraw(); refreshPruefung(); }
+function liSetCell(ri, col, value) { STATE.lineItems[ri][col] = value; liTouched(); }
+function liDelRow(ri) { STATE.lineItems.splice(ri, 1); liTouched(); }
+function liAddRow() {
+  const cols = liCols(STATE.lineItems).filter(c => !LI_NICHT_SPEICHERN.includes(c));
+  const row = {}; (cols.length ? cols : ['bezeichnung', 'menge', 'einzelpreis', 'gesamt']).forEach(c => row[c] = '');
+  STATE.lineItems.push(row); liTouched();
+}
+function liAddCol() {
+  const name = (prompt('Name der neuen Spalte (z.B. menge, einzelpreis, gesamt, mwst, rabatt):') || '')
+    .trim().toLowerCase().replace(/[^a-z0-9_%]+/g, '_');
+  if (!name) return;
+  if (!STATE.lineItems.length) STATE.lineItems.push({});
+  STATE.lineItems.forEach(it => { if (!(name in it)) it[name] = ''; });
+  liTouched();
+}
+function liRenameCol(ci, neu) {
+  const alt = liCols(STATE.lineItems)[ci];
+  neu = (neu || '').trim().toLowerCase().replace(/[^a-z0-9_%]+/g, '_');
+  if (!neu || neu === alt) return;
+  // Schluessel-Reihenfolge erhalten, nur den Namen tauschen
+  STATE.lineItems = STATE.lineItems.map(it =>
+    Object.fromEntries(Object.entries(it).map(([k, v]) => [k === alt ? neu : k, v])));
+  liTouched();
 }
 
 async function refreshLiPreview() {
@@ -574,8 +703,8 @@ async function refreshLiPreview() {
     items = r.items || [];
   }
   STATE.lineItems = items;
-  const old = $('#li-preview-box');
-  if (old) old.replaceWith(renderLiPreviewBox(items));
+  liRedraw();
+  refreshPruefung();
 }
 
 async function saveCategoryCorrection(text, kategorie) {
@@ -587,17 +716,91 @@ async function saveCategoryCorrection(text, kategorie) {
   $('#msg').textContent = `Kategorie „${kategorie}“ gelernt für: ${text.slice(0, 50)}`;
 }
 function renderTaxPreview(d) {
-  const box = document.createElement('div'); box.className = 'box';
-  const rows = (STATE.current.ust_aufstellung && STATE.current.ust_aufstellung.value) || null;
-  box.innerHTML = `<h4>USt-Aufstellung</h4>
-    <div class="hint">Feld <b>ust_aufstellung</b> (Typ taxblock) auf den Steuerblock der Rechnung
-      markieren – dann werden hier Netto/USt je Satz gezogen und gegen die Kopfsummen geprüft.</div>`;
-  if (rows && rows.length) {
-    box.innerHTML += `<table><tr><th>Satz</th><th class="num">Netto</th><th class="num">USt</th></tr>
-      ${rows.map(r => `<tr><td>${esc(nz(r.satz))}%</td>
-        <td class="num">${esc(nz(r.netto))}</td><td class="num">${esc(nz(r.ust))}</td></tr>`).join('')}</table>`;
-  }
+  // USt-Aufstellung wie die Positionen editierbar (Baustein 11b); daraus
+  // lernt das Programm beim Bestaetigen den Steuerblock selbst.
+  const box = document.createElement('div'); box.className = 'box'; box.id = 'tax-preview-box';
+  const rows = STATE.taxRows || [];
+  const pr = (STATE.pruefung || {}).ust || [];
+  const cur = STATE.current.ust_aufstellung || {};
+  box.innerHTML = `<h4>USt-Aufstellung${cur.source === 'manual' ? ' <span class="badge manual">manual</span>' : ''}</h4>
+    <div class="hint">Netto/USt je Satz – wird gegen die Kopfsummen und die Positionen gerechnet.
+      Fehlt etwas, Zeile hier eintragen; beim Bestätigen sucht das Programm den Block selbst im PDF.</div>
+    ${rows.length ? `<table class="edit"><tr><th>Satz %</th><th class="num">Netto</th><th class="num">USt</th><th>Prüfung</th><th></th></tr>
+      ${rows.map((r, ri) => `<tr class="${rowCls(pr[ri])}">
+        ${['satz', 'netto', 'ust'].map(k => `<td class="num"><input value="${esc(nz(r[k]))}"
+            onchange="taxSetCell(${ri}, '${k}', this.value)"></td>`).join('')}
+        ${stCell(pr[ri])}
+        <td><button class="danger" style="padding:0 4px" title="Zeile löschen" onclick="taxDelRow(${ri})">×</button></td>
+      </tr>`).join('')}</table>` : ''}
+    <div style="margin-top:6px">
+      <button class="ghost" onclick="taxAddRow()">+ Zeile</button>
+      <button onclick="saveTabelle('ust')" ${STATE.tabDirty.ust ? '' : 'class="ghost"'}>USt-Aufstellung übernehmen</button>
+      ${cur.source === 'manual' ? `<button class="danger" title="Korrektur zurücknehmen" onclick="clearCorrection('ust_aufstellung')">↺</button>` : ''}
+      <span class="hint">${STATE.tabDirty.ust ? 'geändert – noch nicht übernommen' : ''}</span>
+    </div>`;
   return box;
+}
+function taxRedraw() {
+  const old = $('#tax-preview-box');
+  if (old) old.replaceWith(renderTaxPreview());
+}
+function taxTouched() { STATE.tabDirty.ust = true; taxRedraw(); refreshPruefung(); }
+function taxSetCell(ri, k, v) { STATE.taxRows[ri][k] = v; taxTouched(); }
+function taxDelRow(ri) { STATE.taxRows.splice(ri, 1); taxTouched(); }
+function taxAddRow() { STATE.taxRows.push({ satz: '', netto: '', ust: '' }); taxTouched(); }
+
+async function saveTabelle(art) {
+  const rows = art === 'ust' ? STATE.taxRows
+    : STATE.lineItems.map(it => Object.fromEntries(Object.entries(it)
+        .filter(([k]) => !k.startsWith('_') && !LI_NICHT_SPEICHERN.includes(k))));
+  const quelleVorher = art === 'ust'
+    ? ((STATE.current.ust_aufstellung || {}).source || null)
+    : (STATE.positionenKorrigiert ? 'manual' : (STATE.tid ? 'template' : 'llm'));
+  const r = await api('/api/tabelle', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, art, rows, template_id: STATE.tid || null,
+                          quelle_vorher: quelleVorher }),
+  });
+  if (!r.ok) { $('#msg').textContent = 'Fehler beim Speichern der Tabelle'; return; }
+  // Neu laden: Markierungen/Pruefungen/Status kommen frisch vom Server
+  const d = await api('/api/invoice?file=' + encodeURIComponent(STATE.file));
+  applyInvoiceData(d);
+  $('#msg').textContent = `${art === 'ust' ? 'USt-Aufstellung' : 'Positionen'} übernommen (${r.rows.length} Zeilen) – ` +
+    'beim Bestätigen lernt das Programm daraus die Tabelle für die nächste Rechnung.';
+}
+
+/* -------- Rechen-Pruefungen live (Baustein 9, Anzeige 11b) -------- */
+let _pruefTimer = null;
+function refreshPruefung() {
+  clearTimeout(_pruefTimer);
+  _pruefTimer = setTimeout(async () => {
+    if (!STATE) return;
+    const fields = {};
+    for (const [k, v] of Object.entries(STATE.current || {}))
+      if (v && v.value != null && typeof v.value !== 'object') fields[k] = v.value;
+    const items = STATE.lineItems.map(it => Object.fromEntries(Object.entries(it)
+      .filter(([k]) => !k.startsWith('_') && !LI_NICHT_SPEICHERN.includes(k))));
+    STATE.pruefung = await api('/api/pruefen', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ file: STATE.file, fields, line_items: items,
+                            ust_aufstellung: STATE.taxRows }),
+    });
+    liRedraw(); taxRedraw(); paintPruefBox(); paintMarkierungen();
+  }, 250);
+}
+function renderPruefBox() {
+  const box = document.createElement('div'); box.className = 'box'; box.id = 'pruef-box';
+  const checks = (STATE.pruefung || {}).checks || [];
+  const hatPos = (STATE.lineItems || []).length > 0;
+  box.innerHTML = `<h4>Rechen-Prüfungen</h4>
+    ${checks.map(c => `<span class="chk ${c.ok === true ? 'ok' : c.ok === false ? 'bad' : 'na'}"
+        title="${esc(c.detail)}">${c.ok === true ? '✓' : c.ok === false ? '✗' : '–'} ${esc(c.name)}${c.ok === false ? ': ' + esc(c.detail) : ''}</span>`).join('')}
+    ${hatPos ? '' : '<div class="hint">Hinweis: keine Positionstabelle erkannt – kein Fehler, die Positions-Prüfungen entfallen.</div>'}`;
+  return box;
+}
+function paintPruefBox() {
+  const old = $('#pruef-box');
+  if (old) old.replaceWith(renderPruefBox());
 }
 
 function clickWord(page, i, ev) {

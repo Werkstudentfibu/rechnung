@@ -188,6 +188,27 @@ def check_line_items_total(fields: dict, line_items: list[dict] | None,
                  f"Σ {total:.2f} vs {ref:.2f}" if ref is not None else f"Σ {total:.2f}")
 
 
+def line_item_row(it: dict, i: int = 1, tol: float = 0.01) -> tuple[bool | None, str]:
+    """Rechen-Pruefung EINER Position (menge * einzelpreis abzueglich Rabatt =
+    Zeilensumme) -> (ok, Grund). ``None``: Pauschale ohne Menge/Einzelpreis,
+    nicht pruefbar. Auch fuer die Live-Anzeige je Zeile im UI (Baustein 11b)."""
+    menge, preis = _first(it, _QTY_KEYS), _first(it, _PRICE_KEYS)
+    zeile = _first(it, _TOTAL_KEYS)
+    if menge is None or preis is None or zeile is None:
+        return None, "keine Menge/Einzelpreis/Zeilensumme"
+    erwartet = menge * preis
+    pct = _first(it, _DISCOUNT_PCT_KEYS)
+    amt = _first(it, _DISCOUNT_AMT_KEYS)
+    if pct is not None:
+        erwartet *= 1 - pct / 100
+    elif amt is not None:
+        erwartet -= amt
+    if abs(round(erwartet, 2) - zeile) > tol:
+        bez = it.get("beschreibung") or it.get("bezeichnung") or f"Position {i}"
+        return False, f"{bez}: erwartet {erwartet:.2f}, gefunden {zeile:.2f}"
+    return True, "ok"
+
+
 def check_line_item_math(line_items: list[dict] | None, tol: float = 0.01) -> Check:
     """Je Position: menge * einzelpreis (abzueglich Rabatt/Nachlass, falls
     erkannt) = Zeilensumme. Zeilen ohne Menge/Einzelpreis (Pauschalen)
@@ -197,24 +218,54 @@ def check_line_item_math(line_items: list[dict] | None, tol: float = 0.01) -> Ch
     problems = []
     seen = False
     for i, it in enumerate(line_items, 1):
-        menge, preis = _first(it, _QTY_KEYS), _first(it, _PRICE_KEYS)
-        zeile = _first(it, _TOTAL_KEYS)
-        if menge is None or preis is None or zeile is None:
+        ok, grund = line_item_row(it, i, tol)
+        if ok is None:
             continue
         seen = True
-        erwartet = menge * preis
-        pct = _first(it, _DISCOUNT_PCT_KEYS)
-        amt = _first(it, _DISCOUNT_AMT_KEYS)
-        if pct is not None:
-            erwartet *= 1 - pct / 100
-        elif amt is not None:
-            erwartet -= amt
-        if abs(round(erwartet, 2) - zeile) > tol:
-            bez = it.get("beschreibung") or it.get("bezeichnung") or f"Position {i}"
-            problems.append(f"{bez}: erwartet {erwartet:.2f}, gefunden {zeile:.2f}")
+        if not ok:
+            problems.append(grund)
     if not seen:
         return Check("positionen-rechnung", None, "keine Zeile mit Menge+Einzelpreis")
     return Check("positionen-rechnung", not problems, "; ".join(problems) or "ok")
+
+
+def _sums_by_rate(line_items: list[dict] | None) -> dict[float, float]:
+    by_rate: dict[float, float] = {}
+    for it in line_items or []:
+        rate, base = _first(it, _RATE_KEYS), _first(it, _TOTAL_KEYS)
+        if rate is None or base is None:
+            continue
+        by_rate[round(float(rate), 2)] = round(by_rate.get(round(float(rate), 2), 0.0) + base, 2)
+    return by_rate
+
+
+def tax_row(row: dict, by_rate: dict[float, float], tol: float = 0.02
+            ) -> tuple[bool | None, str]:
+    """Rechen-Pruefung EINER Zeile der USt-Aufstellung: Positionssumme mit
+    diesem Satz = netto der Zeile (falls Positionen mit Satz-Spalte da), und
+    USt = netto * Satz -> (ok, Grund). Auch fuer die Live-Anzeige im UI."""
+    satz = row.get("satz")
+    if satz is None:
+        return None, "kein Satz"
+    try:
+        satz = round(float(satz), 2)
+        netto_row = None if row.get("netto") is None else float(row["netto"])
+        ust_row = None if row.get("ust") is None else float(row["ust"])
+    except (TypeError, ValueError):
+        return False, "Zeile nicht als Zahl lesbar"
+    problems = []
+    pos_sum = by_rate.get(satz)
+    if pos_sum is not None and netto_row is not None and abs(pos_sum - netto_row) > tol:
+        problems.append(f"{satz:g} %: Positionen {pos_sum:.2f} vs Aufstellung "
+                        f"{netto_row:.2f}")
+    if netto_row is not None and ust_row is not None:
+        erwartet = round(netto_row * satz / 100, 2)
+        if abs(erwartet - ust_row) > tol:
+            problems.append(f"{satz:g} %: USt erwartet {erwartet:.2f}, gefunden "
+                            f"{ust_row:.2f}")
+    elif pos_sum is None:
+        return None, "nicht pruefbar"
+    return not problems, "; ".join(problems) or "ok"
 
 
 def check_tax_rate_lines(fields: dict, line_items: list[dict] | None,
@@ -226,31 +277,37 @@ def check_tax_rate_lines(fields: dict, line_items: list[dict] | None,
     fr = fields.get("ust_aufstellung")
     if fr is None or not isinstance(fr.value, list) or not fr.value:
         return Check("steuersatz-positionen", None, "keine USt-Aufstellung")
-    by_rate: dict[float, float] = {}
-    for it in line_items:
-        rate, base = _first(it, _RATE_KEYS), _first(it, _TOTAL_KEYS)
-        if rate is None or base is None:
-            continue
-        by_rate[round(float(rate), 2)] = round(by_rate.get(round(float(rate), 2), 0.0) + base, 2)
+    by_rate = _sums_by_rate(line_items)
     if not by_rate:
         return Check("steuersatz-positionen", None, "keine Steuersatz-Spalte in den Positionen")
     problems = []
     for row in fr.value:
-        satz = row.get("satz")
-        if satz is None:
-            continue
-        satz = round(float(satz), 2)
-        netto_row, ust_row = row.get("netto"), row.get("ust")
-        pos_sum = by_rate.get(satz)
-        if pos_sum is not None and netto_row is not None and abs(pos_sum - netto_row) > tol:
-            problems.append(f"{satz:g} %: Positionen {pos_sum:.2f} vs Aufstellung "
-                            f"{netto_row:.2f}")
-        if netto_row is not None and ust_row is not None:
-            erwartet = round(netto_row * satz / 100, 2)
-            if abs(erwartet - ust_row) > tol:
-                problems.append(f"{satz:g} %: USt erwartet {erwartet:.2f}, gefunden "
-                                f"{ust_row:.2f}")
+        ok, grund = tax_row(row, by_rate, tol)
+        if ok is False:
+            problems.append(grund)
     return Check("steuersatz-positionen", not problems, "; ".join(problems) or "ok")
+
+
+def rechen_pruefungen(fields: dict, line_items: list[dict] | None, text: str = "") -> dict:
+    """Live-Ansicht der Rechen-Pruefungen fuers UI (Postfach-Baustein 11b):
+    die Summen-Pruefungen wie in ``run_all`` plus rot/gruen JE Zeile der
+    Positionstabelle und der USt-Aufstellung -- damit der Mensch beim
+    Korrigieren sieht, wo es hakt. Reine Anzeige, entscheidet nichts."""
+    checks = [check_totals(fields), check_tax_summary(fields),
+              check_line_items_total(fields, line_items, text),
+              check_line_item_math(line_items), check_tax_rate_lines(fields, line_items)]
+    fr = fields.get("ust_aufstellung")
+    rows = fr.value if fr is not None and isinstance(fr.value, list) else []
+    by_rate = _sums_by_rate(line_items)
+
+    def _view(ok, grund):
+        return {"ok": ok, "detail": grund}
+
+    return {
+        "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
+        "positionen": [_view(*line_item_row(it, i)) for i, it in enumerate(line_items or [], 1)],
+        "ust": [_view(*tax_row(r, by_rate)) for r in rows],
+    }
 
 
 def run_all(fields: dict, supplier, seen, line_items: list[dict] | None = None,

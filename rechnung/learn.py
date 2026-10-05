@@ -374,11 +374,19 @@ def learn_line_items(doc: Document, items: list[dict]) -> LineItemSpec | None:
     header_map = _match_header_words(header_line, {k: span for k, (span, _t) in rows[0].items()})
     if header_map is None:
         return None
-    stop_line = _nearest_line(lines, page, 0, max(w.bottom for w in last_words), h, above=False)
+    # Stoppwort: erste Zeile unterhalb der letzten Position -- auch wenn
+    # der Summenblock etwas abgesetzt steht (Trennlinie, Leerraum); ob das
+    # passt, entscheidet ohnehin der Probelauf unten.
+    stop_line = _nearest_line(lines, page, 0, max(w.bottom for w in last_words), h,
+                              above=False, max_gap_lines=12.0)
 
     page_w = doc.pages[page].width
     header_cols = [(header_map[key], key, rows[0][key][1]) for key in rows[0]]
-    spec = build_line_item_spec(header_cols, stop_line or [], page_w)
+    # Nur Label-Woerter der Stoppzeile ("Nettobetrag"), keine Betraege/
+    # Waehrung -- "EUR" steht womoeglich auch in jeder Positionszeile und
+    # wuerde die Tabelle schon nach der ersten Zeile beenden.
+    stop_words = [w for w in (stop_line or []) if _is_label(w)]
+    spec = build_line_item_spec(header_cols, stop_words, page_w)
     if not _items_equiv(apply_line_items(doc, spec), items):
         return None
     return spec
@@ -451,6 +459,66 @@ def learn_taxblock(doc: Document, rows: list[dict]) -> FieldSpec | None:
 
 
 # ---- Template bauen + pruefen -----------------------------------------
+# ---- Vorschlaege im PDF markieren (Postfach-Baustein 11b) ---------------
+# Das UI zeigt Vorschlaege (KI/Vorlage/E-Rechnung) vorausgefuellt und im PDF
+# umrahmt, damit der Mensch nur noch korrigiert, was falsch ist. Dieselbe
+# Suche wie beim Lernen -- und genauso: mehrdeutig -> KEIN Rahmen statt
+# eines geratenen.
+
+def _box(words: list[Word]) -> dict:
+    return {"page": words[0].page, "x0": min(w.x0 for w in words),
+            "top": min(w.top for w in words), "x1": max(w.x1 for w in words),
+            "bottom": max(w.bottom for w in words)}
+
+
+def markierungen(doc: Document, current: dict[str, dict], line_items: list[dict] | None,
+                 tax_rows: list[dict] | None) -> dict:
+    """-> ``{"felder": {feld: box}, "positionen": [box|None], "ust": [box|None]}``.
+    ``current``: Feld -> ``{"value", "source"}`` wie in /api/invoice. Ein
+    Wert, der mehrfach im PDF steht und dessen Label nicht entscheidet,
+    bekommt keinen Rahmen."""
+    felder: dict[str, dict] = {}
+    for name, cur in current.items():
+        value, src = cur.get("value"), cur.get("source")
+        vtype = STANDARD_FIELDS.get(name, ("text",))[0]
+        if (src in ("missing", "library", None) or value in (None, "")
+                or vtype not in LEARNABLE_TYPES | {"iban", "ustid"}):
+            continue
+        spans = find_value_spans(doc, value, vtype)
+        if len(spans) == 1:
+            felder[name] = _box(spans[0])
+        elif len(spans) > 1:
+            span, _anchor, _why = locate(doc, name, value, vtype)
+            if span:
+                felder[name] = _box(span)
+
+    lines = _lines(doc)
+    positionen: list[dict | None] = []
+    skip: set[int] = set()
+    for item in line_items or []:
+        hit = _find_row(doc, item, lines, skip)
+        if hit is None:
+            positionen.append(None)
+            continue
+        skip.add(hit[0])
+        positionen.append(_box(lines[hit[0]]))
+
+    ust: list[dict | None] = []
+    used: set[int] = set()
+    for row in tax_rows or []:
+        box = None
+        for li, line in enumerate(lines):
+            if li in used:
+                continue
+            parsed = parse_tax_summary(" ".join(w.text for w in line))
+            if any(_tax_row_matches(p, row) for p in parsed):
+                used.add(li)
+                box = _box(line)
+                break
+        ust.append(box)
+    return {"felder": felder, "positionen": positionen, "ust": ust}
+
+
 def _reproduces(fr: FieldResult | None, want, value_type: str) -> bool:
     """Liefert die Extraktion exakt den bestaetigten Wert, mit voller Konfidenz?"""
     if fr is None or fr.source == "missing" or fr.confidence < CONF_MIN:

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import hashlib
+import json
 import re
 
 from . import anlagen
@@ -622,12 +623,33 @@ def _einvoice_pdf_text(path: Path, inv) -> str:
         return ""
 
 
+# Korrigierte Positionstabelle aus dem Training-UI (Postfach-Baustein 11b):
+# eigener Schluessel in der Korrektur-Datei, kein Feld der Rechnung.
+POSITIONEN_KEY = "_positionen"
+
+
 def _apply_corrections(fields: dict[str, FieldResult], corrections: dict,
                        type_map: dict[str, str] | None = None) -> None:
     for fname, fval in corrections.items():
+        if fname.startswith("_"):
+            continue
+        if isinstance(fval, list):
+            # USt-Aufstellung, im UI zeilenweise korrigiert -- schon strukturiert
+            fields[fname] = FieldResult(fname, fval, json.dumps(fval, ensure_ascii=False),
+                                        1.0, "manual")
+            continue
         vtype = (type_map or {}).get(fname) or STANDARD_FIELDS.get(fname, ("text",))[0]
         value, ok = coerce(str(fval), vtype)
         fields[fname] = FieldResult(fname, value if ok else fval, str(fval), 1.0, "manual")
+
+
+def _apply_line_item_correction(res: "Result", corrections: dict) -> None:
+    """Vom Menschen korrigierte Positionen (Zelle/Zeile/Spalte im UI) gewinnen
+    wie jede Korrektur -- aus genau diesen bestaetigten Positionen lernt
+    learn.learn_line_items die Tabellen-Spec."""
+    items = corrections.get(POSITIONEN_KEY)
+    if isinstance(items, list):
+        res.line_items = [dict(it) for it in items if isinstance(it, dict)]
 
 
 def _llm_full(res: Result, doc) -> None:
@@ -760,7 +782,10 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
         with timer.stage("ki"):
             _llm_full(res, doc)
     machine = dict(res.fields)
-    _apply_corrections(res.fields, store.corrections(doc.sha256))
+    corrections = store.corrections(doc.sha256)
+    _apply_corrections(res.fields, corrections)
+    machine_items = res.line_items
+    _apply_line_item_correction(res, corrections)
     # Faelligkeit/Skonto per Textregel -- nach den Korrekturen, damit eine
     # relative Frist ein vom Menschen eingetragenes Rechnungsdatum nutzt
     zahlung.apply(res.fields, doc.text, res.hinweise)
@@ -768,7 +793,7 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
     waehrung.apply(res.fields, doc.text, res.hinweise)
     swissqr.apply(res.fields, qr)
     with timer.stage("pruefungen"):
-        res.shadow = shadow.decide(machine, _all_checks(machine, supplier, store, res.line_items,
+        res.shadow = shadow.decide(machine, _all_checks(machine, supplier, store, machine_items,
                                                         doc, extra, qr), new_supplier=True)
         # nur Stammdaten bzw. Zahlungsbedingungen per Textregel: noch nichts
         # Pruefbares extrahiert
@@ -984,6 +1009,8 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
         with timer.stage("vorlage"):
             res.line_items = apply_line_items(doc, tpl.line_items)
         _suggest_categories(res.line_items, tpl, store)
+    machine_items = res.line_items
+    _apply_line_item_correction(res, corrections)
 
     _gegencheck(res, doc, tpl, store, timer, use_llm)
 
@@ -994,7 +1021,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
                                  qr_obj)
         _set_dublette(res, store, doc)
         res.shadow = shadow.decide(
-            machine, _all_checks(machine, supplier, store, res.line_items, doc, [addr_check],
+            machine, _all_checks(machine, supplier, store, machine_items, doc, [addr_check],
                                  qr_obj)
             if corrections else res.checks, new_supplier=False)
 
