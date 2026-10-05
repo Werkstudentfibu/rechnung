@@ -316,6 +316,15 @@ dahin ist alles Trockenlauf (`RECHNUNG_JOBROUTER_ENABLED` bleibt `0`) und
   anzulegen. `rechnung imap-test` prüft analog Anmeldung + Ordnerliste +
   Anzahl ungelesener Mails am IONOS-Postfach, **ohne** etwas abzuholen oder
   als gelesen zu markieren.
+- `lineItems` (Positionen) und `taxBreakdown` (USt-Aufstellung) stehen immer
+  mit den Standardspalten (siehe "Einheitliche Artikeltabelle" oben;
+  `lineItems`: `pos, beschreibung, menge, einzelpreis_netto, gesamt_netto,
+  mwst_satz, waehrung`; `taxBreakdown`: `satz, netto, ust, brutto`) und
+  tragen zusätzlich `herkunft` (je Spalte `gelesen`/`errechnet`/`kopf`/
+  `korrigiert`) -- genau wie das eigene `herkunft`-Objekt auf oberster
+  Ebene für die Kopf-Felder. Nicht Teil der Feldzuordnungsdatei (die bildet
+  nur flache Kopf-Feldnamen ab), aber genauso per Mapping im Kundensystem
+  weiterzuverarbeiten.
 
 ### Checkliste: Was wir vom Kunden für den Anschluss brauchen
 
@@ -442,6 +451,39 @@ Ergänzungen rund um das IONOS-Postfach (`ingest.py`), siehe `SPEC-v1.md`
   Programm daraus die Tabelle für die nächste Rechnung. Die
   Rechen-Prüfungen laufen dabei live mit (rot/grün je Zeile,
   `/api/pruefen`).
+
+## Einheitliche Artikeltabelle, Rechenstufe, Herkunft sichtbar
+
+Ziel: jede Rechnung ergibt eine vollständige, einheitliche Artikeltabelle,
+und jeder Wert ist entweder im PDF belegt UND rechnerisch bestätigt, oder
+als "errechnet" gekennzeichnet, oder fehlt mit Grund. Details siehe
+`SPEC-v1.md` §7aa.
+
+- **Einheitliche Artikeltabelle** (`positionen.py`): Positionen aus
+  Vorlage, KI, E-Rechnung und Tabellen-Korrektur landen immer auf denselben
+  Standardspalten in fester Reihenfolge -- `pos, beschreibung, menge,
+  einzelpreis_netto, gesamt_netto, mwst_satz, waehrung` (`einheit`
+  zusätzlich, falls vorhanden). Bekannte Alias-Namen (`bezeichnung`,
+  `preis`, `gesamtpreis`, `mwst`, ...) werden zentral umbenannt, auch für
+  eine Altvorlage mit Freitext-Spalten. CSV-Spaltenreihenfolge ist dadurch
+  stabil statt zufällig.
+- **Rechenstufe** (`rechnen.py`, eigenes Modul, keine KI): rechnet
+  nach UND ergänzt fehlende Werte rein deterministisch -- z.B. Brutto
+  400,00 + 19 % → Netto 336,13 / USt 63,87, oder Menge × Einzelpreis ↔
+  Zeilensumme. Errechnet wird nur aus gelesenen Werten (nie aus einem schon
+  errechneten), nur wenn der verwendete Steuersatz für die Währung gültig
+  ist; ist etwas nicht eindeutig (z.B. Mischsätze ohne Aufteilung), bleibt
+  die Zelle leer statt geraten zu werden. Nachgerechnet wird weiterhin mit
+  den bestehenden Prüfungen (`validate.py`). `learn.py` lernt dabei nur aus
+  gelesenen Werten -- ein errechneter/vom Kopf übernommener Wert wird nie
+  als Vorlagen-Anker gespeichert.
+- **Herkunft sichtbar**: jede Zelle kennt ihre Herkunft -- `gelesen`,
+  `errechnet`, `kopf` (vom Rechnungskopf auf jede Position übertragen, z.B.
+  Währung/einziger Steuersatz) oder `korrigiert` (Mensch). Im Training-UI
+  stehen errechnete/kopf-Zellen kursiv mit Tooltip (zeigt die Formel); die
+  Kopf-CSV hat eine Spalte `herkunft`, die Positionen-/USt-CSV eine
+  kompakte Herkunft-Spalte je Zeile; der JobRouter-Payload trägt ein
+  eigenes `herkunft`-Objekt je Feld sowie je Position/USt-Zeile.
 
 ## Härtung (v1.3)
 

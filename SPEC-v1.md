@@ -1026,6 +1026,106 @@ und die 120-s-Zeitgrenze (§7m) bleiben unverändert verbindlich.
       E-Rechnungen sind die Positionen nicht editierbar (sie kommen aus dem
       XML).
 
+## 7aa. Einheitliche Artikeltabelle, Rechenstufe, Herkunft sichtbar (2026-10-05)
+
+Ziel: jede Rechnung ergibt eine vollständige, einheitliche Artikeltabelle,
+und jeder Wert ist entweder im PDF belegt UND rechnerisch bestätigt, oder
+als "errechnet" gekennzeichnet, oder fehlt mit Grund. Kein Raten.
+
+1. **Einheitliche Artikeltabelle** (`rechnung/positionen.py`): egal ob die
+   Position aus der Vorlage, der KI-Extraktion, einer E-Rechnung oder einer
+   Tabellen-Korrektur im Training-UI kommt -- `normalize_columns` bildet die
+   Spaltennamen zentral auf feste Standardnamen in fester Reihenfolge ab:
+   `pos, beschreibung, menge, einzelpreis_netto, gesamt_netto, mwst_satz,
+   waehrung` (`einheit` zusätzlich, falls vorhanden). Bekannte Aliase
+   (`bezeichnung`/`artikel`/`text` → `beschreibung`; `netto`/`gesamt`/
+   `gesamtpreis`/`summe`/`zeilensumme`/`betrag` → `gesamt_netto`;
+   `ust_satz`/`mwst`/`ust`/`steuersatz` → `mwst_satz`; `preis`/`ep`/
+   `einzelpreis` → `einzelpreis_netto`) werden umbenannt, unbekannte Spalten
+   (Rabatt, Kategorie-Vorschlag, interne `_`-Felder) bleiben unverändert.
+   `ordered_columns` liefert dieselbe feste Spaltenreihenfolge für CSV/UI
+   (vorher: zufällige `set()`-Reihenfolge in `store.write_output`).
+   Vorlagen-Spaltennamen werden beim Anlernen (`/api/template`) ebenfalls
+   auf die Standardnamen abgebildet; eine Altvorlage mit Freitext-Spalten
+   wird beim Anwenden (`apply_line_items` + `normalize_columns`) genauso
+   umgeschlüsselt, ohne die gespeicherte Vorlage selbst zu ändern. `/api/
+   tabelle`, `/api/pruefen` und `/api/line-items/preview` normalisieren
+   ebenfalls zentral darüber. `validate.py` braucht dafür keine eigene
+   Alias-Suche mehr für diese Spalten (Rabatt/Nachlass ist keine
+   Standardspalte und bleibt eine eigene kleine Alias-Liste). Im Training-UI
+   ist der Spaltenname beim Anlernen eine Auswahlliste der Standardnamen
+   (Datalist) statt reinem Freitext -- ein anderer Name wird serverseitig
+   trotzdem auf den Standardnamen abgebildet.
+
+2. **Rechenstufe** (`rechnung/rechnen.py`, eigenes Modul, deterministische
+   Formeln, keine KI): jede Kopf-/Positions-/USt-Aufstellungszelle bekommt
+   eine Herkunft -- `gelesen` (im PDF/XML belegt), `errechnet` (aus
+   GELESENEN Werten hergeleitet, nie aus einem schon errechneten Wert),
+   `kopf` (aus dem Rechnungskopf auf jede Position übertragen, z.B.
+   Währung/ein einziger Steuersatz) oder `korrigiert` (Mensch,
+   `FieldResult.source == "manual"`).
+   - **Kopf ergänzen**: aus je zwei von `netto`/`ust_betrag`/`brutto`/
+     `ust_satz` werden die fehlenden hergeleitet -- z.B. Brutto 400,00 bei
+     19 % → Netto 336,13 / USt 63,87. Nur wenn ein dabei verwendeter Satz
+     für die Währung gültig ist (`identify.EXPECTED_RATES`: DE 0/7/19, CH
+     0/2,6/3,8/8,1 inkl. der alten CHF-Sätze vor 2024). Mischsätze ohne
+     Aufteilung (kein eindeutiger Satz) → nichts errechnet, Grund in
+     `RechenResult.gruende` statt geraten; das fehlende Pflichtfeld bleibt
+     dann (zu Recht) ein Rückstellgrund.
+   - **Positionen ergänzen**: fehlender Steuersatz/Währung einer Zeile wird
+     NUR aus dem Kopf übernommen (Herkunft `kopf`), wenn die ganze Rechnung
+     genau einen Satz kennt -- sonst bleibt die Zeile ohne Satz. Erkennt der
+     Text eine Bruttopreis-Rechnung ("inkl. MwSt"/"Bruttopreise",
+     `validate.looks_like_brutto_prices`), werden die gelesenen Werte in
+     `einzelpreis_netto`/`gesamt_netto` als Bruttobeträge entrechnet. Danach
+     Menge × Einzelpreis ↔ Zeilensumme ergänzt, wo eine der beiden Seiten
+     fehlt. `rechnen.tax_breakdown` (vorher `pipeline._tax_breakdown`) baut
+     die USt-Aufstellung danach erneut aus dem vervollständigten Stand und
+     ergänzt je Zeile Netto/USt, wenn Satz + eine der beiden Seiten bekannt
+     sind.
+   - **Nachrechnen bleibt `validate.py`** (Baustein 9, keine Duplizierung):
+     die bestehenden Prüfungen laufen nach dem Ergänzen erneut, jetzt auf
+     dem vollständigeren Stand -- eine Abweichung zwischen einem gelesenen
+     und einem (hypothetisch) errechneten Wert bleibt wie bisher rot mit
+     "erwartet .../gefunden ...".
+   - Errechnete Pflichtfelder gelten als rechnerisch zwingend und blockieren
+     die Übernahme (auch im Modus `autonom`) nicht allein deswegen, dass sie
+     fehlten -- `human.gruende` sieht sie als vorhanden (Quelle `errechnet`,
+     Konfidenz 1,0), die übrigen Prüfungen entscheiden weiter wie bisher.
+   - `learn.py` lernt nur noch aus GELESENEN Werten (`rechnen.
+     nur_gelesene_werte`): errechnete/kopf-Zellen werden vor dem Anlernen
+     aus den bestätigten Positionen/dem Taxblock entfernt, damit sie nie als
+     Anker für eine Vorlage gelernt werden.
+   - `/api/invoice` wendet dieselbe Rechenstufe auch für eine schon
+     trainierte Vorlage an (vorher nur im Pfad ohne Vorlage) -- der Mensch
+     sieht errechnete Werte beim Prüfen, nicht erst nach dem Bestätigen.
+     Bekannte Einschränkung: die dortige (vom `pipeline.process()`
+     unabhängige) Feld-Extraktion für die Live-Ansicht ruft die
+     Textregel-Ergänzungen (`waehrung.apply`/`zahlung.apply`/
+     `belegart.apply`) nicht auf -- eine `kopf`-Übernahme der Währung in
+     jede Position erscheint dort nur, wenn die Währung bereits als Feld
+     (Vorlage/Stammdaten/Korrektur) vorliegt, nicht wenn sie nur per
+     Text-Heuristik aus dem PDF erkannt würde. In der eigentlichen Pipeline
+     (`process()`/`finalize()`) ist das nicht eingeschränkt.
+
+3. **Herkunft sichtbar**:
+   - `pipeline.Result.to_dict()`: je Feld zusätzlich `herkunft`
+     (gelesen/errechnet/kopf/korrigiert, `rechnen.herkunft`) neben dem
+     feineren `origin`/`source`.
+   - `store.write_output`: Kopf-CSV mit dritter Spalte `herkunft`;
+     Positionen-/USt-CSV mit einer kompakten Herkunft-Spalte je Zeile (z.B.
+     `einzelpreis_netto=errechnet;mwst_satz=kopf`).
+   - `jobrouter.payload_from_result`: eigenes `herkunft`-Objekt je Feld
+     (Namen wie in `fields`); `lineItems`/`taxBreakdown` tragen ihre
+     Zeilen-Herkunft als `herkunft` (ohne den internen Unterstrich-Präfix
+     `_herkunft`).
+   - Training-UI: errechnete/vom Kopf übernommene Zellen stehen kursiv mit
+     eigener Badge-Farbe, Tooltip zeigt die Formel (z.B. "400,00 / 1,19
+     (Brutto, 19 %)", steht im `raw`-Feld des errechneten `FieldResult`).
+     Ändert der Mensch eine solche Zelle, verschwindet die Markierung sofort
+     (wird `korrigiert`); die Rechen-Prüfungen (Baustein 9/11b) zeigen
+     Abweichungen weiterhin rot mit "erwartet .../gefunden ...".
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).
