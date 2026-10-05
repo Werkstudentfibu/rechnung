@@ -18,6 +18,15 @@ from .textnorm import norm
 DEFAULT_DATA = Path(os.environ.get("RECHNUNG_DATA", "./data"))
 
 
+def _herkunft_text(row: dict) -> str:
+    """Herkunft einer Positions-/USt-Zeile als kompakter Text (SPEC
+    Baustein 3), z.B. "einzelpreis_netto=errechnet;mwst_satz=kopf" -- leer,
+    wenn jede Zelle der Zeile gelesen ist (``rechnen.py`` traegt dann keinen
+    Eintrag in ``_herkunft`` ein)."""
+    h = row.get("_herkunft") or {}
+    return ";".join(f"{k}={v}" for k, v in sorted(h.items()))
+
+
 def _atomic_write(path: Path, text: str) -> None:
     """Schreibt ueber eine Temp-Datei + atomaren Rename und hebt die
     bisherige Version als ``.bak`` auf. Verhindert eine korrupte/leere Datei,
@@ -339,29 +348,37 @@ class Store:
         p = self.root / "out" / f"{name}.json"
         _atomic_write(p, json.dumps(data, indent=2, ensure_ascii=False))
 
+        # Herkunft je Feld/Zelle (SPEC Baustein 3): gelesen/errechnet/kopf/
+        # korrigiert -- ``_herkunft`` ist wie ``_positionen``/``_ust_aufstellung``
+        # ein Unterstrich-Schluessel, kein Feld der Rechnung selbst.
+        feld_herkunft = data.get("_herkunft") or {}
+
         # Kopf-CSV: nur skalare Felder (Listen kommen in eigene Dateien)
         # utf-8-sig (mit BOM): Excel unter Windows zeigt Umlaute sonst falsch an
         csv_path = p.with_suffix(".csv")
         with csv_path.open("w", encoding="utf-8-sig", newline="") as fh:
             writer = csv.writer(fh, delimiter=";")
-            writer.writerow(["feld", "wert"])
+            writer.writerow(["feld", "wert", "herkunft"])
             for k, v in data.items():
-                if isinstance(v, (list, dict)):
+                if isinstance(v, (list, dict)) or k.startswith("_"):
                     continue
-                writer.writerow([k, "" if v is None else v])
+                writer.writerow([k, "" if v is None else v, feld_herkunft.get(k, "")])
 
         # Positionen als eigene Tabelle -- feste Reihenfolge (SPEC Baustein 1:
         # Standardspalten zuerst, Rest stabil alphabetisch -- vorher ein
-        # ``set()`` mit zufaelliger Reihenfolge je Lauf).
+        # ``set()`` mit zufaelliger Reihenfolge je Lauf). Herkunft je Zeile
+        # als eine kompakte Spalte (SPEC Baustein 3), z.B.
+        # "einzelpreis_netto=errechnet;mwst_satz=kopf".
         items = data.get("_positionen") or []
         if items:
             cols = ordered_columns(items)
             with p.with_name(f"{name}.positionen.csv").open(
                     "w", encoding="utf-8-sig", newline="") as fh:
                 w = csv.writer(fh, delimiter=";")
-                w.writerow(cols)
+                w.writerow([*cols, "herkunft"])
                 for it in items:
-                    w.writerow(["" if it.get(c) is None else it.get(c) for c in cols])
+                    w.writerow(["" if it.get(c) is None else it.get(c) for c in cols]
+                              + [_herkunft_text(it)])
 
         # USt-Aufstellung je Satz
         tax = data.get("_ust_aufstellung") or []
@@ -369,7 +386,8 @@ class Store:
             with p.with_name(f"{name}.ust.csv").open(
                     "w", encoding="utf-8-sig", newline="") as fh:
                 w = csv.writer(fh, delimiter=";")
-                w.writerow(["satz", "netto", "ust", "brutto"])
+                w.writerow(["satz", "netto", "ust", "brutto", "herkunft"])
                 for r in tax:
-                    w.writerow([r.get("satz"), r.get("netto"), r.get("ust"), r.get("brutto")])
+                    w.writerow([r.get("satz"), r.get("netto"), r.get("ust"), r.get("brutto"),
+                               _herkunft_text(r)])
         return p

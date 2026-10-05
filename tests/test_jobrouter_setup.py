@@ -78,6 +78,34 @@ def test_payload_from_result_without_mapping_keeps_own_field_names(tmp_path: Pat
     assert body["fields"] == {"netto": 1.0}
 
 
+# ---- Herkunft je Feld/Position (SPEC Baustein 3) ---------------------------
+
+def test_payload_from_result_herkunft_je_feld(tmp_path: Path):
+    cfg = JobRouterConfig(mapping_file=str(tmp_path / "nope.json"))
+    res = {"file": "a.pdf", "checks": [], "fields": {
+        "netto": {"value": 336.13, "herkunft": "errechnet"},
+        "rechnungsnummer": {"value": "RE-1", "herkunft": "gelesen"},
+        "iban": {"value": "DE..", "herkunft": "gelesen"},
+    }}
+    body = jobrouter.payload_from_result(res, cfg)
+    assert body["herkunft"] == {"netto": "errechnet", "rechnungsnummer": "gelesen",
+                                "iban": "gelesen"}
+
+
+def test_payload_from_result_lineitems_und_taxbreakdown_ohne_unterstrich(tmp_path: Path):
+    cfg = JobRouterConfig(mapping_file=str(tmp_path / "nope.json"))
+    res = {"file": "a.pdf", "checks": [], "fields": {},
+          "line_items": [{"beschreibung": "A", "gesamt_netto": 10.0,
+                          "_herkunft": {"gesamt_netto": "errechnet"}}],
+          "tax_breakdown": [{"satz": 19, "netto": 10.0, "ust": 1.9,
+                             "_herkunft": {"ust": "errechnet"}}]}
+    body = jobrouter.payload_from_result(res, cfg)
+    assert body["lineItems"] == [{"beschreibung": "A", "gesamt_netto": 10.0,
+                                  "herkunft": {"gesamt_netto": "errechnet"}}]
+    assert body["taxBreakdown"] == [{"satz": 19, "netto": 10.0, "ust": 1.9,
+                                     "herkunft": {"ust": "errechnet"}}]
+
+
 # ---- Multipart-Anhang --------------------------------------------------------
 def test_build_multipart_is_parseable_with_file_and_field():
     data, content_type = jobrouter._build_multipart(

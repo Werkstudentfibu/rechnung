@@ -41,6 +41,12 @@
   .badge.library { background: #d3e4f7; }
   .badge.manual { background: #e8d3f7; border: 1px solid #b37feb; color: #531dab; }
   .badge.llm { background: #d3f7ee; border: 1px solid #36cfc9; color: #08979c; }
+  /* Herkunft (SPEC Baustein 3): errechnet/kopf sind kein Original-Lesewert --
+     eigene Farbe, der Zellenwert selbst steht zusaetzlich kursiv (siehe
+     .val-input style="font-style:italic" bzw. die Positions-/USt-Tabellen). */
+  .badge.herkunft-errechnet { background: #fff3b0; border: 1px solid #d4b106; color: #614700; }
+  .badge.herkunft-kopf { background: #e6f4ff; border: 1px solid #91caff; color: #0958d9; }
+  .errechnet, .kopf { font-style: italic; }
 
   table { border-collapse: collapse; width: 100%; }
   td, th { border: 1px solid #e0e0e0; padding: 4px 6px; text-align: left; font-size: 13px; vertical-align: top; }
@@ -245,8 +251,16 @@ function applyInvoiceData(d) {
     current: d.current || {}, supplier: d.supplier, identifiers: d.identifiers || {},
     match: d.match,
     lineItems: (d.line_items || []).map(it => ({ ...it })),
+    // Herkunft je Zeile aus der vollstaendig ergaenzten Aufstellung
+    // (``tax_breakdown``, SPEC Baustein 2/3) in die editierbaren Zeilen
+    // einmischen -- nach Satz zugeordnet, da beide Listen dieselben Zeilen
+    // (nur ggf. ergaenzt) beschreiben.
     taxRows: ((d.current || {}).ust_aufstellung && Array.isArray(d.current.ust_aufstellung.value))
-      ? d.current.ust_aufstellung.value.map(r => ({ ...r })) : [],
+      ? d.current.ust_aufstellung.value.map(r => {
+          const tb = (d.tax_breakdown || []).find(t => t.satz === r.satz);
+          return tb && tb._herkunft ? { ...r, _herkunft: tb._herkunft } : { ...r };
+        })
+      : [],
     markierungen: d.markierungen || null,
     pruefung: d.pruefung_live || null,
     positionenKorrigiert: !!d.positionen_korrigiert,
@@ -318,8 +332,15 @@ function renderInvoice(d) {
   for (const [name, def] of Object.entries(STATE.defs)) {
     const cur = STATE.current[name] || {};
     const tr = document.createElement('tr'); tr.dataset.field = name;
+    // Herkunft (SPEC Baustein 3): gelesen/errechnet/kopf/korrigiert --
+    // errechnet/kopf kursiv + Tooltip mit der Formel (steht in ``raw``,
+    // z.B. "400.00 / 1.19 (Brutto, 19 %)", siehe rechnen.py).
+    const herk = cur.herkunft || '';
+    const herkTitle = (herk === 'errechnet' || herk === 'kopf') && cur.raw
+      ? ` title="${esc(cur.raw)}"` : '';
     const src = cur.source && cur.source !== 'missing'
-      ? ` <span class="badge ${cur.source}">${cur.source}</span>` : '';
+      ? ` <span class="badge ${esc(cur.source)} herkunft-${esc(herk)}"${herkTitle}>${esc(cur.source)}</span>`
+      : '';
     const valStr = cur.value !== undefined && cur.value !== null ? (typeof cur.value === 'object' ? JSON.stringify(cur.value) : cur.value) : '';
     // Kandidat fuers Markieren: kein Anker-Feld, oder einer, der (noch) nicht
     // zuverlaessig genug liefert -- deckungsgleich mit den "Luecken", die der
@@ -331,7 +352,9 @@ function renderInvoice(d) {
       <td>
         <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
           <input class="val-input" data-field="${esc(name)}" value="${esc(valStr)}"
-                 style="flex:1; border:none; background:transparent; font:inherit; outline:none; padding:2px;"
+                 style="flex:1; border:none; background:transparent; font:inherit; outline:none; padding:2px;
+                        ${herk === 'errechnet' || herk === 'kopf' ? 'font-style:italic;' : ''}"
+                 ${herkTitle}
                  onchange="saveCorrection('${esc(name)}', this.value)"
                  onclick="event.stopPropagation(); selectField('${esc(name)}', this.closest('tr'))">
           <span style="white-space:nowrap; flex-shrink:0;">${cur.confidence ? `<span class="hint">(${cur.confidence})</span>` : ''}${src}</span>
@@ -656,7 +679,12 @@ function renderLiPreviewBox(items) {
             ${conf != null ? `<span class="hint">(${conf})</span>` : ''}
           </td>`;
         }
-        return `<td class="${typeof it[c] === 'number' ? 'num' : ''}"><input value="${esc(nz(it[c]))}"
+        // Herkunft je Zelle (SPEC Baustein 3): errechnet/kopf kursiv +
+        // Tooltip "errechnet"/"kopf" statt eines Original-Lesewerts.
+        const h = (it._herkunft || {})[c];
+        const hcls = (h === 'errechnet' || h === 'kopf') ? h : '';
+        return `<td class="${typeof it[c] === 'number' ? 'num' : ''}"><input
+                  class="${hcls}" value="${esc(nz(it[c]))}" ${h ? `title="${esc(h)}"` : ''}
                   onchange="liSetCell(${ri}, '${esc(c)}', this.value)"></td>`;
       }).join('')}${stCell(pr[ri])}
       <td><button class="danger" style="padding:0 4px" title="Zeile löschen" onclick="liDelRow(${ri})">×</button></td></tr>`).join('')}
@@ -668,7 +696,14 @@ function liRedraw() {
   if (old) old.replaceWith(renderLiPreviewBox(STATE.lineItems));
 }
 function liTouched() { STATE.tabDirty.positionen = true; liRedraw(); refreshPruefung(); }
-function liSetCell(ri, col, value) { STATE.lineItems[ri][col] = value; liTouched(); }
+function liSetCell(ri, col, value) {
+  STATE.lineItems[ri][col] = value;
+  // Mensch korrigiert die Zelle -> Herkunft "korrigiert" (SPEC Baustein 3),
+  // auch schon vor dem Speichern sichtbar.
+  const it = STATE.lineItems[ri];
+  if (it._herkunft && col in it._herkunft) delete it._herkunft[col];
+  liTouched();
+}
 function liDelRow(ri) { STATE.lineItems.splice(ri, 1); liTouched(); }
 function liAddRow() {
   const cols = liCols(STATE.lineItems).filter(c => !LI_NICHT_SPEICHERN.includes(c));
@@ -735,8 +770,13 @@ function renderTaxPreview(d) {
       Fehlt etwas, Zeile hier eintragen; beim Bestätigen sucht das Programm den Block selbst im PDF.</div>
     ${rows.length ? `<table class="edit"><tr><th>Satz %</th><th class="num">Netto</th><th class="num">USt</th><th>Prüfung</th><th></th></tr>
       ${rows.map((r, ri) => `<tr class="${rowCls(pr[ri])}">
-        ${['satz', 'netto', 'ust'].map(k => `<td class="num"><input value="${esc(nz(r[k]))}"
-            onchange="taxSetCell(${ri}, '${k}', this.value)"></td>`).join('')}
+        ${['satz', 'netto', 'ust'].map(k => {
+            const h = (r._herkunft || {})[k];
+            const hcls = (h === 'errechnet' || h === 'kopf') ? h : '';
+            return `<td class="num"><input class="${hcls}" value="${esc(nz(r[k]))}"
+                      ${h ? `title="${esc(h)}"` : ''}
+                      onchange="taxSetCell(${ri}, '${k}', this.value)"></td>`;
+          }).join('')}
         ${stCell(pr[ri])}
         <td><button class="danger" style="padding:0 4px" title="Zeile löschen" onclick="taxDelRow(${ri})">×</button></td>
       </tr>`).join('')}</table>` : ''}
@@ -753,7 +793,12 @@ function taxRedraw() {
   if (old) old.replaceWith(renderTaxPreview());
 }
 function taxTouched() { STATE.tabDirty.ust = true; taxRedraw(); refreshPruefung(); }
-function taxSetCell(ri, k, v) { STATE.taxRows[ri][k] = v; taxTouched(); }
+function taxSetCell(ri, k, v) {
+  STATE.taxRows[ri][k] = v;
+  const r = STATE.taxRows[ri];
+  if (r._herkunft && k in r._herkunft) delete r._herkunft[k];
+  taxTouched();
+}
 function taxDelRow(ri) { STATE.taxRows.splice(ri, 1); taxTouched(); }
 function taxAddRow() { STATE.taxRows.push({ satz: '', netto: '', ust: '' }); taxTouched(); }
 

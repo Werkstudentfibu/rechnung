@@ -102,14 +102,16 @@ def test_library_fields_prefilled_even_without_template(tmp_path: Path):
 
 def test_write_output_json_and_csv(tmp_path: Path):
     store = Store(tmp_path / "data")
-    p = store.write_output("re1", {"rechnungsnummer": "RE-9", "netto": 100.0, "iban": None})
+    p = store.write_output("re1", {"rechnungsnummer": "RE-9", "netto": 100.0, "iban": None,
+                                   "_herkunft": {"netto": "errechnet"}})
     assert p.exists()
     csv_path = p.with_suffix(".csv")
     assert csv_path.exists()
     lines = csv_path.read_text("utf-8-sig").splitlines()
-    assert lines[0] == "feld;wert"
-    assert "rechnungsnummer;RE-9" in lines
-    assert "iban;" in lines
+    assert lines[0] == "feld;wert;herkunft"   # SPEC Baustein 3: Herkunft je Feld
+    assert "rechnungsnummer;RE-9;" in lines
+    assert "netto;100.0;errechnet" in lines
+    assert "iban;;" in lines
 
 
 def test_finalize_requires_confirmation_even_when_auto(tmp_path: Path):

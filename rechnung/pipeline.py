@@ -178,6 +178,9 @@ class Result:
             "fields": {
                 k: {"value": v.value, "raw": v.raw, "confidence": v.confidence,
                     "source": v.source, "origin": origin(v.source),
+                    # Vierstufige Herkunft (gelesen/errechnet/kopf/korrigiert,
+                    # SPEC Baustein 3) -- feiner ist "origin"/"source".
+                    "herkunft": rechnen.herkunft(v.source),
                     "via": "ocr" if self.ocr and v.source not in _NOT_READ else None}
                 for k, v in self.fields.items()
             },
@@ -1190,6 +1193,10 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
     out = belegart.signed({k: v.value for k, v in res.fields.items()})
     out["_positionen"] = res.line_items
     out["_ust_aufstellung"] = res.tax_breakdown
+    # Herkunft je Kopf-Feld (gelesen/errechnet/kopf/korrigiert, SPEC
+    # Baustein 3) -- Positionen/USt-Aufstellung tragen ihre Herkunft bereits
+    # selbst (``_herkunft`` je Zeile, rechnen.py).
+    out["_herkunft"] = {k: rechnen.herkunft(v.source) for k, v in res.fields.items()}
     if res.billing_address_name:
         out["rechnungsadresse"] = res.billing_address_name
     if res.warnings:

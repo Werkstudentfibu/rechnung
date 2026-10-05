@@ -23,6 +23,7 @@ from .. import human
 from .. import learn
 from .. import pdf as pdfmod
 from .. import positionen
+from .. import rechnen
 from .. import semantic
 from .. import split
 from .. import shadow
@@ -423,18 +424,37 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             # Ohne Template genau das zeigen, was beim Bestaetigen uebernommen
             # wird: Pipeline-Ergebnis inkl. Stufe 2 (KI-Extraktion, falls an),
             # Stammdaten und Korrekturen -- erst sehen, dann bestaetigen (§7c).
+            # ``res.fields``/``res.line_items`` sind dabei schon die
+            # Rechenstufe durchlaufen (pipeline.process/rechnen.rechne).
             res = _process(path)
             current = {k: {"value": v.value, "raw": v.raw, "confidence": v.confidence,
                            "source": v.source} for k, v in res.fields.items()}
             llm_rejected = res.llm_rejected
             extraction = res.extraction
             line_items = res.line_items
+            tax_breakdown_view = res.tax_breakdown
         else:
             # Status/Rueckstellgruende/Pruefungen fuer die Anzeige; die KI
             # aendert daran nichts (Konfidenz gedeckelt), also ohne Modell.
             res = _process(path, use_llm=False)
+            # Dieselbe Rechenstufe wie in der Pipeline (SPEC Baustein 2) auch
+            # hier anwenden -- sonst sieht der Mensch beim Pruefen/Bestaetigen
+            # nie, was errechnet/vom Kopf uebernommen wuerde. Spaltennamen
+            # zuerst normalisieren (Baustein 1, Altvorlagen).
+            line_items = positionen.normalize_columns(line_items)
+            current_fr = {k: FieldResult(k, v["value"], v["raw"], v["confidence"], v["source"])
+                         for k, v in current.items()}
+            rk = rechnen.rechne(current_fr, line_items, doc.text)
+            current = {k: {"value": fr.value, "raw": fr.raw, "confidence": fr.confidence,
+                           "source": fr.source} for k, fr in rk.fields.items()}
+            line_items = rk.line_items
+            tax_breakdown_view = rk.tax_breakdown
         for v in current.values():
             v["origin"] = origin(v["source"])
+            # Vierstufige Herkunft (gelesen/errechnet/kopf/korrigiert, SPEC
+            # Baustein 3) -- feiner als "origin" (Vorlage/KI/Stammdaten/...
+            # zaehlen dort alle als "gelesen").
+            v["herkunft"] = rechnen.herkunft(v["source"])
             v["via"] = ("ocr" if ocr_res is not None
                         and v["source"] not in ("library", "manual", "missing") else None)
 
@@ -477,6 +497,10 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "template_fields": tpl_fields,
             "template_line_items": tpl_line_items,
             "line_items": line_items,
+            # Vollstaendig aggregierte/ergaenzte USt-Aufstellung (SPEC
+            # Baustein 2/3) -- je Zeile mit Herkunft (``_herkunft``), unabhaengig
+            # davon, ob "ust_aufstellung" als eigenes Feld gelesen wurde.
+            "tax_breakdown": tax_breakdown_view,
             "standard_fields": {k: {"value_type": v[0], "required": v[1]}
                                 for k, v in STANDARD_FIELDS.items()},
             "fixed_field_types": FIXED_FIELD_TYPES,

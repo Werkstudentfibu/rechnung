@@ -74,6 +74,17 @@ def payload_from_result(res: dict, cfg: JobRouterConfig | None = None) -> dict:
         # Deutlich sichtbar fuer den Menschen, der in JobRouter freigibt --
         # als eigenes Feld (per Mapping einem JobRouter-Feld zuordenbar).
         flat_fields["warnung"] = "; ".join(warnings)
+    # Herkunft je Feld (gelesen/errechnet/kopf/korrigiert, SPEC Baustein 3)
+    # -- je Position traegt ``lineItems`` sie schon selbst (siehe unten,
+    # ``herkunft`` statt des internen ``_herkunft``), dokumentiert im
+    # jobrouter-mapping.example.json-Hinweis (README/SPEC).
+    herkunft = {k: v.get("herkunft") for k, v in fields.items()
+               if isinstance(v, dict) and v.get("herkunft")}
+    def _ohne_unterstrich(row: dict) -> dict:
+        return {("herkunft" if k == "_herkunft" else k): v for k, v in row.items()}
+
+    line_items = [_ohne_unterstrich(it) for it in res.get("line_items", [])]
+    tax_breakdown = [_ohne_unterstrich(r) for r in res.get("tax_breakdown", [])]
     return {
         "process": {"name": cfg.process, "version": cfg.process_version, "step": cfg.step},
         "user": cfg.user,
@@ -87,8 +98,9 @@ def payload_from_result(res: dict, cfg: JobRouterConfig | None = None) -> dict:
         "billingAddressId": res.get("billing_address_id"),
         "confidence": res.get("overall_confidence"),
         "fields": _map_fields(flat_fields, cfg),
-        "taxBreakdown": res.get("tax_breakdown", []),
-        "lineItems": res.get("line_items", []),
+        "herkunft": herkunft,
+        "taxBreakdown": tax_breakdown,
+        "lineItems": line_items,
         "checks": {c["name"]: c["ok"] for c in res.get("checks", [])},
         # "mensch" (Bestaetigungs-Klick) oder "autonom" (SPEC §7v)
         "approval": res.get("freigabe") or "mensch",

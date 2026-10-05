@@ -88,7 +88,7 @@ def test_csv_spaltenreihenfolge_stabil_ueber_mehrere_laeufe(tmp_path):
 
     h1 = header(items_a)
     h2 = header(items_b)
-    assert h1 == h2 == ["beschreibung", "menge", "gesamt_netto", "waehrung"]
+    assert h1 == h2 == ["beschreibung", "menge", "gesamt_netto", "waehrung", "herkunft"]
 
 
 def test_standard_columns_enthaelt_feste_spalten():
