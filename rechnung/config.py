@@ -150,6 +150,18 @@ def gegencheck_autonom() -> bool:
     return _b("RECHNUNG_GEGENCHECK_AUTONOM", False)
 
 
+def stale_feld_schwelle() -> int:
+    """Wie oft in Folge dasselbe Feld einer GESICHERTEN Vorlage korrigiert
+    werden muss, bevor die Vorlage ueber den bestehenden Stale-/Versions-
+    Mechanismus neu gelernt wird (Postfach-Baustein 11c, ``learn.py``).
+    Standard 2 -- eine einzelne Korrektur (z.B. ein Tippfehler im
+    Rechnungstext) soll noch keine Vorlage verwerfen."""
+    try:
+        return max(1, int(os.environ.get("RECHNUNG_STALE_FELD_SCHWELLE", "2")))
+    except ValueError:
+        return 2
+
+
 def iban_mode() -> str:
     """Was passiert, wenn die IBAN auf der Rechnung von den Stammdaten
     abweicht (``RECHNUNG_IBAN_ABWEICHUNG``)? ``mensch`` (Standard): die

@@ -121,6 +121,11 @@ class Template:
     # erhalten (Nachvollziehbarkeit/Audit), wird aber nicht mehr angewendet.
     consecutive_failures: int = 0
     stale: bool = False
+    # Postfach-Baustein 11c: wie oft in Folge dasselbe Feld einer gesicherten
+    # Vorlage zuletzt vom Menschen korrigiert werden musste (learn.py) --
+    # ab einer konfigurierbaren Schwelle wird die Vorlage ueber denselben
+    # Stale-/Versions-Mechanismus wie oben neu gelernt.
+    field_correction_streak: dict[str, int] = field(default_factory=dict)
 
     @property
     def secured(self) -> bool:
@@ -136,6 +141,7 @@ class Template:
             "secured_at": self.secured_at,
             "consecutive_failures": self.consecutive_failures,
             "stale": self.stale,
+            "field_correction_streak": self.field_correction_streak,
             "line_items": self.line_items.to_dict() if self.line_items else None,
             "fields": [
                 {
@@ -178,6 +184,7 @@ class Template:
             secured_at=d.get("secured_at", 3),
             consecutive_failures=d.get("consecutive_failures", 0),
             stale=d.get("stale", False),
+            field_correction_streak=dict(d.get("field_correction_streak") or {}),
         )
 
 

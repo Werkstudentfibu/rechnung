@@ -689,9 +689,14 @@ async function saveTemplate() {
 
 async function saveCorrection(field, value) {
   $('#msg').textContent = 'Speichere Korrektur...';
+  // Herkunft des bisher angezeigten Werts mitschicken (Ereignisprotokoll,
+  // Fortschrittsmessung Postfach-Baustein 11c) -- das Frontend kennt sie
+  // schon, kein zweiter Server-Durchlauf noetig.
+  const quelleVorher = (STATE.current[field] || {}).source || null;
   const r = await api('/api/correction', {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ file: STATE.file, field: field, value: value }),
+    body: JSON.stringify({ file: STATE.file, field: field, value: value,
+                          template_id: STATE.tid || null, quelle_vorher: quelleVorher }),
   });
   if (r.ok) {
     $('#msg').textContent = `Korrektur für ${field} gespeichert: ${value}`;

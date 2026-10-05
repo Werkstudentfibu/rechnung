@@ -105,6 +105,11 @@ class CorrectionPost(BaseModel):
     file: str
     field: str
     value: str
+    # Fuer das Ereignisprotokoll (Postfach-Baustein 11c): das Frontend kennt
+    # Vorlage/Herkunft des angezeigten Werts bereits (aktueller Anzeigestand),
+    # kein zweiter Server-Durchlauf noetig, um das zu rekonstruieren.
+    template_id: str | None = None
+    quelle_vorher: str | None = None
 
 
 class CategoryPost(BaseModel):
@@ -705,7 +710,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             pass
         eventlog.record_correction(store, sha, body.field, alt, body.value, op,
                                    supplier_id=sup_id, supplier_name=sup_name,
-                                   file=path.name)
+                                   file=path.name, template_id=body.template_id,
+                                   quelle_vorher=body.quelle_vorher)
         return JSONResponse({"ok": True})
 
     @app.delete("/api/correction")

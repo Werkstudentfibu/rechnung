@@ -626,6 +626,53 @@ def track_template_health(store, tpl: Template, res, operator: str = "") -> None
         store.save_template(tpl)
 
 
+_SKIP_REASON_FIELD = "gesichertes Template liefert anderen Wert"
+_SKIP_REASON_POSITIONEN = "gesichertes Template liefert andere Positionen"
+
+
+def _track_field_corrections(store, tpl: Template, outcome: LearnOutcome, res,
+                             operator: str = "") -> None:
+    """Postfach-Baustein 11c: wird dasselbe Feld einer GESICHERTEN Vorlage
+    wiederholt in Folge korrigiert (``learn_template`` markiert das als
+    ``outcome.skipped[feld] == "gesichertes Template liefert anderen
+    Wert"``), zaehlt das -- ab ``config.stale_feld_schwelle()`` Treffern in
+    Folge wird die Vorlage ueber denselben Stale-/Versions-Mechanismus wie
+    bei ``track_template_health`` neu gelernt (gesicherte Vorlagen werden
+    dabei nie still umgeschrieben, nur eine neue Version entsteht)."""
+    from .config import stale_feld_schwelle
+
+    if tpl.stale:
+        return
+    tracked_names = [f.name for f in tpl.fields if f.name != "ust_aufstellung"]
+    if any(f.name == "ust_aufstellung" for f in tpl.fields):
+        tracked_names.append("ust_aufstellung")
+    if tpl.line_items is not None:
+        tracked_names.append("_positionen")
+
+    changed = False
+    for name in tracked_names:
+        reason = _SKIP_REASON_POSITIONEN if name == "_positionen" else _SKIP_REASON_FIELD
+        streak = tpl.field_correction_streak
+        if outcome.skipped.get(name) == reason:
+            streak[name] = streak.get(name, 0) + 1
+            changed = True
+        elif streak.get(name):
+            streak[name] = 0
+            changed = True
+
+    schwelle = stale_feld_schwelle()
+    ausgeloest = sorted(n for n, c in tpl.field_correction_streak.items() if c >= schwelle)
+    if ausgeloest:
+        tpl.stale = True
+        store.save_template(tpl)
+        store.audit("template_stale_feld", {
+            "template_id": tpl.id, "supplier_id": tpl.supplier_id, "sha256": res.sha256,
+            "felder": ausgeloest, "schwelle": schwelle,
+        }, operator)
+    elif changed:
+        store.save_template(tpl)
+
+
 def _variant_templates(store, supplier_id: str, variant: str) -> list[Template]:
     base_id = f"{supplier_id}__{variant}"
     return [t for t in store.templates_for(supplier_id)
@@ -695,6 +742,10 @@ def learn_from_confirmed(store, res, doc: Document, operator: str = "") -> Learn
     tpl, outcome = learn_template(doc, res.supplier_id, confirmed_values(res.fields),
                                   existing, variant, template_id=tid_override,
                                   line_items=res.line_items or None, taxblock=taxblock)
+
+    if used_tpl is not None and used_tpl.secured:
+        _track_field_corrections(store, used_tpl, outcome, res, operator)
+
     if tpl is None:
         if outcome.reason.startswith("Gesamtprobe"):
             # Bestehendes (z.B. gesichertes) Template liefert auf einer

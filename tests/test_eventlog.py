@@ -193,4 +193,5 @@ def test_api_fehlerbericht_endpoint(tmp_path: Path):
     r = client.get("/api/fehlerbericht")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"seit", "pruefungen", "felder", "korrekturen", "menschlich"}
+    assert set(body) == {"seit", "pruefungen", "felder", "korrekturen", "korrekturen_trend",
+                         "menschlich"}

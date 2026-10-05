@@ -81,11 +81,14 @@ def record(store, res, operator: str = "") -> dict:
 
 def record_correction(store, sha256: str, field: str, alt, neu, operator: str = "",
                       supplier_id: str | None = None, supplier_name: str | None = None,
-                      file: str = "") -> dict:
+                      file: str = "", template_id: str | None = None,
+                      quelle_vorher: str | None = None) -> dict:
     """Ein nachtraeglich korrigiertes Feld anhaengen. ``alt`` ist der Wert der
     vorherigen Korrektur (``None``, wenn es die erste Korrektur dieser
     Rechnung/dieses Feldes ist) -- Grundlage fuer "haeufige Korrekturen" im
-    Fehlerbericht."""
+    Fehlerbericht. ``template_id``/``quelle_vorher`` (Herkunft des Werts vor
+    der Korrektur, z.B. "template-anchor"/"llm"/"missing") sind optional --
+    Fortschrittsmass fuers Selbstlernen (Postfach-Baustein 11c)."""
     rec = {
         "type": TYPE_CORRECTION,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -96,6 +99,8 @@ def record_correction(store, sha256: str, field: str, alt, neu, operator: str = 
         "neu": neu,
         "supplier_id": supplier_id,
         "supplier_name": supplier_name,
+        "template_id": template_id,
+        "quelle_vorher": quelle_vorher,
         "operator": operator or "?",
     }
     store.event_append(rec)
@@ -135,6 +140,52 @@ def _group(rows: dict, key: tuple, **defaults) -> dict:
 def _add_example(row: dict, file: str, sha256: str, detail: str = "") -> None:
     if len(row["beispiele"]) < MAX_EXAMPLES:
         row["beispiele"].append({"datei": file, "sha256": sha256, "grund": detail})
+
+
+def _korrekturen_trend(events: list[dict]) -> list[dict]:
+    """Je Lieferant: Korrekturen pro Rechnung ueber die Zeit (letzte 10 vs.
+    davor) und die am haeufigsten korrigierten Felder -- Fortschrittsmass
+    fuers Selbstlernen (Postfach-Baustein 11c): werden Vorlagen mit der
+    Zeit tatsaechlich besser (weniger Korrekturen pro Rechnung)?"""
+    per_invoice: dict[tuple[str, str], dict] = {}
+    for e in events:
+        if e.get("type") != TYPE_CORRECTION or not e.get("sha256") or not e.get("supplier_id"):
+            continue
+        key = (e["supplier_id"], e["sha256"])
+        row = per_invoice.setdefault(key, {"ts": e.get("ts") or "", "anzahl": 0, "felder": {}})
+        row["anzahl"] += 1
+        ts = e.get("ts") or ""
+        if ts and (not row["ts"] or ts < row["ts"]):
+            row["ts"] = ts
+        f = e.get("field") or "?"
+        row["felder"][f] = row["felder"].get(f, 0) + 1
+
+    by_supplier: dict[str, list[dict]] = {}
+    for (sup, _sha), row in per_invoice.items():
+        by_supplier.setdefault(sup, []).append(row)
+
+    out = []
+    for sup, rows in by_supplier.items():
+        rows.sort(key=lambda r: r["ts"])
+        letzte, davor = rows[-10:], rows[:-10]
+        felder_gesamt: dict[str, int] = {}
+        for r in rows:
+            for f, n in r["felder"].items():
+                felder_gesamt[f] = felder_gesamt.get(f, 0) + n
+        top = sorted(felder_gesamt.items(), key=lambda kv: -kv[1])[:5]
+
+        def _avg(rs: list[dict]) -> float | None:
+            return round(sum(r["anzahl"] for r in rs) / len(rs), 2) if rs else None
+
+        out.append({
+            "lieferant": sup,
+            "rechnungen_mit_korrektur": len(rows),
+            "korrekturen_pro_rechnung_letzte_10": _avg(letzte),
+            "korrekturen_pro_rechnung_davor": _avg(davor),
+            "haeufigste_felder": [{"feld": f, "anzahl": n} for f, n in top],
+        })
+    out.sort(key=lambda r: -(r["korrekturen_pro_rechnung_letzte_10"] or 0))
+    return out
 
 
 def report(store, since: str | None = None) -> dict:
@@ -206,6 +257,9 @@ def report(store, since: str | None = None) -> dict:
         "pruefungen": sorted_rows(checks),
         "felder": sorted_rows(fields),
         "korrekturen": sorted_rows(corrections),
+        # Fortschritt je Lieferant: Korrekturen/Rechnung letzte 10 vs. davor
+        # (Postfach-Baustein 11c)
+        "korrekturen_trend": _korrekturen_trend(events),
         # an den Menschen gegeben (Ordner "Menschliche Bearbeitung") je Art+Lieferant
         "menschlich": sorted_rows(human),
     }
