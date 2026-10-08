@@ -14,14 +14,23 @@
   .view { display: none; }
   .view.active { display: block; }
 
-  #v-scan { display: none; grid-template-columns: 340px 1fr; height: calc(100vh - 42px); }
+  #v-scan { display: none; grid-template-columns: 260px 1fr; height: calc(100vh - 42px); }
   #v-scan.active { display: grid; }
   #list { border-right: 1px solid #ddd; overflow: auto; }
   #list .row { padding: 8px 12px; border-bottom: 1px solid #eee; cursor: pointer; }
   #list .row:hover { background: #f3f7f5; }
   #list .row.active { background: #e3efe9; }
   #work { overflow: auto; padding: 12px; }
-  #fields { position: sticky; top: 0; background: #fff; padding-bottom: 8px; z-index: 5; border-bottom: 2px solid #1c7550; }
+  #work.split { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr);
+               gap: 12px; overflow: hidden; padding: 0; }
+  #work.split > .panels, #work.split > .pages { overflow: auto; padding: 12px; min-height: 0; }
+  #work.split > .pages { background: #f4f4f4; border-left: 1px solid #ddd; }
+  /* nebeneinander ist die Rechnung immer sichtbar -- Feldbereich muss nicht kleben */
+  #work.split #fields { position: static; max-height: none; overflow: visible; }
+  /* Feldbereich klebt oben, darf aber nie die ganze Rechnung verdecken
+     (Laptop-Bildschirm): hoechstens die halbe Hoehe, Rest scrollt in sich. */
+  #fields { position: sticky; top: 0; background: #fff; padding-bottom: 8px; z-index: 5; border-bottom: 2px solid #1c7550;
+            max-height: 45vh; overflow: auto; }
   .pdfwrap { position: relative; margin-top: 10px; display: inline-block; }
   .pdfwrap img { display: block; }
   .w { position: absolute; border: 1px solid rgba(28,117,80,.3); cursor: pointer; }
@@ -300,8 +309,25 @@ async function copyTemplateFrom(templateId) {
   applyInvoiceData(d2);
 }
 
+/* Seitenbilder auf Spaltenbreite einpassen. zoom statt Bildbreite, damit die
+   darueberliegenden Wort-Kaestchen (Pixelpositionen) mitskalieren. */
+function fitPages() {
+  const col = document.querySelector('#work .pages'); if (!col) return;
+  const avail = col.clientWidth - 40;
+  col.querySelectorAll('.pdfwrap').forEach(wrap => {
+    const img = wrap.querySelector('img');
+    if (img && img.naturalWidth) wrap.style.zoom = Math.min(1, avail / img.naturalWidth);
+  });
+}
+window.addEventListener('resize', fitPages);
+
 function renderInvoice(d) {
-  const w = $('#work'); w.innerHTML = '';
+  const work = $('#work'); work.innerHTML = ''; work.classList.add('split');
+  // Werte links, Rechnung rechts -- jede Spalte scrollt fuer sich, damit auf dem
+  // Laptop-Bildschirm Werte und Rechnung gleichzeitig zu sehen sind.
+  const w = document.createElement('div'); w.className = 'panels';
+  const pagesCol = document.createElement('div'); pagesCol.className = 'pages';
+  work.appendChild(w); work.appendChild(pagesCol);
   const sup = d.match || {};
   const addrOpts = ['<option value="standard">standard (alle Adressen)</option>']
     .concat((d.addresses || []).map(a =>
@@ -431,7 +457,8 @@ function renderInvoice(d) {
       el.onclick = (ev) => clickWord(pg.index, wd.i, ev);
       wrap.appendChild(el);
     }
-    w.appendChild(wrap);
+    pagesCol.appendChild(wrap);
+    img.onload = fitPages;
   }
   paintMarkierungen();
   paint();
