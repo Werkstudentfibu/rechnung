@@ -37,7 +37,7 @@ from ..pipeline import (CONF_MIN, EXTRACT_EINVOICE, EXTRACT_TEMPLATE, MASTER_FIE
                         journal_totals, load_document, origin)
 from ..store import Store
 from ..suggest import similar_suppliers
-from ..template import (STANDARD_FIELDS, Anchor, Column, FieldResult, LineItemSpec,
+from ..template import (STANDARD_FIELDS, ausgeblendet, sichtbare_felder, Anchor, Column, FieldResult, LineItemSpec,
                         Template, apply_line_items, apply_template, build_field_spec,
                         build_line_item_spec)
 from ..textnorm import parse_amount
@@ -301,7 +301,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "results": out,
             "status_labels": STATUS_LABELS,
             "fields": {k: {"value_type": v[0], "required": v[1]}
-                       for k, v in STANDARD_FIELDS.items()},
+                       for k, v in sichtbare_felder().items()},
         })
 
     @app.get("/api/invoice")
@@ -392,7 +392,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                 # /api/confirm) unbemerkt mitbekommen wuerde -- widerspraeche
                 # der Bestaetigungspflicht (§7c: erst sehen, dann bestaetigen).
                 gaps = [
-                    n for n in STANDARD_FIELDS
+                    n for n in sichtbare_felder()
                     if current.get(n) is None or current[n]["source"] == "missing"
                     or current[n]["confidence"] < CONF_MIN
                 ]
@@ -504,7 +504,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             # davon, ob "ust_aufstellung" als eigenes Feld gelesen wurde.
             "tax_breakdown": tax_breakdown_view,
             "standard_fields": {k: {"value_type": v[0], "required": v[1]}
-                                for k, v in STANDARD_FIELDS.items()},
+                                for k, v in sichtbare_felder().items()},
+            "hidden_fields": sorted(ausgeblendet()),
             "fixed_field_types": FIXED_FIELD_TYPES,
             "supplier": supplier_obj.to_dict() if supplier_obj else None,
             "addresses": [a.to_dict() for a in store.addresses()],
@@ -576,7 +577,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "template_line_items": None,
             "line_items": res.line_items,
             "standard_fields": {k: {"value_type": v[0], "required": v[1]}
-                                for k, v in STANDARD_FIELDS.items()},
+                                for k, v in sichtbare_felder().items()},
+            "hidden_fields": sorted(ausgeblendet()),
             "fixed_field_types": FIXED_FIELD_TYPES,
             "supplier": supplier_obj.to_dict() if supplier_obj else None,
             "addresses": [a.to_dict() for a in store.addresses()],

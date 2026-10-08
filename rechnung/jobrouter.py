@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import JobRouterConfig, jobrouter as _jr_cfg
+from .template import ausgeblendet
 
 
 def load_mapping(cfg: JobRouterConfig | None = None) -> dict[str, str]:
@@ -67,8 +68,9 @@ def payload_from_result(res: dict, cfg: JobRouterConfig | None = None) -> dict:
     from .belegart import signed
 
     # Gutschrift/Storno: Betraege einheitlich negativ (belegart.py)
+    aus = ausgeblendet()
     flat_fields = signed({k: (v.get("value") if isinstance(v, dict) else v)
-                          for k, v in fields.items()})
+                          for k, v in fields.items() if k not in aus})
     warnings = list(res.get("warnungen") or [])
     if warnings:
         # Deutlich sichtbar fuer den Menschen, der in JobRouter freigibt --

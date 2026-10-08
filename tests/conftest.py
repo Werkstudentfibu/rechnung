@@ -11,6 +11,9 @@ from pathlib import Path
 # Muss vor dem ersten Import von rechnung.* passieren (Config liest beim Import).
 for _k in [k for k in os.environ if k.startswith("RECHNUNG_")]:
     del os.environ[_k]
+# Die bestehenden Tests pruefen den vollen Feldumfang; das Ausblenden einzelner
+# Felder (Standard im Einsatz) testet tests/test_felder_aus.py gezielt.
+os.environ["RECHNUNG_FELDER_AUS"] = ""
 
 import pytest
 from reportlab.lib.pagesizes import A4

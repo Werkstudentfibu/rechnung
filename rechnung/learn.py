@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 
 from . import rechnen
 from .pdf import Document, Word
-from .template import (STANDARD_FIELDS, FieldResult, FieldSpec, LineItemSpec, Template,
+from .template import (STANDARD_FIELDS, ausgeblendet, FieldResult, FieldSpec, LineItemSpec, Template,
                        apply_line_items, apply_template, build_field_spec,
                        build_line_item_spec)
 from .textnorm import MAX_SPAN, norm, parse_amount, parse_date, parse_tax_summary, same_value
@@ -570,7 +570,11 @@ def learn_template(doc: Document, supplier_id: str, values: dict[str, object],
     current = apply_template(doc, tpl) if existing else {}
     by_name = {f.name: f for f in tpl.fields}
 
+    aus = ausgeblendet()
     for fname, want in values.items():
+        if fname in aus or fname not in STANDARD_FIELDS:
+            outcome.skipped[fname] = "Feld ausgeblendet/unbekannt"
+            continue
         vtype, required = STANDARD_FIELDS[fname]
         if fname in by_name and _reproduces(current.get(fname), want, by_name[fname].value_type):
             outcome.kept.append(fname)

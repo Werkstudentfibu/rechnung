@@ -31,7 +31,7 @@ from pathlib import Path
 from . import billing, einvoice, semantic
 from .identify import extract_identifiers, identify_with_reason
 from .learn import LEARNABLE_TYPES, _active_template, _next_template_id, learn_template
-from .template import STANDARD_FIELDS, apply_template
+from .template import STANDARD_FIELDS, apply_template, ausgeblendet
 from .textnorm import coerce
 
 GROUP_DIR = "vorlernen"
@@ -112,7 +112,7 @@ def _extract_values(doc, supplier, store) -> tuple[dict, dict]:
                       if fr.source != "missing"}
     rejected: dict = {}
     missing_required = [n for n, (_t, req) in STANDARD_FIELDS.items()
-                        if req and n not in fields]
+                        if req and n not in fields and n not in ausgeblendet()]
     if missing_required:
         full = semantic.extract_full(doc.text)
         rejected = dict(full.rejected)
@@ -181,7 +181,8 @@ def scan(folder: str | Path, store) -> ScanReport:
         prev = by_sha.get(sha, {})
         by_sha[sha] = {
             "datei": path.name, "sha256": sha, "pfad": str(path),
-            "werte": werte, "rejected": rejected,
+            "werte": {n: w for n, w in werte.items() if n not in ausgeblendet()},
+            "rejected": rejected,
             "ausgeschlossen": prev.get("ausgeschlossen", False),
             "korrekturen": prev.get("korrekturen", {}),
         }

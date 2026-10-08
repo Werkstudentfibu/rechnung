@@ -24,7 +24,7 @@
   #work.split { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr);
                gap: 12px; overflow: hidden; padding: 0; }
   #work.split > .panels, #work.split > .pages { overflow: auto; padding: 12px; min-height: 0; }
-  #work.split > .pages { background: #f4f4f4; border-left: 1px solid #ddd; }
+  #work.split > .pages { background: #f4f4f4; border-right: 1px solid #ddd; }
   /* nebeneinander ist die Rechnung immer sichtbar -- Feldbereich muss nicht kleben */
   #work.split #fields { position: static; max-height: none; overflow: visible; }
   /* Feldbereich klebt oben, darf aber nie die ganze Rechnung verdecken
@@ -254,8 +254,9 @@ function applyInvoiceData(d) {
   const defs = {};
   for (const [n, v] of Object.entries(d.standard_fields || {}))
     defs[n] = { value_type: v.value_type, required: v.required };
+  const aus = new Set(d.hidden_fields || []);
   for (const f of d.template_fields || [])
-    defs[f.name] = { value_type: f.value_type, required: f.required };
+    if (!aus.has(f.name)) defs[f.name] = { value_type: f.value_type, required: f.required };
 
   STATE = {
     file: d.file, pages: d.pages, tid: d.template_id, variant: d.variant,
@@ -323,11 +324,11 @@ window.addEventListener('resize', fitPages);
 
 function renderInvoice(d) {
   const work = $('#work'); work.innerHTML = ''; work.classList.add('split');
-  // Werte links, Rechnung rechts -- jede Spalte scrollt fuer sich, damit auf dem
+  // Rechnung links, Werte rechts -- jede Spalte scrollt fuer sich, damit auf dem
   // Laptop-Bildschirm Werte und Rechnung gleichzeitig zu sehen sind.
   const w = document.createElement('div'); w.className = 'panels';
   const pagesCol = document.createElement('div'); pagesCol.className = 'pages';
-  work.appendChild(w); work.appendChild(pagesCol);
+  work.appendChild(pagesCol); work.appendChild(w);   // Rechnung links
   const sup = d.match || {};
   const addrOpts = ['<option value="standard">standard (alle Adressen)</option>']
     .concat((d.addresses || []).map(a =>
@@ -440,7 +441,8 @@ function renderInvoice(d) {
 
   w.appendChild(renderPruefBox());
   w.appendChild(renderLiPreviewBox(STATE.lineItems));
-  w.appendChild(renderTaxPreview(d));
+  // USt-Aufstellung nur, wenn das Feld nicht ausgeblendet ist (Aaron, 08.10.)
+  if (!(d.hidden_fields || []).includes('ust_aufstellung')) w.appendChild(renderTaxPreview(d));
 
   for (const pg of d.pages) {
     const wrap = document.createElement('div'); wrap.className = 'pdfwrap';

@@ -12,6 +12,8 @@ Zusaetzlich:
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -46,6 +48,24 @@ STANDARD_FIELDS: dict[str, tuple[str, bool]] = {
     # QR-Zahlteil (swissqr.py) -- kommt nie aus einer gelernten Vorlage.
     "zahlungsreferenz": ("text", False),
 }
+
+# In diesem Einsatz nicht gebraucht (Aaron, 08.10.2026): nicht angezeigt, nicht
+# per KI gefragt, nicht gelernt, nicht exportiert. Intern bleiben sie nutzbar
+# (Skonto -> Faelligkeit, USt-Aufstellung -> Rechen-Pruefungen, QR-Referenz ->
+# QR-Pruefung). RECHNUNG_FELDER_AUS ueberschreibt die Liste (leer = alle an).
+_AUS_STANDARD = "bestellnummer,ust_aufstellung,skonto_prozent,skonto_frist,zahlungsreferenz"
+
+
+def ausgeblendet() -> frozenset[str]:
+    raw = os.environ.get("RECHNUNG_FELDER_AUS", _AUS_STANDARD)
+    return frozenset(x.strip() for x in raw.split(",") if x.strip())
+
+
+def sichtbare_felder() -> dict[str, tuple[str, bool]]:
+    """STANDARD_FIELDS ohne die ausgeblendeten -- alles, was der Mensch sieht,
+    die KI gefragt wird oder gelernt/exportiert wird."""
+    aus = ausgeblendet()
+    return {k: v for k, v in STANDARD_FIELDS.items() if k not in aus}
 
 
 @dataclass
