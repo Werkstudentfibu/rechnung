@@ -1109,8 +1109,11 @@ def dispatch(res: Result, store: Store) -> dict:
 def invoice_files(folder: str | Path) -> list[Path]:
     """Alle Rechnungsdateien eines Ordners: PDFs und E-Rechnungs-XML."""
     folder = Path(folder)
-    return sorted(p for p in folder.iterdir()
-                  if p.is_file() and p.suffix.lower() in INVOICE_SUFFIXES)
+    # Feste Reihenfolge auf jedem System (Windows vergleicht Pfade sonst
+    # ohne Gross-/Kleinschreibung, Linux mit)
+    return sorted((p for p in folder.iterdir()
+                   if p.is_file() and p.suffix.lower() in INVOICE_SUFFIXES),
+                  key=lambda p: (p.name.lower(), p.name))
 
 
 def _fv(fields: dict, key: str):

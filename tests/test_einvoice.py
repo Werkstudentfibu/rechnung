@@ -344,7 +344,7 @@ def test_foreign_xml_is_unsupported(tmp_path, store):
 def test_invoice_files_includes_xml(tmp_path):
     for n in ("a.pdf", "b.xml", "c.txt", "D.XML"):
         (tmp_path / n).write_text("x")
-    assert [p.name for p in invoice_files(tmp_path)] == ["D.XML", "a.pdf", "b.xml"]
+    assert [p.name for p in invoice_files(tmp_path)] == ["a.pdf", "b.xml", "D.XML"]
 
 
 def test_finalize_archives_xml_original(tmp_path, store):

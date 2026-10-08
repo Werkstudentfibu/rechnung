@@ -3,6 +3,8 @@ Rechnungen zusammenhalten, im Zweifel an den Menschen."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from rechnung import human, pdf as pdfmod, split, synth
 from rechnung.identify import Supplier
 from rechnung.pipeline import process, scan_folder
@@ -43,7 +45,7 @@ def test_drei_rechnungen_werden_drei(tmp_path):
                                        "sammel_teil3von3.pdf"]
     assert not (inbox / "sammel.pdf").exists()
     assert len(list((store.root / "sammel").glob("*sammel.pdf"))) == 1
-    results = {r.file.rsplit("/", 1)[-1]: r for r in scan_folder(inbox, store)}
+    results = {Path(r.file).name: r for r in scan_folder(inbox, store)}
     for k, s in enumerate(soll, start=1):
         r = results[f"sammel_teil{k}von3.pdf"]
         assert r.sammel["teil"] == k and r.sammel["von"] == 3

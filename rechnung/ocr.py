@@ -128,7 +128,7 @@ def _windows_fallback() -> str | None:
         # %VAR% selbst aufloesen (os.path.expandvars kann das nur unter Windows)
         expanded = re.sub(r"%([^%]+)%", lambda m: os.environ.get(m.group(1), m.group(0)), cand)
         if "%" not in expanded and Path(expanded).is_file():
-            return expanded
+            return str(Path(expanded))  # Trenner vereinheitlichen (Windows: Backslash)
     return None
 
 
