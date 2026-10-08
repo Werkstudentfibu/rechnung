@@ -157,7 +157,8 @@ def test_windows_paths_in_results(tmp_path: Path):
 
 # ---- Windows-Skripte + Build ------------------------------------------------------
 @pytest.mark.parametrize("name", ["windows/start-rechnung.cmd", "windows/nachtlauf.cmd",
-                                  "build-windows.ps1"])
+                                  "build-windows.ps1", "windows/laptop-start.cmd",
+                                  "windows/laptop-nachtlauf.cmd", "laptop-einrichten.ps1"])
 def test_windows_scripts_are_ascii_with_crlf(name):
     raw = (ROOT / name).read_bytes()
     raw.decode("ascii")      # Windows PowerShell 5.1/cmd: keine Umlaute ohne BOM
@@ -193,3 +194,22 @@ def test_pyinstaller_spec_covers_package_and_static():
     assert 'collect_submodules("rechnung")' in src
     assert "rechnung/web/static" in src and '["run.py"]' in src
     compile(src, "rechnung.spec", "exec")
+
+
+def test_laptop_start_restarts_on_update_exit_code():
+    """Knopf "Update holen" beendet das Programm mit RESTART_EXIT_CODE --
+    der Laptop-Starter muss genau darauf neu starten."""
+    from rechnung import selbstupdate
+
+    src = (ROOT / "windows" / "laptop-start.cmd").read_text("ascii")
+    assert f'"%RC%"=="{selbstupdate.RESTART_EXIT_CODE}"' in src
+    assert "goto start" in src
+    assert " update" in src
+
+
+def test_laptop_starter_run_from_temp_copy():
+    """Die von laptop-einrichten.ps1 erzeugten Starter kopieren die Logik nach
+    %TEMP%, damit ein Update die laufende .cmd nicht ueberschreibt."""
+    src = (ROOT / "laptop-einrichten.ps1").read_text("ascii")
+    for name in ("laptop-start.cmd", "laptop-nachtlauf.cmd"):
+        assert f"app\\windows\\{name}`\" `\"%TEMP%" in src

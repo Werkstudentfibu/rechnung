@@ -104,6 +104,9 @@
   <span id="stats" class="hint" style="color:#eaf5ef"></span>
   <span id="modus" class="hint" style="color:#eaf5ef; margin-left:auto"
         title="Umschalten nur per Befehl: rechnung modus autonom|testphase --operator NAME"></span>
+  <span id="version" class="hint" style="color:#eaf5ef"></span>
+  <button id="btn-update" style="display:none" onclick="holeUpdate()"
+          title="Neuen Programmstand holen, Tests laufen lassen, danach neu starten">Update holen</button>
 </header>
 
 <main>
@@ -1036,6 +1039,36 @@ async function loadModus() {
     : `Testphase · ${prog}`;
 }
 
+/* ================= Selbst-Update ================= */
+async function loadVersion() {
+  const v = await api('/api/version');
+  if (!v.git) return;            // laeuft als rechnung.exe -> kein Knopf
+  $('#version').textContent = `Stand ${v.datum}`;
+  $('#version').title = `${v.commit} · ${v.betreff}`;
+  $('#btn-update').style.display = '';
+}
+
+async function holeUpdate() {
+  const b = $('#btn-update');
+  b.disabled = true; b.textContent = 'Update läuft … (Tests, bis zu 2 Min.)';
+  try {
+    const e = await api('/api/update', {method: 'POST'});
+    if (e.neustart_noetig) {
+      if (confirm(e.meldung + '\n\nJetzt neu starten? Nicht gespeicherte Eingaben gehen verloren.')) {
+        await api('/api/neustart', {method: 'POST'});
+        document.body.innerHTML = '<p style="padding:2em">Programm startet neu …</p>';
+        return;
+      }
+      alert('Der neue Stand ist installiert und gilt ab dem nächsten Start.');
+    } else {
+      alert(e.meldung);
+    }
+  } catch (err) {
+    alert('Update fehlgeschlagen: ' + err);
+  }
+  b.disabled = false; b.textContent = 'Update holen';
+}
+
 /* ================= Menschliche Bearbeitung ================= */
 async function loadHuman() {
   const d = await api('/api/menschlich');
@@ -1369,6 +1402,7 @@ async function vlDiscard(gid) {
 }
 
 loadList();
+loadVersion();
 </script>
 </body>
 </html>

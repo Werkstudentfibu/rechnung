@@ -445,6 +445,19 @@ def _cmd_app(args) -> int:
     return 0
 
 
+def _cmd_update(args) -> int:
+    """Neuen Stand vom Zweig ``release`` holen (selbstupdate.py). Exit-Code
+    0 = nichts zu tun/offline, 42 = aktualisiert (Neustart noetig),
+    1 = Fehler/zurueckgerollt."""
+    from . import selbstupdate
+
+    e = selbstupdate.aktualisieren(Path(args.data), tests=not args.ohne_tests)
+    print(f"Update: {e.status} -- {e.meldung}")
+    if e.status == "aktualisiert":
+        return selbstupdate.RESTART_EXIT_CODE
+    return 1 if e.status in ("zurueckgerollt", "fehler") else 0
+
+
 def _cmd_demo(args) -> int:
     """Erzeugt 3 synthetische Rechnungen, lernt ein Template, laeuft die Pipeline."""
     from .identify import supplier_from_doc
@@ -619,6 +632,10 @@ def main(argv=None) -> int:
     a = sub.add_parser("app", help="Training-UI als eigenstaendiges Fenster starten (kein Browser)")
     a.add_argument("--port", type=int, default=8000)
     a.set_defaults(func=_cmd_app)
+
+    up = sub.add_parser("update", help="Neuen Programmstand vom Zweig release holen (Laptop-Testphase)")
+    up.add_argument("--ohne-tests", action="store_true", help="Tests nach dem Update ueberspringen")
+    up.set_defaults(func=_cmd_update)
 
     sub.add_parser("demo", help="Selbsttest mit synthetischen Rechnungen").set_defaults(func=_cmd_demo)
 

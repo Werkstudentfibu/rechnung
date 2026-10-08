@@ -1027,6 +1027,34 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         fp = modus.fortschritt(store)
         return JSONResponse(dict(fp, text=modus.text(fp)))
 
+    # ---- Selbst-Update (Laptop-Testphase, selbstupdate.py) ----------
+    @app.get("/api/version")
+    def version_ep() -> JSONResponse:
+        from .. import selbstupdate
+
+        return JSONResponse(selbstupdate.version())
+
+    @app.post("/api/update")
+    def update_ep() -> JSONResponse:
+        """Neuen Stand holen + Tests. Startet NICHT selbst neu -- das
+        bestaetigt der Nutzer danach (/api/neustart), damit keine offene
+        Bearbeitung verloren geht."""
+        from .. import selbstupdate
+
+        return JSONResponse(selbstupdate.aktualisieren(store.root).dict())
+
+    @app.post("/api/neustart")
+    def neustart_ep() -> JSONResponse:
+        """Beendet das Programm mit RESTART_EXIT_CODE; der Laptop-Starter
+        startet es sofort mit dem neuen Code wieder."""
+        import os
+        import threading
+
+        from .. import selbstupdate
+
+        threading.Timer(0.5, lambda: os._exit(selbstupdate.RESTART_EXIT_CODE)).start()
+        return JSONResponse({"ok": True})
+
     @app.get("/api/menschlich")
     def menschlich_ep() -> JSONResponse:
         """Ordner "Menschliche Bearbeitung": was wartet auf wen und warum

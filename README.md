@@ -51,6 +51,8 @@ Weitergabe als eine `.exe` ohne Python-Installation: siehe `build.md`.
 **Installation auf dem Windows-Firmenlaptop** (Build direkt dort, CPU,
 optional Tesseract + Ollama mit kleinem Modell): `build-windows.ps1`, Anleitung
 für Nicht-Entwickler in `INSTALL-WINDOWS.md`.
+**Testphase mit automatischen Updates** (läuft aus dem Quellcode, holt Fixes vom
+Zweig `release` beim Start/per Knopf/nachts): `LAPTOP-UPDATE.md`.
 Vollständige v1-Abgrenzung (für die IT-Abnahme): siehe `SPEC-v1.md`.
 Entwurf der aktualisierten IT-Freigabe (Laptop, OCR, Ollama, IONOS,
 JobRouter, Ordner „Menschliche Bearbeitung“, Testphase/autonom, späterer
