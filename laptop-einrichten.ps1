@@ -113,6 +113,9 @@ $Known = Join-Path $Zugang "known_hosts"
 $QuelleZugang = Join-Path $Hier "zugang"
 if ((Test-Path (Join-Path $QuelleZugang "rechnung_deploy")) -and ($QuelleZugang -ne $Zugang)) {
     New-Item -ItemType Directory -Force -Path $Zugang | Out-Null
+    # Zweiter Lauf: der Schluessel vom ersten Lauf ist nur noch lesbar (icacls
+    # unten) -- Copy-Item -Force scheitert daran. Erst wieder freigeben.
+    if (Test-Path $Key) { $null = & icacls $Key /reset 2>&1 }
     Copy-Item -Force (Join-Path $QuelleZugang "rechnung_deploy") $Key
     Copy-Item -Force (Join-Path $QuelleZugang "known_hosts") $Known
 }
