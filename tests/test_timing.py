@@ -22,13 +22,16 @@ from rechnung import pdf as pdfmod  # noqa: E402
 # ---- StageTimer / percentile / distribution --------------------------------
 def test_stage_timer_measures_and_accumulates():
     t = StageTimer()
+    # Windows-Uhr hat ~15 ms Aufloesung, sleep() kann dort knapp darunter
+    # bleiben -- daher grosszuegige Schlafzeit und Spielraum.
     with t.stage("a"):
-        time.sleep(0.01)
+        time.sleep(0.05)
     with t.stage("a"):
-        time.sleep(0.01)
+        time.sleep(0.05)
     with t.stage("b"):
         pass
-    assert t.times["a"] >= 0.02
+    assert t.times["a"] >= 0.08
+    assert t.times["a"] > t.times["b"]
     assert "b" in t.times
 
 
