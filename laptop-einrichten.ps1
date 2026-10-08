@@ -182,17 +182,19 @@ if (-not (Test-Path $Env)) {
 
 # Die Starter kopieren die eigentliche Logik vor dem Lauf nach %TEMP% --
 # ein Update darf die laufende .cmd-Datei nicht ueberschreiben.
+# Fester Pfad statt %~dp0: wird die Datei auf den Desktop kopiert, startet sie
+# trotzdem aus $Ziel (08.10.: Kopie auf dem Desktop suchte Desktop\app\.venv).
 $Start = @(
     "@echo off",
     "rem Startet Rechnung mit Selbst-Update. Angelegt von laptop-einrichten.ps1.",
-    "copy /y `"%~dp0app\windows\laptop-start.cmd`" `"%TEMP%\rechnung-laptop-start.cmd`" >nul",
-    "call `"%TEMP%\rechnung-laptop-start.cmd`" `"%~dp0.`""
+    "copy /y `"$Ziel\app\windows\laptop-start.cmd`" `"%TEMP%\rechnung-laptop-start.cmd`" >nul",
+    "call `"%TEMP%\rechnung-laptop-start.cmd`" `"$Ziel`""
 )
 $Nacht = @(
     "@echo off",
     "rem Nachtlauf mit Update davor. Angelegt von laptop-einrichten.ps1.",
-    "copy /y `"%~dp0app\windows\laptop-nachtlauf.cmd`" `"%TEMP%\rechnung-laptop-nachtlauf.cmd`" >nul",
-    "call `"%TEMP%\rechnung-laptop-nachtlauf.cmd`" `"%~dp0.`""
+    "copy /y `"$Ziel\app\windows\laptop-nachtlauf.cmd`" `"%TEMP%\rechnung-laptop-nachtlauf.cmd`" >nul",
+    "call `"%TEMP%\rechnung-laptop-nachtlauf.cmd`" `"$Ziel`""
 )
 $StartCmd = Join-Path $Ziel "Rechnung starten.cmd"
 $NachtCmd = Join-Path $Ziel "nachtlauf.cmd"
