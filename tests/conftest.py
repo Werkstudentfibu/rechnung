@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+# Die Tests pruefen die Standardwerte. Auf dem Laptop laedt der Starter vor dem
+# Selbst-Update die echte rechnung.env (KI an, OCR aus, Postfach ...) -- ohne
+# das hier fielen dort Tests durch und jedes Update wuerde zurueckgerollt.
+# Muss vor dem ersten Import von rechnung.* passieren (Config liest beim Import).
+for _k in [k for k in os.environ if k.startswith("RECHNUNG_")]:
+    del os.environ[_k]
 
 import pytest
 from reportlab.lib.pagesizes import A4

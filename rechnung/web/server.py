@@ -276,8 +276,10 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         raise HTTPException(404, "Datei nicht gefunden")
 
     @app.get("/", response_class=HTMLResponse)
-    def index() -> str:
-        return (_STATIC / "index.html").read_text("utf-8")
+    def index() -> HTMLResponse:
+        # no-store: nach einem Update soll das Fenster nie die alte Oberflaeche zeigen
+        return HTMLResponse((_STATIC / "index.html").read_text("utf-8"),
+                            headers={"Cache-Control": "no-store"})
 
     @app.get("/api/scan")
     def scan() -> JSONResponse:
