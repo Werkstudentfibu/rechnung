@@ -5,7 +5,7 @@ from __future__ import annotations
 from rechnung import jobrouter
 from rechnung.template import STANDARD_FIELDS, _AUS_STANDARD, ausgeblendet, sichtbare_felder
 
-AUS = {"bestellnummer", "ust_aufstellung", "skonto_prozent", "skonto_frist", "zahlungsreferenz"}
+AUS = {"bestellnummer", "skonto_prozent", "skonto_frist", "zahlungsreferenz"}
 
 
 def test_standard_blendet_die_fuenf_felder_aus(monkeypatch):

@@ -53,7 +53,8 @@ STANDARD_FIELDS: dict[str, tuple[str, bool]] = {
 # per KI gefragt, nicht gelernt, nicht exportiert. Intern bleiben sie nutzbar
 # (Skonto -> Faelligkeit, USt-Aufstellung -> Rechen-Pruefungen, QR-Referenz ->
 # QR-Pruefung). RECHNUNG_FELDER_AUS ueberschreibt die Liste (leer = alle an).
-_AUS_STANDARD = "bestellnummer,ust_aufstellung,skonto_prozent,skonto_frist,zahlungsreferenz"
+# ust_aufstellung ist seit dem Umbau der Betraege (feste 0/7/19-%-Zeilen) wieder sichtbar.
+_AUS_STANDARD = "bestellnummer,skonto_prozent,skonto_frist,zahlungsreferenz"
 
 
 def ausgeblendet() -> frozenset[str]:

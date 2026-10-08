@@ -78,6 +78,21 @@
   .form-grid label { padding-top: 4px; }
   .box { border: 1px solid #ddd; border-radius: 6px; padding: 10px 12px; margin: 10px 0; }
   .box h4 { margin: 0 0 6px; }
+  .box.sect { border-color: #b9d6c8; }
+  .box.sect > h4 { color: #1c7550; }
+  .box.sect > h4 .nr { display: inline-block; min-width: 20px; height: 20px; line-height: 20px; text-align: center;
+                       border-radius: 10px; background: #1c7550; color: #fff; font-size: 12px; margin-right: 4px; }
+  table.ftab { width: 100%; border-collapse: collapse; margin-top: 4px; }
+  table.ftab td { border-bottom: 1px solid #eee; padding: 3px 4px; vertical-align: top; }
+  table.ftab td.flabel { width: 150px; white-space: nowrap; padding-top: 6px; }
+  table.ftab tr.sel { background: #e3efe9; }
+  table.ftab.summen td.flabel { font-weight: 600; }
+  .fval { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .fval .val-input { flex: 1; min-width: 120px; border: none; background: transparent; font: inherit; outline: none; padding: 2px; }
+  .fmeta { white-space: nowrap; }
+  button.mini { padding: 1px 6px; font-size: 12px; white-space: nowrap; }
+  .actionbar { position: sticky; bottom: 0; background: #fff; border-top: 2px solid #1c7550;
+               padding: 8px 0; margin-top: 10px; z-index: 6; }
   td.abw { background: #fff1b8; outline: 1px solid #faad14; }
   td.aus, th.aus { opacity: .45; text-decoration: line-through; }
   /* Vorschlaege im PDF (Baustein 11b): Rahmen je Feld, Tabellenzeilen hervorgehoben */
@@ -263,6 +278,9 @@ function applyInvoiceData(d) {
     addresses: d.addresses || [], defs, selField: null, assign: {},
     current: d.current || {}, supplier: d.supplier, identifiers: d.identifiers || {},
     match: d.match,
+    detectedAddress: d.detected_address || null,
+    holdReasons: d.hold_reasons || [], statusLabel: d.status_label || '',
+    llmRejected: d.llm_rejected || {},
     lineItems: (d.line_items || []).map(it => ({ ...it })),
     // Herkunft je Zeile aus der vollstaendig ergaenzten Aufstellung
     // (``tax_breakdown``, SPEC Baustein 2/3) in die editierbaren Zeilen
@@ -322,6 +340,65 @@ function fitPages() {
 }
 window.addEventListener('resize', fitPages);
 
+const FELD_LABEL = {
+  rechnungsnummer: 'Rechnungsnummer', rechnungsdatum: 'Rechnungsdatum',
+  faelligkeit: 'Fälligkeit', waehrung: 'Währung', kostenstelle: 'Kostenstelle',
+  netto: 'Gesamt Netto', ust_betrag: 'Gesamt MwSt', brutto: 'Gesamt Brutto',
+  ust_satz: 'MwSt-Satz (Kopf)',
+};
+
+/* Eine Feldzeile: Bezeichnung | Wert (editierbar) + Herkunft + Markieren | Zuordnung */
+function fieldRow(name) {
+  const def = STATE.defs[name] || { value_type: 'text', required: false };
+  const cur = STATE.current[name] || {};
+  const tr = document.createElement('tr'); tr.dataset.field = name;
+  // Herkunft (SPEC Baustein 3): gelesen/errechnet/kopf/korrigiert --
+  // errechnet/kopf kursiv + Tooltip mit der Formel (steht in ``raw``).
+  const herk = cur.herkunft || '';
+  const herkTitle = (herk === 'errechnet' || herk === 'kopf') && cur.raw
+    ? ` title="${esc(cur.raw)}"` : '';
+  const src = cur.source && cur.source !== 'missing'
+    ? ` <span class="badge ${esc(cur.source)} herkunft-${esc(herk)}"${herkTitle}>${esc(cur.source)}</span>`
+    : '';
+  const valStr = cur.value !== undefined && cur.value !== null ? (typeof cur.value === 'object' ? JSON.stringify(cur.value) : cur.value) : '';
+  // Kandidat fuers Markieren: kein Anker-Feld, oder einer, der (noch) nicht
+  // zuverlaessig genug liefert (pipeline.CONF_MIN = 0.7).
+  const needsAnchor = !cur.source || cur.source === 'missing' || cur.source === 'llm'
+    || (cur.confidence != null && cur.confidence < 0.7);
+  tr.innerHTML = `<td class="flabel" title="${esc(name)} (${esc(def.value_type)})">${esc(FELD_LABEL[name] || name)}${def.required ? ' *' : ''}</td>
+    <td>
+      <div class="fval">
+        <input class="val-input" data-field="${esc(name)}" value="${esc(valStr)}"
+               style="${herk === 'errechnet' || herk === 'kopf' ? 'font-style:italic;' : ''}"
+               ${herkTitle}
+               onchange="saveCorrection('${esc(name)}', this.value)"
+               onclick="event.stopPropagation(); selectField('${esc(name)}', this.closest('tr'))">
+        <span class="fmeta">${cur.confidence ? `<span class="hint">(${cur.confidence})</span>` : ''}${src}</span>
+        ${needsAnchor ? `<button class="ghost mini" title="Position im PDF anklicken -- kuenftige Rechnungen dieses Lieferanten finden das Feld dann automatisch, ohne KI" onclick="event.stopPropagation(); markInPdf('${esc(name)}')">📍 markieren</button>` : ''}
+        ${cur.source === 'manual' ? `<button class="danger mini" title="Korrektur zurücknehmen" onclick="event.stopPropagation(); clearCorrection('${esc(name)}')">↺</button>` : ''}
+      </div>
+      <div class="ass"></div>
+    </td>`;
+  tr.onclick = () => selectField(name, tr);
+  return tr;
+}
+
+/* Details der gewaehlten Rechnungsadresse (Stammdaten, Reiter "Rechnungsadressen") */
+function zeigeAdresse() {
+  const el = $('#addr-detail'); if (!el) return;
+  const id = ($('#variant') || {}).value;
+  const a = (STATE.addresses || []).find(x => x.id === id);
+  if (!a) { el.innerHTML = ''; return; }
+  const rows = [
+    ['Adresse', (a.lines || []).join(', ')],
+    ['Kostenstelle', a.cost_center],
+    ['Mandant / Firmennr.', a.company_code],
+    ['Notiz', a.notes],
+  ].filter(([, v]) => v);
+  el.innerHTML = rows.length ? `<div class="form-grid">${rows.map(([k, v]) =>
+    `<label>${esc(k)}</label><div>${esc(v)}</div>`).join('')}</div>` : '';
+}
+
 function renderInvoice(d) {
   const work = $('#work'); work.innerHTML = ''; work.classList.add('split');
   // Rechnung links, Werte rechts -- jede Spalte scrollt fuer sich, damit auf dem
@@ -330,85 +407,68 @@ function renderInvoice(d) {
   const pagesCol = document.createElement('div'); pagesCol.className = 'pages';
   work.appendChild(pagesCol); work.appendChild(w);   // Rechnung links
   const sup = d.match || {};
+  const detAddr = d.detected_address !== undefined ? d.detected_address : STATE.detectedAddress;
+  const holdReasons = d.hold_reasons || STATE.holdReasons || [];
+  const holdLabel = d.status_label || STATE.statusLabel;
+  const ids = (d.identifiers && (d.identifiers.ustids || []).length) ? d.identifiers : (STATE.identifiers || {});
+  const variant = d.variant || STATE.variant || 'standard';
   const addrOpts = ['<option value="standard">standard (alle Adressen)</option>']
     .concat((d.addresses || []).map(a =>
-      `<option value="${esc(a.id)}" ${d.variant === a.id ? 'selected' : ''}>${esc(a.name || a.id)}</option>`))
+      `<option value="${esc(a.id)}" ${variant === a.id ? 'selected' : ''}>${esc(a.name || a.id)}</option>`))
     .join('');
 
+  // Alles Bearbeitbare liegt in #fields (Feldzeilen/Markieren/paint() haengen daran).
+  // Reihenfolge wie die Sachbearbeitung prueft (Aaron, 08.10.2026):
+  // 1 Rechnungsadresse, 2 Lieferant, 3 Rechnung, 4 Betraege, 5 Positionen.
   const fbox = document.createElement('div'); fbox.id = 'fields';
-  const hold = (d.hold_reasons || []).length
-    ? `<div class="holdbox"><b>${esc(d.status_label || 'zurückgestellt – menschlich bearbeiten')}</b><br>
-         ${(d.hold_reasons || []).map(esc).join('<br>')}</div>` : '';
-  fbox.innerHTML = `${hold}
-    <div>
-      Lieferant-ID <input id="sid" value="${esc(sup.id || '')}" placeholder="z.B. muster-gmbh">
-      Name <input id="sname" value="${esc(sup.name || '')}" size="20">
-      Rechnungsadresse <select id="variant">${addrOpts}</select>
+  const platziert = new Set();
+  const feldTabelle = (namen) => {
+    const t = document.createElement('table'); t.className = 'ftab';
+    for (const n of namen) {
+      if (!STATE.defs[n] || STATE.defs[n].value_type === 'taxblock') continue;
+      platziert.add(n); t.appendChild(fieldRow(n));
+    }
+    return t.rows.length ? t : null;
+  };
+  const abschnitt = (nr, titel) => {
+    const b = document.createElement('div'); b.className = 'box sect';
+    b.innerHTML = `<h4><span class="nr">${nr}</span> ${esc(titel)}</h4>`;
+    fbox.appendChild(b); return b;
+  };
+
+  if (holdReasons.length) {
+    const h = document.createElement('div'); h.className = 'holdbox';
+    h.innerHTML = `<b>${esc(holdLabel || 'zurückgestellt – menschlich bearbeiten')}</b><br>${holdReasons.map(esc).join('<br>')}`;
+    fbox.appendChild(h);
+  }
+
+  // 1 -- Rechnungsadresse
+  const s1 = abschnitt(1, 'Rechnungsadresse');
+  s1.insertAdjacentHTML('beforeend', `
+    <div class="form-grid">
+      <label>Geht an</label><select id="variant" onchange="zeigeAdresse()">${addrOpts}</select>
+    </div>
+    <div class="hint">${detAddr ? `erkannt: ${esc(detAddr.name)} (${detAddr.score})` : 'keine Rechnungsadresse sicher erkannt'}</div>
+    <div id="addr-detail"></div>`);
+  const t1 = feldTabelle(['kostenstelle']); if (t1) s1.appendChild(t1);
+
+  // 2 -- Lieferant
+  const s2 = abschnitt(2, 'Lieferant');
+  s2.insertAdjacentHTML('beforeend', `
+    <div class="form-grid">
+      <label>Lieferant-ID</label><input id="sid" value="${esc(sup.id || '')}" placeholder="z.B. muster-gmbh">
+      <label>Name</label><input id="sname" value="${esc(sup.name || '')}">
     </div>
     <div class="hint">
-      ${d.match ? `erkannt: ${esc(d.match.name)} (${d.match.score})` :
-        `neuer Lieferant – USt-IdNr ${(d.identifiers.ustids || []).join(',') || '?'}` +
-        (d.identifiers.currency && d.identifiers.currency !== 'EUR'
-          ? ` · Währung erkannt: ${esc(d.identifiers.currency)}` : '')}
-      ${d.detected_address ? ` · Adresse: ${esc(d.detected_address.name)} (${d.detected_address.score})` : ''}
+      ${d.match && d.match.score != null ? `erkannt: ${esc(d.match.name)} (${d.match.score})` :
+        d.match && d.match.id ? '' :
+        `neuer Lieferant – USt-IdNr ${(ids.ustids || []).join(',') || '?'}` +
+        (ids.currency && ids.currency !== 'EUR' ? ` · Währung erkannt: ${esc(ids.currency)}` : '')}
       ${d.supplier && d.supplier.fixed_fields && Object.keys(d.supplier.fixed_fields).length
         ? ` · feste Werte: ${Object.keys(d.supplier.fixed_fields).join(', ')}` : ''}
-    </div>`;
-  if (d.supplier) fbox.appendChild(renderSupplierInfoBox(d.supplier));
-  if (!d.match) fbox.appendChild(renderNewSupplierBox(d.identifiers || {}));
-
-  const tbl = document.createElement('table');
-  tbl.innerHTML = '<tr><th>Feld</th><th>Typ</th><th>aktuell (Klick zum Editieren)</th><th>Anker / Wert</th></tr>';
-  for (const [name, def] of Object.entries(STATE.defs)) {
-    const cur = STATE.current[name] || {};
-    const tr = document.createElement('tr'); tr.dataset.field = name;
-    // Herkunft (SPEC Baustein 3): gelesen/errechnet/kopf/korrigiert --
-    // errechnet/kopf kursiv + Tooltip mit der Formel (steht in ``raw``,
-    // z.B. "400.00 / 1.19 (Brutto, 19 %)", siehe rechnen.py).
-    const herk = cur.herkunft || '';
-    const herkTitle = (herk === 'errechnet' || herk === 'kopf') && cur.raw
-      ? ` title="${esc(cur.raw)}"` : '';
-    const src = cur.source && cur.source !== 'missing'
-      ? ` <span class="badge ${esc(cur.source)} herkunft-${esc(herk)}"${herkTitle}>${esc(cur.source)}</span>`
-      : '';
-    const valStr = cur.value !== undefined && cur.value !== null ? (typeof cur.value === 'object' ? JSON.stringify(cur.value) : cur.value) : '';
-    // Kandidat fuers Markieren: kein Anker-Feld, oder einer, der (noch) nicht
-    // zuverlaessig genug liefert -- deckungsgleich mit den "Luecken", die der
-    // semantische Fallback serverseitig fuellt (pipeline.CONF_MIN = 0.7).
-    const needsAnchor = !cur.source || cur.source === 'missing' || cur.source === 'llm'
-      || (cur.confidence != null && cur.confidence < 0.7);
-    tr.innerHTML = `<td>${esc(name)}${def.required ? ' *' : ''}</td>
-      <td>${esc(def.value_type)}</td>
-      <td>
-        <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
-          <input class="val-input" data-field="${esc(name)}" value="${esc(valStr)}"
-                 style="flex:1; border:none; background:transparent; font:inherit; outline:none; padding:2px;
-                        ${herk === 'errechnet' || herk === 'kopf' ? 'font-style:italic;' : ''}"
-                 ${herkTitle}
-                 onchange="saveCorrection('${esc(name)}', this.value)"
-                 onclick="event.stopPropagation(); selectField('${esc(name)}', this.closest('tr'))">
-          <span style="white-space:nowrap; flex-shrink:0;">${cur.confidence ? `<span class="hint">(${cur.confidence})</span>` : ''}${src}</span>
-          ${needsAnchor ? `<button class="ghost" style="padding:2px 6px; white-space:nowrap" title="Position im PDF anklicken -- kuenftige Rechnungen dieses Lieferanten finden das Feld dann automatisch, ohne LLM-Aufruf" onclick="event.stopPropagation(); markInPdf('${esc(name)}')">📍 im PDF markieren</button>` : ''}
-          ${cur.source === 'manual' ? `<button class="danger" style="padding:0 4px" title="Korrektur zurücknehmen" onclick="event.stopPropagation(); clearCorrection('${esc(name)}')">↺</button>` : ''}
-        </div>
-      </td>
-      <td class="ass"></td>`;
-    tr.onclick = () => selectField(name, tr);
-    tbl.appendChild(tr);
-  }
-  fbox.appendChild(tbl);
-
-  // KI-Vorschlaege, die NICHT im PDF-Text belegt waren -- verworfen, aber
-  // sichtbar (Halluzinations-Schutz, Stufe 2).
-  const rej = Object.entries(d.llm_rejected || {});
-  if (rej.length) {
-    const rbox = document.createElement('div'); rbox.className = 'box';
-    rbox.innerHTML = `<h4>Verworfene KI-Vorschläge</h4>
-      <div class="hint">Nicht im PDF-Text gefunden – nicht übernommen:</div>` +
-      rej.map(([f, why]) => `<div class="hint">${esc(f)}: ${esc(why)}</div>`).join('');
-    fbox.appendChild(rbox);
-  }
-
+    </div>`);
+  if (d.supplier) s2.appendChild(renderSupplierInfoBox(d.supplier));
+  if (!d.match) s2.appendChild(renderNewSupplierBox(ids));
   if ((STATE.similar || []).length) {
     const simBox = document.createElement('div'); simBox.className = 'box';
     simBox.innerHTML = `<h4>Ähnliche bekannte Lieferanten</h4>
@@ -423,26 +483,56 @@ function renderInvoice(d) {
               Vorlage „${esc(t.variant)}“ übernehmen${t.secured ? ' ✓' : ''}
             </button>`).join(' ')}
         </div>`).join('');
-    fbox.appendChild(simBox);
+    s2.appendChild(simBox);
   }
 
-  const bar = document.createElement('div'); bar.style.marginTop = '8px';
+  // 3 -- Rechnung
+  const s3 = abschnitt(3, 'Rechnung');
+  const t3 = feldTabelle(['rechnungsnummer', 'rechnungsdatum', 'faelligkeit', 'waehrung']);
+  if (t3) s3.appendChild(t3);
+
+  // 4 -- Betraege: Aufschluesselung je Steuersatz + Gesamtsummen
+  const s4 = abschnitt(4, 'Beträge');
+  s4.appendChild(renderTaxPreview());
+  const t4 = feldTabelle(['netto', 'ust_betrag', 'brutto']);
+  if (t4) { t4.classList.add('summen'); s4.appendChild(t4); }
+  s4.appendChild(renderPruefBox());
+
+  // uebrige Felder (z.B. MwSt-Satz aus dem Kopf, eigene/gelernte Felder)
+  const rest = Object.keys(STATE.defs).filter(n => !platziert.has(n));
+  const tRest = feldTabelle(rest);
+  if (tRest) {
+    const sx = document.createElement('div'); sx.className = 'box';
+    sx.innerHTML = '<h4>Weitere Felder</h4>'; sx.appendChild(tRest); fbox.appendChild(sx);
+  }
+
+  // 5 -- Positionen
+  const s5 = abschnitt(5, 'Positionen');
+  if (STATE.li.active) s5.appendChild(renderLiPanel());
+  s5.appendChild(renderLiPreviewBox(STATE.lineItems));
+
+  // KI-Vorschlaege, die NICHT im PDF-Text belegt waren -- verworfen, aber
+  // sichtbar (Halluzinations-Schutz, Stufe 2).
+  const rej = Object.entries(d.llm_rejected || STATE.llmRejected || {});
+  if (rej.length) {
+    const rbox = document.createElement('div'); rbox.className = 'box';
+    rbox.innerHTML = `<h4>Verworfene KI-Vorschläge</h4>
+      <div class="hint">Nicht im PDF-Text gefunden – nicht übernommen:</div>` +
+      rej.map(([f, why]) => `<div class="hint">${esc(f)}: ${esc(why)}</div>`).join('');
+    fbox.appendChild(rbox);
+  }
+
+  const bar = document.createElement('div'); bar.className = 'actionbar';
   bar.innerHTML = `
     <button onclick="saveTemplate()">Template speichern</button>
     ${canConfirm() ? `<button class="ghost" onclick="confirmTpl()">Extraktion bestätigen (b)</button>` : ''}
     <button class="ghost" onclick="addCustomField()">+ eigenes Feld</button>
     <button class="ghost" onclick="toggleLi()">Positionstabelle ${STATE.li.active ? 'ausblenden' : 'anlernen'}</button>
-    <span class="hint">Feld-Zeile wählen · Klick = Wert · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = bestätigen + nächste' : ''}</span>
-    <span id="msg" class="hint"></span>`;
+    <div class="hint">Feld-Zeile wählen · Klick = Wert · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = bestätigen + nächste' : ''}</div>
+    <div id="msg" class="hint"></div>`;
   fbox.appendChild(bar);
-
-  if (STATE.li.active) fbox.appendChild(renderLiPanel());
   w.appendChild(fbox);
-
-  w.appendChild(renderPruefBox());
-  w.appendChild(renderLiPreviewBox(STATE.lineItems));
-  // USt-Aufstellung nur, wenn das Feld nicht ausgeblendet ist (Aaron, 08.10.)
-  if (!(d.hidden_fields || []).includes('ust_aufstellung')) w.appendChild(renderTaxPreview(d));
+  zeigeAdresse();
 
   for (const pg of d.pages) {
     const wrap = document.createElement('div'); wrap.className = 'pdfwrap';
@@ -790,39 +880,78 @@ async function saveCategoryCorrection(text, kategorie) {
   });
   $('#msg').textContent = `Kategorie „${kategorie}“ gelernt für: ${text.slice(0, 50)}`;
 }
-function renderTaxPreview(d) {
-  // USt-Aufstellung wie die Positionen editierbar (Baustein 11b); daraus
-  // lernt das Programm beim Bestaetigen den Steuerblock selbst.
-  const box = document.createElement('div'); box.className = 'box'; box.id = 'tax-preview-box';
+/* Steuer-Aufschluesselung mit festen Zeilen (Aaron, 08.10.2026): immer eine
+   0-%-Zeile und zwei Satz-Zeilen (Standard 7 % / 19 %), je Netto, MwSt-Betrag,
+   MwSt-Satz. Leere Platzhalter-Zeilen werden erst beim Eintippen zu echten
+   Zeilen der USt-Aufstellung (STATE.taxRows) -- daraus lernt das Programm beim
+   Bestaetigen den Steuerblock wie bisher. */
+const STD_SAETZE = [7, 19];
+function taxSlots() {
   const rows = STATE.taxRows || [];
+  const num = v => { const x = parseFloat(String(v ?? '').replace(',', '.')); return isNaN(x) ? null : x; };
+  const slots = [];
+  const null_i = rows.findIndex(r => num(r.satz) === 0);
+  slots.push({ ri: null_i, satz: 0, fest: true });
+  const andere = rows.map((r, ri) => ({ ri, satz: num(r.satz) })).filter(x => x.ri !== null_i)
+    .sort((a, b) => (a.satz ?? 999) - (b.satz ?? 999));
+  for (const a of andere) slots.push({ ri: a.ri, satz: a.satz });
+  const belegt = new Set(andere.map(a => a.satz));
+  for (const std of STD_SAETZE) {
+    if (slots.length >= 3) break;
+    if (!belegt.has(std)) slots.push({ ri: -1, satz: std });
+  }
+  return slots.slice(0, 1).concat(slots.slice(1).sort((a, b) => (a.satz ?? 999) - (b.satz ?? 999)));
+}
+function renderTaxPreview() {
+  const box = document.createElement('div'); box.id = 'tax-preview-box';
   const pr = (STATE.pruefung || {}).ust || [];
   const cur = STATE.current.ust_aufstellung || {};
-  box.innerHTML = `<h4>USt-Aufstellung${cur.source === 'manual' ? ' <span class="badge manual">manual</span>' : ''}</h4>
-    <div class="hint">Netto/USt je Satz – wird gegen die Kopfsummen und die Positionen gerechnet.
-      Fehlt etwas, Zeile hier eintragen; beim Bestätigen sucht das Programm den Block selbst im PDF.</div>
-    ${rows.length ? `<table class="edit"><tr><th>Satz %</th><th class="num">Netto</th><th class="num">USt</th><th>Prüfung</th><th></th></tr>
-      ${rows.map((r, ri) => `<tr class="${rowCls(pr[ri])}">
-        ${['satz', 'netto', 'ust'].map(k => {
-            const h = (r._herkunft || {})[k];
-            const hcls = (h === 'errechnet' || h === 'kopf') ? h : '';
-            return `<td class="num"><input class="${hcls}" value="${esc(nz(r[k]))}"
-                      ${h ? `title="${esc(h)}"` : ''}
-                      onchange="taxSetCell(${ri}, '${k}', this.value)"></td>`;
-          }).join('')}
-        ${stCell(pr[ri])}
-        <td><button class="danger" style="padding:0 4px" title="Zeile löschen" onclick="taxDelRow(${ri})">×</button></td>
-      </tr>`).join('')}</table>` : ''}
+  const zelle = (sl, k) => {
+    const r = sl.ri >= 0 ? STATE.taxRows[sl.ri] : null;
+    const v = r ? r[k] : (k === 'satz' ? sl.satz : '');
+    const h = r && (r._herkunft || {})[k];
+    const hcls = (h === 'errechnet' || h === 'kopf') ? h : '';
+    const ro = sl.fest && k === 'satz' ? 'readonly tabindex="-1"' : '';
+    return `<td class="num"><input class="${hcls}" value="${esc(nz(v))}" ${ro}
+              ${h ? `title="${esc(h)}"` : ''} placeholder="${k === 'satz' ? '' : '–'}"
+              onchange="taxSetSlot(${sl.ri}, ${sl.satz ?? 'null'}, '${k}', this.value)"></td>`;
+  };
+  const slots = taxSlots();
+  box.innerHTML = `
+    <table class="edit steuer"><tr><th>Steuersatz</th><th class="num">Netto</th><th class="num">MwSt-Betrag</th><th class="num">MwSt %</th><th>Prüfung</th><th></th></tr>
+      ${slots.map(sl => `<tr class="${sl.ri >= 0 ? rowCls(pr[sl.ri]) : 'leer'}">
+        <td>${sl.fest ? '0 % (steuerfrei)' : (sl.satz != null ? esc(String(sl.satz)) + ' %' : 'weiterer Satz')}</td>
+        ${zelle(sl, 'netto')}${zelle(sl, 'ust')}${zelle(sl, 'satz')}
+        ${sl.ri >= 0 ? stCell(pr[sl.ri]) : '<td></td>'}
+        <td>${sl.ri >= 0 ? `<button class="danger" style="padding:0 4px" title="Werte dieser Zeile löschen" onclick="taxDelRow(${sl.ri})">×</button>` : ''}</td>
+      </tr>`).join('')}
+    </table>
     <div style="margin-top:6px">
-      <button class="ghost" onclick="taxAddRow()">+ Zeile</button>
-      <button onclick="saveTabelle('ust')" ${STATE.tabDirty.ust ? '' : 'class="ghost"'}>USt-Aufstellung übernehmen</button>
+      <button class="ghost" onclick="taxAddRow()">+ weiterer Satz</button>
+      <button onclick="saveTabelle('ust')" ${STATE.tabDirty.ust ? '' : 'class="ghost"'}>Aufschlüsselung übernehmen</button>
       ${cur.source === 'manual' ? `<button class="danger" title="Korrektur zurücknehmen" onclick="clearCorrection('ust_aufstellung')">↺</button>` : ''}
-      <span class="hint">${STATE.tabDirty.ust ? 'geändert – noch nicht übernommen' : ''}</span>
+      <span class="hint">${STATE.tabDirty.ust ? 'geändert – noch nicht übernommen' : 'Leere Zeilen kommen auf dieser Rechnung nicht vor.'}</span>
     </div>`;
   return box;
 }
+function taxSetSlot(ri, satz, k, v) {
+  if (ri < 0) {   // Platzhalter wird zur echten Zeile -- aber nur einmal je Satz
+    const num = x => parseFloat(String(x ?? '').replace(',', '.'));
+    ri = STATE.taxRows.findIndex(r => num(r.satz) === satz);
+    if (ri < 0) {
+      STATE.taxRows.push({ satz: satz ?? '', netto: '', ust: satz === 0 ? '0' : '' });
+      ri = STATE.taxRows.length - 1;
+    }
+  }
+  taxSetCell(ri, k, v);
+}
 function taxRedraw() {
-  const old = $('#tax-preview-box');
-  if (old) old.replaceWith(renderTaxPreview());
+  // erst nach dem laufenden change/blur neu zeichnen -- sonst wird das gerade
+  // bearbeitete Eingabefeld mitten im Ereignis entfernt
+  setTimeout(() => {
+    const old = $('#tax-preview-box');
+    if (old && old.isConnected) old.replaceWith(renderTaxPreview());
+  }, 0);
 }
 function taxTouched() { STATE.tabDirty.ust = true; taxRedraw(); refreshPruefung(); }
 function taxSetCell(ri, k, v) {
@@ -917,7 +1046,7 @@ function clearAssign(field) {
 
 function paint() {
   document.querySelectorAll('.w').forEach(e => e.classList.remove('anchor', 'value', 'licol', 'listop'));
-  document.querySelectorAll('#fields td.ass').forEach(td => td.innerHTML = '');
+  document.querySelectorAll('#fields .ass').forEach(td => td.innerHTML = '');
   const wraps = document.querySelectorAll('.pdfwrap');
   if (!wraps.length) return;
   for (const [f, a] of Object.entries(STATE.assign)) {
