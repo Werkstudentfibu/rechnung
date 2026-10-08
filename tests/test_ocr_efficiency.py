@@ -151,16 +151,23 @@ def test_ensure_text_runs_pages_in_parallel(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(ocr, "jobs", lambda: 2)
     produced = make_invoice(tmp_path / "ocr_out.pdf", rechnungsnr="RE-OCR")
 
+    laeufe: list[tuple[float, float]] = []
+
     def fake_run(image, out_base, timeout):
+        start = time.monotonic()
         time.sleep(0.5)
         out_base.with_suffix(".pdf").write_bytes(produced.read_bytes())
         out_base.with_suffix(".tsv").write_text(
             "level\tpage_num\tconf\ttext\n5\t1\t80.0\tok\n", "utf-8")
+        laeufe.append((start, time.monotonic()))
 
     monkeypatch.setattr(ocr, "_run_tesseract", fake_run)
-    t0 = time.monotonic()
     res = ocr.ensure_text(p, tmp_path / "cache")
-    elapsed = time.monotonic() - t0
     assert res.error == ""
     assert res.pages == 2
-    assert elapsed < 0.9   # seriell waeren es >= 1,0s (plus Rendern/Merge)
+    # Ueberlappung statt Gesamtzeit messen: eine feste Zeitgrenze wackelte auf
+    # langsamen Windows-Rechnern (0,906 s statt < 0,9 s) und haette dort ein
+    # Selbst-Update grundlos zurueckgerollt.
+    assert len(laeufe) == 2
+    (s1, e1), (s2, e2) = sorted(laeufe)
+    assert s2 < e1   # zweite Seite startet, bevor die erste fertig ist
