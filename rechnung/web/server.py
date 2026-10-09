@@ -320,6 +320,18 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                                  "fehler": "Postfach nicht eingerichtet (rechnung.env)"})
         return JSONResponse(dict(abholer.einmal(), eingerichtet=True))
 
+    @app.get("/api/postfach-bericht")
+    def postfach_bericht() -> JSONResponse:
+        """Je Mail im Postfach: wird sie abgeholt, und wenn nicht, warum
+        (ingest.bericht, nur lesend)."""
+        from ..ingest import bericht
+
+        r = bericht(dest=samples)
+        r["abholung"] = dict(abholer.status) if abholer is not None else None
+        r["eingang"] = str(samples)
+        r["im_eingang"] = [p.name for p in invoice_files(samples)]
+        return JSONResponse(r)
+
     @app.post("/api/entfernen")
     def entfernen(file: str) -> JSONResponse:
         """Rechnung aus dem Eingang nehmen (Testmail, Spam ...; Wunsch Aaron

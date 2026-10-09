@@ -591,7 +591,8 @@ def _ids(M, crit: str) -> list[bytes]:
 
 
 def fetch(cfg: ImapConfig | None = None, dest: Path | None = None,
-          dry_run: bool = False, limit: int = 0, store=None) -> FetchResult:
+          dry_run: bool = False, limit: int = 0, store=None,
+          warten: bool = True) -> FetchResult:
     cfg = cfg or ImapConfig()
     dest = Path(dest) if dest else inbox_dir()
     if not cfg.configured:
@@ -599,6 +600,10 @@ def fetch(cfg: ImapConfig | None = None, dest: Path | None = None,
 
     # Nachtlauf-Lock (lock.py, SPEC §7r): laeuft gerade ``rechnung nacht``,
     # pausiert die Abholung, statt parallel auf denselben Daten zu schreiben.
+    # Die laufende App (abholung.py, ``warten=False``) wartet nicht still
+    # stundenlang, sondern meldet es und versucht es beim naechsten Takt.
+    if not warten and lock.is_locked(data_dir()):
+        return FetchResult([], 0, dry_run, "Nachtlauf-Sperre aktiv (data\\nacht.lock) -- wartet")
     lock.wait_until_unlocked(data_dir())
     M = imaplib.IMAP4_SSL(cfg.host, cfg.port) if cfg.ssl else imaplib.IMAP4(cfg.host, cfg.port)
     saved: list[str] = []
@@ -685,3 +690,79 @@ def check_connection(cfg: ImapConfig | None = None) -> dict:
             M.logout()
         except Exception:  # noqa: BLE001 -- Check darf nicht abstuerzen
             pass
+
+
+def bericht(cfg: ImapConfig | None = None, dest: Path | None = None, anzahl: int = 15) -> dict:
+    """Postfach-Uebersicht zur Fehlersuche (09.10.2026, "neue Rechnungen
+    fehlen"): je Mail der letzten ``anzahl`` im Abholordner, ob die Abholung
+    sie nimmt und warum (nicht). Nur lesen -- ``SELECT readonly`` +
+    ``BODY.PEEK``, aendert weder Flags noch Dateien."""
+    import email.utils
+
+    cfg = cfg or ImapConfig()
+    dest = Path(dest) if dest else inbox_dir()
+    out: dict = {"ok": False, "ordner": cfg.source_folder, "postfach": cfg.user,
+                 "nachtsperre": lock.is_locked(data_dir()), "mails": [], "fehler": ""}
+    if not cfg.configured:
+        out["fehler"] = "IMAP nicht konfiguriert (RECHNUNG_IMAP_*)"
+        return out
+    bekannte = _bekannte_laden()
+    grenze = time.time() - LESEFENSTER_TAGE * 86400
+    try:
+        M = imaplib.IMAP4_SSL(cfg.host, cfg.port) if cfg.ssl else imaplib.IMAP4(cfg.host, cfg.port)
+    except OSError as e:
+        out["fehler"] = f"{type(e).__name__}: {e}"
+        return out
+    try:
+        M.login(cfg.user, cfg.password)
+        typ, raw_list = M.list()
+        out["alle_ordner"] = ([f.decode("utf-8", "replace").rsplit(' "', 1)[-1].strip('"')
+                               for f in raw_list] if typ == "OK" and raw_list and raw_list[0] else [])
+        typ, _ = M.select(cfg.source_folder, readonly=True)
+        if typ != "OK":
+            out["fehler"] = f"Ordner '{cfg.source_folder}' nicht vorhanden"
+            return out
+        alle = _ids(M, "ALL")
+        out["anzahl_im_ordner"] = len(alle)
+        for num in reversed(alle[-anzahl:]):
+            typ, data = M.fetch(num, "(FLAGS BODY.PEEK[])")
+            raw = _raw_from_fetch(data) if typ == "OK" else None
+            if raw is None:
+                out["mails"].append({"betreff": f"(Mail {num.decode()} nicht lesbar)"})
+                continue
+            kopf = b" ".join(x[0] for x in data if isinstance(x, tuple))
+            gelesen = b"\\Seen" in kopf
+            a = analyse_mail(raw, cfg.extensions)
+            datum = email.message_from_bytes(raw).get("Date", "")
+            try:
+                ts = email.utils.parsedate_to_datetime(datum).timestamp()
+            except (TypeError, ValueError):
+                ts = time.time()
+            anh = [{"name": x.filename,
+                    "status": "schon im Eingang/verarbeitet" if _schon_vorhanden(x.content, dest)
+                    else "neu"} for x in a.attachments]
+            if a.message_id and a.message_id in bekannte:
+                aktion = "schon abgeholt"
+            elif gelesen and ts < grenze:
+                aktion = f"wird NICHT abgeholt: gelesen und älter als {LESEFENSTER_TAGE} Tage"
+            elif not a.message_id and gelesen:
+                aktion = "wird NICHT abgeholt: gelesen und ohne Message-ID"
+            elif not a.attachments and not a.human_items:
+                aktion = "wird abgeholt → Menschliche Bearbeitung (kein Rechnungsanhang)"
+            elif a.attachments and all(x["status"] != "neu" for x in anh):
+                aktion = "wird abgeholt, aber Anhang ist schon da (kein Duplikat)"
+            else:
+                aktion = "wird beim nächsten Prüfen abgeholt"
+            out["mails"].append({
+                "datum": datum, "von": a.from_addr, "betreff": a.subject, "gelesen": gelesen,
+                "anhaenge": anh, "ignoriert": list(a.ignored),
+                "an_mensch": [f"{n}: {g}" for n, _c, g in a.human_items], "aktion": aktion})
+        out["ok"] = True
+    except (imaplib.IMAP4.error, OSError) as e:
+        out["fehler"] = f"{type(e).__name__}: {e}"
+    finally:
+        try:
+            M.logout()
+        except Exception:  # noqa: BLE001
+            pass
+    return out

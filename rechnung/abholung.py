@@ -35,7 +35,7 @@ class Abholer:
         if self._fetch is not None:
             return self._fetch(self.dest)
         from .ingest import fetch
-        return fetch(dest=self.dest)
+        return fetch(dest=self.dest, warten=False)
 
     def einmal(self) -> dict:
         """Eine Abholung jetzt (auch von Hand ueber /api/abholung). Laeuft

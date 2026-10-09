@@ -128,6 +128,8 @@
   <span id="stats" class="hint" style="color:#eaf5ef"></span>
   <button id="btn-postfach" style="display:none" onclick="postfachJetzt()"
           title="Postfach sofort auf neue Rechnungen prüfen">Postfach prüfen</button>
+  <button id="btn-postfach-bericht" style="display:none" onclick="postfachBericht()"
+          title="Was liegt im Postfach, und was macht das Programm mit jeder Mail?">Postfach-Übersicht</button>
   <span id="postfach" class="hint" style="color:#eaf5ef"></span>
   <span id="modus" class="hint" style="color:#eaf5ef; margin-left:auto"
         title="Umschalten nur per Befehl: rechnung modus autonom|testphase --operator NAME"></span>
@@ -1397,6 +1399,37 @@ async function ausEingangEntfernen() {
   loadList();
 }
 
+async function postfachBericht() {
+  show('scan');
+  const w = $('#work'); w.className = '';
+  w.innerHTML = '<p class="hint">Postfach wird gelesen (nur lesen, nichts wird verändert) …</p>';
+  const r = await api('/api/postfach-bericht');
+  const ab = r.abholung || {};
+  const zeilen = (r.mails || []).map(m => `<tr>
+      <td>${esc(m.datum || '')}</td><td>${esc(m.von || '')}</td><td>${esc(m.betreff || '')}</td>
+      <td>${m.gelesen ? 'ja' : 'nein'}</td>
+      <td>${(m.anhaenge || []).map(a => `${esc(a.name)} <i>(${esc(a.status)})</i>`).join('<br>')
+           || (m.ignoriert || []).map(x => esc(x) + ' <i>(ignoriert)</i>').join('<br>') || '—'}
+           ${(m.an_mensch || []).map(x => '<br>' + esc(x)).join('')}</td>
+      <td><b>${esc(m.aktion || '')}</b></td></tr>`).join('');
+  w.innerHTML = `<div style="padding:12px">
+    <h3>Postfach-Übersicht</h3>
+    <div class="hint">Mach bei Problemen ein Foto von dieser Seite.</div>
+    <table>
+      <tr><td>Postfach</td><td>${esc(r.postfach || '')} · Ordner „${esc(r.ordner || '')}“ · ${r.anzahl_im_ordner ?? '?'} Mail(s) darin</td></tr>
+      <tr><td>Verbindung</td><td>${r.ok ? 'OK' : 'FEHLER: ' + esc(r.fehler || '')}</td></tr>
+      <tr><td>Automatische Abholung</td><td>${ab.minuten ? `alle ${ab.minuten} Min.` : 'aus'} · zuletzt ${esc(ab.letzte_pruefung || '–')}
+        · ${ab.mails_zuletzt ?? 0} Mail(s), ${ab.zuletzt_neu ?? 0} neu ${ab.laeuft ? '· <b>läuft gerade</b>' : ''}
+        ${ab.fehler ? '<br><b>Fehler: ' + esc(ab.fehler) + '</b>' : ''}</td></tr>
+      ${r.nachtsperre ? '<tr><td>Sperre</td><td><b>Nachtlauf-Sperre aktiv – Abholung wartet</b></td></tr>' : ''}
+      <tr><td>Andere Ordner</td><td>${esc((r.alle_ordner || []).join(' · '))}</td></tr>
+      <tr><td>Eingang</td><td>${esc(r.eingang || '')}: ${(r.im_eingang || []).length} Datei(en)</td></tr>
+    </table>
+    <h4>Letzte Mails im Ordner „${esc(r.ordner || '')}“</h4>
+    <table><tr><th>Datum</th><th>Von</th><th>Betreff</th><th>gelesen</th><th>Anhänge</th><th>Was das Programm tut</th></tr>${zeilen}</table>
+  </div>`;
+}
+
 /* ================= Postfach-Abholung (abholung.py) ================= */
 // Die App holt das Postfach selbst regelmaessig ab (Standard alle 5 Min.);
 // hier nur Anzeige + Liste neu laden, sobald etwas Neues angekommen ist.
@@ -1404,6 +1437,7 @@ let POSTFACH_NEU = null;
 function zeigePostfach(st) {
   if (!st || !st.eingerichtet) return;
   $('#btn-postfach').style.display = '';
+  $('#btn-postfach-bericht').style.display = '';
   const t = st.fehler ? `Postfach: Fehler (${st.letzte_pruefung || '–'})`
     : st.letzte_pruefung ? `Postfach geprüft ${st.letzte_pruefung}` : 'Postfach: noch nicht geprüft';
   $('#postfach').textContent = t;
