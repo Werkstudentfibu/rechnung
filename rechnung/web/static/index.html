@@ -1444,6 +1444,8 @@ async function postfachBericht() {
       <tr><td>Andere Ordner</td><td>${esc((r.alle_ordner || []).join(' · '))}</td></tr>
       <tr><td>Eingang</td><td>${esc(r.eingang || '')}: ${(r.im_eingang || []).length} Datei(en)</td></tr>
     </table>
+    <h4>Programm</h4>
+    <table>${Object.entries(r.system || {}).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(String(v))}</td></tr>`).join('')}</table>
     <h4>Letzte Mails im Ordner „${esc(r.ordner || '')}“</h4>
     <table><tr><th>Datum</th><th>Von</th><th>Betreff</th><th>gelesen</th><th>Anhänge</th><th>Was das Programm tut</th></tr>${zeilen}</table>
   </div>`;

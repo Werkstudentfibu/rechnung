@@ -320,6 +320,32 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                                  "fehler": "Postfach nicht eingerichtet (rechnung.env)"})
         return JSONResponse(dict(abholer.einmal(), eingerichtet=True))
 
+    _gestartet = __import__("time").strftime("%d.%m. %H:%M:%S")
+
+    def _systemstatus() -> dict:
+        """Wirksame Einstellungen DIESES laufenden Prozesses (Fehlersuche
+        09.10.2026: rechnung.env sagte OCR=1, Programm meldete OCR aus)."""
+        import os
+        import sys
+
+        from .. import ocr as ocrmod
+        from .. import selbstupdate
+        from ..config import LlmConfig
+
+        llm = LlmConfig()
+        return {
+            "prozess": f"PID {os.getpid()}, gestartet {_gestartet}",
+            "stand": selbstupdate.version().get("commit", ""),
+            "python": sys.executable,
+            "env_ocr": repr(os.environ.get("RECHNUNG_OCR_ENABLED")),
+            "ocr_an": ocrmod.enabled(),
+            "tesseract": ocrmod.tesseract_cmd() or "",
+            "ocr_verfuegbar": bool(ocrmod.tesseract_cmd()) and ocrmod.available(),
+            "tessdata": os.environ.get("TESSDATA_PREFIX", ""),
+            "ki_an": llm.enabled, "ki_modell": llm.model,
+            "daten": str(store.root),
+        }
+
     @app.get("/api/postfach-bericht")
     def postfach_bericht() -> JSONResponse:
         """Je Mail im Postfach: wird sie abgeholt, und wenn nicht, warum
@@ -329,6 +355,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         r = bericht(dest=samples)
         r["abholung"] = dict(abholer.status) if abholer is not None else None
         r["eingang"] = str(samples)
+        r["system"] = _systemstatus()
         r["im_eingang"] = [p.name for p in invoice_files(samples)]
         return JSONResponse(r)
 
