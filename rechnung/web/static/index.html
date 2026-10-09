@@ -264,11 +264,30 @@ async function loadList() {
   }
 }
 
+let LADE_DATEI = null;
 async function openInvoice(file, row) {
+  LADE_DATEI = file;
   document.querySelectorAll('#list .row').forEach(x => x.classList.remove('active'));
   row && row.classList.add('active');
-  const d = await api('/api/invoice?file=' + encodeURIComponent(file));
-  applyInvoiceData(d);
+  // Sichtbar machen, dass gearbeitet wird -- Texterkennung + KI brauchen auf
+  // dem Laptop ggf. eine Weile; Fehler anzeigen statt still nichts zu tun
+  // (Befund Aaron 09.10.2026: "es passiert gar nichts").
+  const w = $('#work'); const t0 = Date.now();
+  w.className = '';
+  w.innerHTML = `<p class="hint" style="padding:12px">„${esc(file)}“ wird gelesen (Texterkennung/KI) … <span id="lade-zeit">0</span> s</p>`;
+  const tick = setInterval(() => { const el = $('#lade-zeit'); if (el) el.textContent = Math.round((Date.now() - t0) / 1000); }, 1000);
+  try {
+    const r = await fetch('/api/invoice?file=' + encodeURIComponent(file));
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(`${r.status}: ${d.detail || r.statusText}`);
+    if (LADE_DATEI !== file) return;   // inzwischen andere Rechnung gewaehlt
+    applyInvoiceData(d);
+  } catch (e) {
+    if (LADE_DATEI !== file) return;
+    w.innerHTML = `<div style="padding:12px"><h3>Rechnung konnte nicht geöffnet werden</h3>
+      <p><b>${esc(file)}</b></p><p>${esc(String(e && e.message || e))}</p>
+      <p class="hint">Nach ${Math.round((Date.now() - t0) / 1000)} s. Bitte ein Foto davon an Emmy schicken.</p></div>`;
+  } finally { clearInterval(tick); }
 }
 
 function applyInvoiceData(d) {
