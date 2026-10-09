@@ -112,6 +112,13 @@ class Result:
     # KI-Vorschlaege, die NICHT im PDF-Text belegt waren (Feld -> Grund) --
     # verworfen, aber sichtbar, damit der Mensch weiss, was das Modell meinte.
     llm_rejected: dict[str, str] = field(default_factory=dict)
+    # Von der KI auf der Rechnung belegte Lieferantenangaben (semantic
+    # _SUPPLIER_KEYS) -- nur Hinweis, nie Identitaet; dient dazu, den Namen
+    # eines Lieferanten-Entwurfs zu fuellen (09.10.2026).
+    ki_lieferant: dict[str, str] = field(default_factory=dict)
+    # Ebenso der Rechnungsempfaenger (name/lines) -- Vorschlag fuer eine noch
+    # unbekannte Rechnungsadresse, angelegt wird nur per Klick im UI.
+    ki_empfaenger: dict = field(default_factory=dict)
     # Schattenbetrieb: haette die Maschine allein durchgelassen? Entschieden
     # auf dem Stand VOR manuellen Korrekturen (shadow.decide) -- reine
     # Messung, aendert weder Status noch Bestaetigungspflicht.
@@ -504,7 +511,21 @@ def _find_draft_by_identifiers(store: Store, address_id: str | None,
     drafts = [s for s in hits if not s.bestaetigt]
     if len(drafts) == 1 and len(hits) == 1:
         return drafts[0]
-    return None
+    if hits or not address_id:
+        return None
+    # Entwurf, der entstand, bevor die Rechnungsadresse bekannt war
+    # (addresses=[]): uebernimmt jetzt die erkannte Adresse, statt dass ein
+    # zweiter Entwurf desselben Lieferanten entsteht.
+    waisen = [s for s in store.suppliers()
+              if not s.bestaetigt and not s.addresses
+              and (u & {norm_ustid(x) for x in s.ustids}
+                   or i & {compact(x).upper() for x in s.ibans})]
+    if len(waisen) != 1:
+        return None
+    sup = waisen[0]
+    sup.addresses = [address_id]
+    store.save_supplier(sup)
+    return sup
 
 
 def _draft_blocked(store: Store, address_id: str | None,
@@ -532,9 +553,9 @@ def _auto_draft_pdf(res: "Result", doc, store: Store, use_llm: bool,
     """Entwurf eines unbekannten Lieferanten aus einer PDF-Rechnung anlegen.
     USt-IdNr/IBAN/Domain kommen wie beim Bibliotheksabgleich selbst per
     Regex (``extract_identifiers``/``find_ibans``, kein Raten); der Name nur,
-    wenn die KI aktiv ist UND ihn im Text findet (semantic.py
-    ``_SUPPLIER_KEYS`` -> ``semantic.extract_full``, Beleg-Pflicht dort schon
-    eingebaut). Eine Anschrift liefert dieser Pfad (ohne E-Rechnungs-XML)
+    nachtraeglich aus der ohnehin laufenden KI-Stufe, wenn sie ihn im Text
+    belegt findet (``_enrich_draft_name``; semantic.py ``_SUPPLIER_KEYS``,
+    Beleg-Pflicht dort schon eingebaut). Eine Anschrift liefert dieser Pfad (ohne E-Rechnungs-XML)
     nicht belegt -- bleibt leer statt geraten."""
     ids = extract_identifiers(doc)
     ibans = sorted(ids["ibans"] | find_ibans(doc.text))
@@ -544,17 +565,31 @@ def _auto_draft_pdf(res: "Result", doc, store: Store, use_llm: bool,
     existing = _find_draft_by_identifiers(store, res.billing_address_id, ustids, ibans)
     if existing is not None:
         return existing, 0.0
-    name = ""
-    if use_llm:
-        with timer.stage("ki"):
-            full = semantic.extract_full(extraction_text(doc))
-        name = full.supplier.get("name", "")
+    # Name kommt nicht hier, sondern aus der ohnehin folgenden KI-Stufe
+    # (_llm_full -> _enrich_draft_name) -- kein zweiter KI-Aufruf je Rechnung.
     sup = _new_draft_supplier(
-        store, name=name, ustids=ustids, ibans=ibans, domains=sorted(ids["domains"]),
+        store, name="", ustids=ustids, ibans=ibans, domains=sorted(ids["domains"]),
         address_lines=[], currency=_detect_currency(doc.text),
         address_id=res.billing_address_id, sha=res.sha256)
     store.save_supplier(sup)
     return sup, 0.0
+
+
+def _is_placeholder_name(name: str) -> bool:
+    return not name.strip() or name.startswith("Unbekannt")
+
+
+def _enrich_draft_name(res: "Result", supplier: Supplier, store: Store) -> None:
+    """Platzhalter-Namen eines (unbestaetigten) Entwurfs durch den von der KI
+    auf der Rechnung belegten Lieferantennamen ersetzen. Nur in der echten
+    Verarbeitung aufgerufen (create_draft_supplier), nie in der Vorschau;
+    ein bestaetigter oder von Hand benannter Lieferant bleibt unberuehrt."""
+    name = (res.ki_lieferant.get("name") or "").strip()
+    if supplier.bestaetigt or not name or not _is_placeholder_name(supplier.name):
+        return
+    supplier.name = name
+    store.save_supplier(supplier)
+    res.supplier_name = name
 
 
 def _auto_draft_einvoice(res: "Result", inv, store: Store) -> tuple[Supplier, float] | None:
@@ -805,6 +840,8 @@ def _llm_full(res: Result, doc) -> None:
     Lieferanten-Datensatz (``library``) gewinnen gegen das Modell."""
     full = semantic.extract_full(extraction_text(doc))
     res.llm_rejected.update(full.rejected)
+    res.ki_lieferant = dict(full.supplier or {})
+    res.ki_empfaenger = dict(full.empfaenger or {})
     for name, fr in full.fields.items():
         cur = res.fields.get(name)
         if cur is None or cur.source == "missing":
@@ -1123,6 +1160,8 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
         res.status = NO_TEMPLATE
         _inject_library_fields(res.fields, supplier)
         _finish_untemplated(res, doc, supplier, store, use_llm, [addr_check], timer, qr_obj)
+        if create_draft_supplier:
+            _enrich_draft_name(res, supplier, store)
         _ocr_adjust(res, o)
         _apply_hold(res)
         res.stufenzeiten = timer.times

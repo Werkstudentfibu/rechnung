@@ -374,6 +374,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         line_items: list[dict] = []
         supplier_obj = None
         llm_rejected: dict[str, str] = {}
+        ki_lieferant: dict[str, str] = {}
+        ki_empfaenger: dict = {}
         extraction = EXTRACT_TEMPLATE
         if match:
             sup, _ = match
@@ -469,6 +471,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             extraction = res.extraction
             line_items = res.line_items
             tax_breakdown_view = res.tax_breakdown
+            ki_lieferant = res.ki_lieferant
+            ki_empfaenger = res.ki_empfaenger
         else:
             # Status/Rueckstellgruende/Pruefungen fuer die Anzeige; die KI
             # aendert daran nichts (Konfidenz gedeckelt), also ohne Modell.
@@ -528,6 +532,10 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "match": ({"id": match[0].id, "name": match[0].name, "score": match[1]}
                       if match else None),
             "identifiers": suggestion,
+            # KI-belegter Lieferantenname/-kennungen (nur Vorschlag fuer den
+            # Entwurf/"Neuer Lieferant"-Kasten, nie Identitaet).
+            "ki_lieferant": ki_lieferant,
+            "ki_empfaenger": ki_empfaenger,
             "template_id": tid,
             "variant": variant,
             "template_fields": tpl_fields,

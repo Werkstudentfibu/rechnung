@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -414,6 +415,10 @@ def extract(text: str, field_names: list[str], hints: dict[str, str],
 # verwechselt werden.
 _SUPPLIER_KEYS = {"lieferant_name": "name", "lieferant_iban": "iban",
                   "lieferant_ustid": "ustid"}
+# Rechnungsempfaenger (an wen die Rechnung adressiert ist) -- nur Vorschlag
+# fuer eine noch unbekannte Rechnungsadresse (Abschnitt "1 Rechnungsadresse",
+# 09.10.2026), nie Identitaet; angelegt wird erst per Klick.
+_RECIPIENT_KEYS = {"empfaenger_name": "name", "empfaenger_anschrift": "anschrift"}
 _LINE_KEYS = {"beschreibung": "text", "menge": "amount", "einzelpreis": "amount",
               "netto": "amount", "ust_satz": "amount"}
 
@@ -424,6 +429,7 @@ def _schema(with_lines: bool) -> dict:
     scalar = {"type": ["string", "number", "null"]}
     props = {n: scalar for n, (t, _r) in sichtbare_felder().items() if t in _SIMPLE_TYPES}
     props.update({k: {"type": ["string", "null"]} for k in _SUPPLIER_KEYS})
+    props.update({k: {"type": ["string", "null"]} for k in _RECIPIENT_KEYS})
     if with_lines:
         props["positionen"] = {"type": "array", "items": {
             "type": "object", "properties": {k: scalar for k in _LINE_KEYS}}}
@@ -463,6 +469,7 @@ def _validate(parsed: dict, schema: dict, rejected: dict[str, str]) -> dict:
 class FullExtraction:
     fields: dict[str, FieldResult] = field(default_factory=dict)
     supplier: dict[str, str] = field(default_factory=dict)  # name/iban/ustid, belegt
+    empfaenger: dict[str, object] = field(default_factory=dict)  # name/lines, belegt
     line_items: list[dict] = field(default_factory=list)
     rejected: dict[str, str] = field(default_factory=dict)  # Feld -> Grund
 
@@ -474,6 +481,7 @@ Gib jeden Wert GENAU so wieder, wie er im Text steht (gleiche Schreibweise, kein
 Felder:
 - rechnungsnummer, rechnungsdatum, netto, ust_betrag, ust_satz (Prozent), brutto, bestellnummer, kostenstelle
 - lieferant_name, lieferant_iban, lieferant_ustid: Rechnungssteller (NICHT der Rechnungsempfaenger)
+- empfaenger_name, empfaenger_anschrift: Rechnungsempfaenger (an wen die Rechnung adressiert ist); Anschrift als Strasse, PLZ Ort mit Komma getrennt
 {lines}
 JSON-Schema der Antwort:
 {schema}
@@ -482,6 +490,25 @@ Rechnungstext:
 ---
 {text}
 ---"""
+
+
+def _recipient(data: dict, verify_text: str, res: "FullExtraction") -> None:
+    """Rechnungsempfaenger mit Beleg-Pflicht: Name muss im Text stehen, von
+    der Anschrift bleiben nur die Teile, die im Text stehen."""
+    name = str(data.get("empfaenger_name") or "").strip()
+    if name:
+        if verify_in_text(verify_text, name, "name"):
+            res.empfaenger["name"] = name
+        else:
+            res.rejected["empfaenger_name"] = f"nicht im PDF gefunden: {name}"
+    raw = data.get("empfaenger_anschrift")
+    if isinstance(raw, str) and raw.strip():
+        parts = [x.strip() for x in re.split(r"[,\n]", raw) if x.strip()]
+        ok = [x for x in parts if verify_in_text(verify_text, x, "name")]
+        if ok:
+            res.empfaenger["lines"] = ok
+        if len(ok) < len(parts):
+            res.rejected["empfaenger_anschrift"] = f"teilweise nicht im PDF gefunden: {raw}"
 
 
 def _extract_full_once(prompt_text: str, verify_text: str, cfg, schema: dict) -> FullExtraction:
@@ -526,6 +553,7 @@ def _extract_full_once(prompt_text: str, verify_text: str, cfg, schema: dict) ->
             res.rejected[key] = f"nicht im PDF gefunden/ungueltig: {val}"
             continue
         res.supplier[kind] = value
+    _recipient(data, verify_text, res)
     for kind in ("iban", "ustid"):
         if kind in res.supplier:
             res.fields[kind] = FieldResult(kind, res.supplier[kind], res.supplier[kind],
@@ -581,6 +609,8 @@ def extract_full(text: str) -> FullExtraction:
             res.fields.setdefault(n, fr)
         for kind, value in retry.supplier.items():
             res.supplier.setdefault(kind, value)
+        for kind, value in retry.empfaenger.items():
+            res.empfaenger.setdefault(kind, value)
         if not res.line_items and retry.line_items:
             res.line_items = retry.line_items
         for n, why in retry.rejected.items():

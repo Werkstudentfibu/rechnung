@@ -42,6 +42,15 @@ def _atomic_write(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
+def _file_sig(p: Path) -> tuple:
+    """(mtime_ns, Groesse) -- (0, 0), wenn die Datei fehlt."""
+    try:
+        st = p.stat()
+    except OSError:
+        return (0, 0)
+    return (st.st_mtime_ns, st.st_size)
+
+
 def _read_json_safe(path: Path, default):
     """Liest JSON robust: bei Beschaedigung erst die ``.bak``-Sicherung
     versuchen, sonst die kaputte Datei zur Seite legen (nicht loeschen) und
@@ -108,6 +117,7 @@ class Store:
         self._events = self.root / "events.jsonl"
         self._processed_cache: list[dict] | None = None
         self._supplier_index_cache: dict | None = None
+        self._supplier_index_sig: tuple | None = None
 
     # ---- Lieferanten --------------------------------------------------
     def suppliers(self) -> list[Supplier]:
@@ -127,8 +137,13 @@ class Store:
         erkannt"/"keine Adressen gepflegt") -- eine Aenderung an Lieferanten
         ODER Rechnungsadressen loescht den ganzen Cache, da das Vorhandensein
         von Rechnungsadressen selbst die Kandidatenmenge beeinflusst."""
-        if self._supplier_index_cache is None:
+        # Auch Aenderungen durch eine ANDERE Store-Instanz (Guard-Thread/
+        # -Prozess legt Lieferanten-Entwuerfe an, 09.10.2026) muessen den
+        # Cache verwerfen -- deshalb zusaetzlich an Dateistand gekoppelt.
+        sig = (_file_sig(self._suppliers), _file_sig(self._addresses))
+        if self._supplier_index_cache is None or self._supplier_index_sig != sig:
             self._supplier_index_cache = {}
+            self._supplier_index_sig = sig
         key = address_id or ""
         if key not in self._supplier_index_cache:
             from .identify import build_identifier_index, kandidaten

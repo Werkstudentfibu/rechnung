@@ -465,16 +465,28 @@ function renderInvoice(d) {
     </div>
     <div class="hint">${detAddr ? `erkannt: ${esc(detAddr.name)} (${detAddr.score})` : 'keine Rechnungsadresse sicher erkannt'}</div>
     <div id="addr-detail"></div>`);
+  const kiEmpf = d.ki_empfaenger || {};
+  if (!detAddr && kiEmpf.name) s1.appendChild(renderNewAddressBox(kiEmpf));
   const t1 = feldTabelle(['kostenstelle']); if (t1) s1.appendChild(t1);
 
   // 2 -- Lieferant
   const isDraft = !!(d.supplier && d.supplier.bestaetigt === false);
+  // Von der KI auf der Rechnung belegter Name als Vorschlag: bei einem
+  // Entwurf mit Platzhalter-Namen ("Unbekannt (...)") und bei einem noch
+  // gar nicht angelegten Lieferanten -- nie bei einem bestaetigten.
+  const kiName = ((d.ki_lieferant || {}).name || '').trim();
+  const platzhalter = !sup.name || /^Unbekannt\b/.test(sup.name);
+  const nameVorschlag = kiName && platzhalter && (isDraft || !d.match) ? kiName : '';
+  const idVorschlag = nameVorschlag && !d.match && !sup.id
+    ? nameVorschlag.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') : '';
   const s2 = abschnitt(2, 'Lieferant');
   s2.insertAdjacentHTML('beforeend', `
     <div class="form-grid">
-      <label>Lieferant-ID</label><input id="sid" value="${esc(sup.id || '')}" placeholder="z.B. muster-gmbh" ${isDraft ? 'readonly' : ''}>
-      <label>Name</label><input id="sname" value="${esc(sup.name || '')}">
+      <label>Lieferant-ID</label><input id="sid" value="${esc(sup.id || idVorschlag)}" placeholder="z.B. muster-gmbh" ${isDraft ? 'readonly' : ''}>
+      <label>Name</label><input id="sname" value="${esc(nameVorschlag || sup.name || '')}">
     </div>
+    ${nameVorschlag ? '<div class="hint">Name von der KI auf der Rechnung gelesen – bitte prüfen.</div>' : ''}
     <div class="hint">
       ${isDraft ? 'Entwurf – automatisch aus einer Rechnung angelegt, noch nicht bestätigt (siehe unten).' :
         d.match && d.match.score != null ? `erkannt: ${esc(d.match.name)} (${d.match.score})` :
@@ -659,6 +671,53 @@ async function saveNewSupplierFromInvoice() {
     }),
   });
   $('#msg').textContent = `Lieferant „${sname || sid}“ angelegt -- jetzt die Felder unten anlernen.`;
+  const d2 = await api('/api/invoice?file=' + encodeURIComponent(STATE.file));
+  applyInvoiceData(d2);
+}
+
+function renderNewAddressBox(emp) {
+  // Unbekannte Rechnungsadresse (09.10.2026): Empfaenger von der KI auf der
+  // Rechnung gelesen (Beleg-Pflicht), nur Vorschlag -- angelegt wird erst
+  // per Klick, danach wird die Rechnung unter dieser Adresse neu bewertet.
+  const box = document.createElement('div'); box.className = 'box';
+  const empLines = emp.lines || [];
+  box.innerHTML = `<h4><span class="badge zurueckgestellt">unbekannt</span> Rechnungsadresse – bitte prüfen</h4>
+    <div class="hint">Auf der Rechnung gelesen, noch nicht in den Rechnungsadressen hinterlegt.
+      Werte prüfen/korrigieren, dann anlegen.</div>
+    <div class="form-grid">
+      <label>Name</label><input id="na-name" value="${esc(emp.name || '')}">
+      <label>Anschrift (je Zeile)</label><textarea id="na-lines">${esc(empLines.join('\n'))}</textarea>
+      <label>Erkennung über</label><input id="na-terms" value="${esc(emp.name || '')}" title="Text, an dem die Adresse auf künftigen Rechnungen erkannt wird">
+    </div>
+    <button onclick="saveNewAddressFromInvoice()">✓ Als Rechnungsadresse anlegen</button>`;
+  return box;
+}
+
+async function saveNewAddressFromInvoice() {
+  const name = $('#na-name').value.trim();
+  if (!name) { $('#msg').textContent = 'Name der Rechnungsadresse fehlt'; return; }
+  const id = name.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'adresse';
+  if ((STATE.addresses || []).some(a => a.id === id)) {
+    $('#msg').textContent = `Rechnungsadresse „${id}“ gibt es schon – im Reiter „Rechnungsadressen“ ergänzen.`;
+    return;
+  }
+  const terms = $('#na-terms').value.split(';').map(x => x.trim()).filter(Boolean);
+  await api('/api/addresses', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id, name, lines: lines('na-lines'), match_terms: terms.length ? terms : [name] }),
+  });
+  // Ein Lieferanten-Entwurf dieser Rechnung, der ohne Adresse entstand,
+  // gehoert ab jetzt zu dieser Rechnungsadresse (sonst wuerde er unter ihr
+  // nicht mehr gefunden und ein zweiter Entwurf entstuende).
+  const sup = STATE.supplier;
+  if (sup && sup.bestaetigt === false && !(sup.addresses || []).length) {
+    await api('/api/suppliers', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...sup, addresses: [id] }),
+    });
+  }
+  $('#msg').textContent = `Rechnungsadresse „${name}“ angelegt.`;
   const d2 = await api('/api/invoice?file=' + encodeURIComponent(STATE.file));
   applyInvoiceData(d2);
 }
