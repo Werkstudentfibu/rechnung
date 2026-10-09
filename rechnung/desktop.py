@@ -20,6 +20,21 @@ _STARTUP_TIMEOUT = 5.0
 _STARTUP_POLL = 0.05
 
 
+def freier_port(wunsch: int) -> int:
+    """``wunsch``, wenn frei -- sonst ein vom System vergebener freier Port."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", wunsch))
+            return wunsch
+        except OSError:
+            pass
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 def run(store: Store, samples: Path, port: int = 8000,
         title: str = "Rechnung") -> None:
     import uvicorn
@@ -28,6 +43,11 @@ def run(store: Store, samples: Path, port: int = 8000,
     from .web.server import create_app
 
     app = create_app(store, Path(samples))
+    # Belegt ein alter, haengengebliebener Prozess den Port, wuerde sich das
+    # Fenster sonst still mit DESSEN (altem) Stand verbinden -- Befund Aaron
+    # 09.10.2026: Update installiert, Oberflaeche trotzdem alt. Dann lieber
+    # einen freien Port nehmen.
+    port = freier_port(port)
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = uvicorn.Server(config)
 
@@ -38,6 +58,8 @@ def run(store: Store, samples: Path, port: int = 8000,
     while not server.started and waited < _STARTUP_TIMEOUT:
         time.sleep(_STARTUP_POLL)
         waited += _STARTUP_POLL
+    if not server.started:
+        raise SystemExit(f"Programm-Server startete nicht (Port {port}).")
 
     # maximiert: 1360x900 ist auf einem Laptop mit Skalierung groesser als der Bildschirm
     webview.create_window(title, f"http://127.0.0.1:{port}", width=1360, height=900,
