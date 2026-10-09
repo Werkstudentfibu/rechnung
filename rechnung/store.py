@@ -113,16 +113,29 @@ class Store:
     def suppliers(self) -> list[Supplier]:
         return [Supplier.from_dict(d) for d in _read_json_safe(self._suppliers, [])]
 
-    def supplier_index(self) -> dict:
+    def supplier_index(self, address_id: str | None = None) -> dict:
         """USt-IdNr/IBAN -> Lieferanten-IDs (identify.build_identifier_index),
         gecacht bis zur naechsten Aenderung (SPEC Effizienz-Baustein 4) --
         erspart bei jeder Rechnung das erneute Aufbauen ueber die ganze
-        Bibliothek."""
-        if self._supplier_index_cache is None:
-            from .identify import build_identifier_index
+        Bibliothek.
 
-            self._supplier_index_cache = build_identifier_index(self.suppliers())
-        return self._supplier_index_cache
+        Lieferant je Rechnungsadresse (09.10.2026): der Index wird nur ueber
+        die zu ``address_id`` passenden Kandidaten (``identify.kandidaten``)
+        gebaut, nicht ueber die ganze Bibliothek -- sonst waere ein per
+        USt-IdNr/IBAN eindeutiger Treffer bei einem Lieferanten einer ANDEREN
+        Adresse "mehrdeutig". Gecacht je Adress-ID (bzw. ``""`` fuer "keine
+        erkannt"/"keine Adressen gepflegt") -- eine Aenderung an Lieferanten
+        ODER Rechnungsadressen loescht den ganzen Cache, da das Vorhandensein
+        von Rechnungsadressen selbst die Kandidatenmenge beeinflusst."""
+        if self._supplier_index_cache is None:
+            self._supplier_index_cache = {}
+        key = address_id or ""
+        if key not in self._supplier_index_cache:
+            from .identify import build_identifier_index, kandidaten
+
+            cands = kandidaten(self.suppliers(), address_id, bool(self.addresses()))
+            self._supplier_index_cache[key] = build_identifier_index(cands)
+        return self._supplier_index_cache[key]
 
     def save_supplier(self, s: Supplier) -> None:
         rows = {x.id: x for x in self.suppliers()}
@@ -159,12 +172,18 @@ class Store:
             self._addresses,
             json.dumps([x.to_dict() for x in rows.values()], indent=2, ensure_ascii=False),
         )
+        # Ob es ueberhaupt Rechnungsadressen gibt, beeinflusst die Kandidaten-
+        # menge des Lieferanten-Index (supplier_index) -- auch eine Adress-
+        # Aenderung muss ihn daher invalidieren, nicht nur eine Lieferanten-
+        # Aenderung.
+        self._supplier_index_cache = None
 
     def delete_address(self, address_id: str) -> None:
         rows = [x for x in self.addresses() if x.id != address_id]
         _atomic_write(
             self._addresses, json.dumps([x.to_dict() for x in rows], indent=2, ensure_ascii=False)
         )
+        self._supplier_index_cache = None
 
     # ---- Templates --------------------------------------------------
     def _tpl_path(self, tid: str) -> Path:

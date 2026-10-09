@@ -78,6 +78,25 @@ def test_payload_from_result_without_mapping_keeps_own_field_names(tmp_path: Pat
     assert body["fields"] == {"netto": 1.0}
 
 
+def test_payload_from_result_includes_lieferantennummer_when_present(tmp_path: Path):
+    """Supplier.external_id (Abbyy-'Id') geht als eigenes Feld mit --
+    unabhaengig von unserer (ggf. um die BusinessUnitId erweiterten) internen
+    supplierId (Lieferant je Rechnungsadresse, 09.10.2026)."""
+    cfg = JobRouterConfig(mapping_file=str(tmp_path / "nope.json"))
+    res = {"file": "a.pdf", "fields": {}, "checks": [],
+          "supplier_id": "9001@zuerich", "supplier_external_id": "9001"}
+    body = jobrouter.payload_from_result(res, cfg)
+    assert body["supplierId"] == "9001@zuerich"
+    assert body["lieferantennummer"] == "9001"
+
+
+def test_payload_from_result_omits_lieferantennummer_when_absent(tmp_path: Path):
+    cfg = JobRouterConfig(mapping_file=str(tmp_path / "nope.json"))
+    res = {"file": "a.pdf", "fields": {}, "checks": [], "supplier_id": "muster"}
+    body = jobrouter.payload_from_result(res, cfg)
+    assert "lieferantennummer" not in body
+
+
 # ---- Herkunft je Feld/Position (SPEC Baustein 3) ---------------------------
 
 def test_payload_from_result_herkunft_je_feld(tmp_path: Path):

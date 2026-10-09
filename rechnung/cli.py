@@ -221,8 +221,14 @@ def _cmd_suppliers(args) -> int:
 def _cmd_import_vendors(args) -> int:
     from .importers import import_vendors_csv
 
-    n = import_vendors_csv(args.file, Store(args.data))
+    missing: list[str] = []
+    n = import_vendors_csv(args.file, Store(args.data), missing)
     print(f"{n} Lieferanten importiert/aktualisiert.")
+    if missing:
+        bu_ids = ", ".join(sorted(set(missing)))
+        print(f"Hinweis: {len(missing)} Lieferant(en) verweisen auf eine BusinessUnitId, "
+              f"die (noch) nicht als Rechnungsadresse existiert ({bu_ids}) -- empfiehlt sich, "
+              f"erst 'rechnung import-business-units' auszufuehren.")
     return 0
 
 

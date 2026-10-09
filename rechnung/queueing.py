@@ -26,7 +26,7 @@ LANGSAM = "langsam"
 
 
 def _classify(path: Path, store) -> str:
-    from . import einvoice, ocr
+    from . import billing, einvoice, ocr
     from . import pdf as pdfmod
     from .identify import identify_with_reason
 
@@ -36,7 +36,16 @@ def _classify(path: Path, store) -> str:
         if ocr.needs_ocr(path):
             return LANGSAM
         doc = pdfmod.load(path)
-        match, _why = identify_with_reason(doc, store.suppliers(), index=store.supplier_index())
+        # Lieferant je Rechnungsadresse (09.10.2026): Adresse zuerst bestimmen,
+        # damit dieselbe Kandidaten-Einschraenkung wie in pipeline.process()
+        # gilt -- sonst koennte hier ein Lieferant einer ANDEREN Adresse eine
+        # Rechnung faelschlich als "schnell" (aktives Template) einstufen.
+        addresses = store.addresses()
+        addr_match, _why = billing.match_text(doc.text, addresses) if addresses else (None, "")
+        address_id = addr_match[0].id if addr_match else None
+        match, _why = identify_with_reason(
+            doc, store.suppliers(), index=store.supplier_index(address_id),
+            address_id=address_id, has_addresses=bool(addresses))
         if not match:
             return LANGSAM
         active = [t for t in store.templates_for(match[0].id) if not t.stale]

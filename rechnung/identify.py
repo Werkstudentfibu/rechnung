@@ -46,6 +46,16 @@ class Supplier:
     ibans: list[str] = field(default_factory=list)
     domains: list[str] = field(default_factory=list)
     fingerprint: list[str] = field(default_factory=list)
+    # Rechnungsadressen (BillingAddress.id), denen dieser Lieferant zugeordnet
+    # ist -- wie in Abbyy FlexiCapture (Vendors.BusinessUnitId): ein Lieferant
+    # wird nur unter DIESEN Adressen gesucht, nie uebergreifend (Entscheidung
+    # Aaron, 09.10.2026). Leer = gilt fuer alle Adressen (rueckwaertskompatibel
+    # zu manuell angelegten Lieferanten vor dieser Aenderung).
+    addresses: list[str] = field(default_factory=list)
+    # Lieferantennummer im Fremdsystem (Abbyy-Spalte 'Id') -- bei Import mit
+    # BusinessUnitId ist die interne ``id`` zusammengesetzt (siehe importers.py),
+    # ``external_id`` bleibt die reine Fremd-Id fuer den Export (jobrouter.py).
+    external_id: str = ""
     # --- gepflegte Stammdaten -------------------------------------------
     address_lines: list[str] = field(default_factory=list)
     bank_name: str = ""
@@ -67,6 +77,7 @@ class Supplier:
             "id": self.id, "name": self.name, "ustids": self.ustids,
             "ibans": self.ibans, "domains": self.domains,
             "fingerprint": self.fingerprint,
+            "addresses": self.addresses, "external_id": self.external_id,
             "address_lines": self.address_lines, "bank_name": self.bank_name,
             "bic": self.bic, "bank_code": self.bank_code,
             "bank_account": self.bank_account, "creditor_id": self.creditor_id,
@@ -82,6 +93,7 @@ class Supplier:
             id=d["id"], name=d.get("name", ""), ustids=d.get("ustids", []),
             ibans=d.get("ibans", []), domains=d.get("domains", []),
             fingerprint=d.get("fingerprint", []),
+            addresses=d.get("addresses", []), external_id=d.get("external_id", ""),
             address_lines=d.get("address_lines", []),
             bank_name=d.get("bank_name", ""), bic=d.get("bic", ""),
             bank_code=d.get("bank_code", ""), bank_account=d.get("bank_account", ""),
@@ -148,14 +160,54 @@ def build_identifier_index(suppliers: list[Supplier]) -> dict[tuple[str, str], s
     return idx
 
 
+def kandidaten(suppliers: list[Supplier], address_id: str | None,
+               has_addresses: bool) -> list[Supplier]:
+    """Lieferanten, die unter der erkannten Rechnungsadresse gueltig sind --
+    wie in Abbyy FlexiCapture wird ein Lieferant nur unter der Rechnungsadresse
+    (BusinessUnit) gesucht, der er zugeordnet ist, nie uebergreifend
+    (Entscheidung Aaron, 09.10.2026). ``Supplier.addresses`` leer = gilt fuer
+    alle Adressen.
+
+    Gibt es in der Bibliothek ueberhaupt Rechnungsadressen (``has_addresses``),
+    wurde aber fuer DIESE Rechnung keine erkannt (``address_id`` ``None``),
+    werden nur die globalen Lieferanten durchsucht -- nie stillschweigend die
+    ganze Bibliothek. Sind in der Bibliothek ueberhaupt keine Rechnungsadressen
+    gepflegt (``has_addresses=False``), bleibt das Verhalten wie vor dieser
+    Aenderung: alle Lieferanten sind Kandidaten."""
+    if not has_addresses:
+        return list(suppliers)
+    if address_id is None:
+        return [s for s in suppliers if not s.addresses]
+    return [s for s in suppliers if not s.addresses or address_id in s.addresses]
+
+
+def _address_scope_reason(has_addresses: bool, address_id: str | None,
+                          address_name: str, fallback: str) -> str:
+    """Einheitlicher 'kein Lieferant'-Grund fuer ``identify_with_reason`` und
+    die E-Rechnungs-Erkennung (``pipeline._process_einvoice``) -- macht
+    erkennbar, dass nur je Rechnungsadresse gesucht wurde, statt eines
+    generischen Grundes stehenzulassen."""
+    if not has_addresses:
+        return fallback
+    if address_id is None:
+        return "Rechnungsadresse nicht erkannt -- Lieferant wird nur je Adresse gesucht"
+    label = address_name or address_id
+    return f"{fallback} unter Rechnungsadresse {label}"
+
+
 def identify(doc: Document, suppliers: list[Supplier], threshold: float = 0.5,
-            min_margin: float = 0.15, index: dict | None = None):
+            min_margin: float = 0.15, index: dict | None = None,
+            address_id: str | None = None, has_addresses: bool = False,
+            address_name: str = ""):
     """-> (Supplier, score) oder None. Kurzform von ``identify_with_reason``."""
-    return identify_with_reason(doc, suppliers, threshold, min_margin, index)[0]
+    return identify_with_reason(doc, suppliers, threshold, min_margin, index,
+                                address_id, has_addresses, address_name)[0]
 
 
 def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: float = 0.5,
-                         min_margin: float = 0.15, index: dict | None = None):
+                         min_margin: float = 0.15, index: dict | None = None,
+                         address_id: str | None = None, has_addresses: bool = False,
+                         address_name: str = ""):
     """-> ((Supplier, score) oder None, Grund).
 
     Einzige Quelle fuer die Lieferanten-Identitaet ist die Bibliothek
@@ -163,8 +215,17 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
     angelegt oder per KI abgeleitet. Kein eindeutiger Treffer -> ``None`` und
     ein Grund fuer den Menschen (Rechnung wird zurueckgestellt).
 
+    Lieferant je Rechnungsadresse (wie Abbyy FlexiCapture, Entscheidung Aaron
+    09.10.2026): ``suppliers`` wird zuerst ueber ``kandidaten()`` auf die zur
+    erkannten Rechnungsadresse (``address_id``) passenden Lieferanten
+    eingeschraenkt, bevor ueberhaupt erkannt wird -- ein per USt-IdNr/IBAN
+    eindeutiger Treffer bei einem Lieferanten einer ANDEREN Adresse zaehlt
+    nicht (verhindert, dass dieselbe Abbyy-Id unter zwei BusinessUnits als
+    "mehrdeutig" erscheint, siehe importers.py). ``index`` muss zur selben
+    Kandidatenmenge passen (``Store.supplier_index(address_id)``).
+
     SPEC Effizienz-Baustein 4: harte Kennungen (USt-IdNr/IBAN) zuerst gegen
-    einen Index abgleichen (``index``, Standard: einmalig aus ``suppliers``
+    einen Index abgleichen (``index``, Standard: einmalig aus den Kandidaten
     aufgebaut -- ``Store.supplier_index()`` cacht ihn ueber mehrere Aufrufe).
     Ein EINDEUTIGER Treffer entscheidet sofort, ohne das Fingerprint-/Domain-/
     Namens-Scoring ueber die ganze Bibliothek laufen zu lassen -- ein exakter
@@ -178,7 +239,11 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
     eine stille Verwechslung zwischen zwei Lieferanten mit aehnlichem
     Kopf-Layout, z.B. derselben Buchhaltungssoftware).
     """
+    suppliers = kandidaten(suppliers, address_id, has_addresses)
     if not suppliers:
+        if has_addresses:
+            return None, _address_scope_reason(has_addresses, address_id, address_name,
+                                               "kein Lieferant aus der Bibliothek passt")
         return None, "Bibliothek ist leer -- kein Lieferant hinterlegt"
     ids = extract_identifiers(doc)
     ids["ibans"] = ids["ibans"] | find_ibans(doc.text)
@@ -220,7 +285,8 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
     scored.sort(key=lambda x: x[1], reverse=True)
     best_s, best_score = scored[0]
     if best_score < threshold:
-        return None, "kein Lieferant aus der Bibliothek passt"
+        return None, _address_scope_reason(has_addresses, address_id, address_name,
+                                           "kein Lieferant aus der Bibliothek passt")
     if len(scored) > 1:
         second_s, second_score = scored[1]
         if (best_score - second_score) < min_margin:
@@ -275,7 +341,12 @@ def identify_einvoice(inv, suppliers: list[Supplier]):
     """Lieferant einer E-Rechnung ueber die strukturierten Verkaeufer-Daten
     finden -> (Supplier, score) oder None. USt-IdNr/IBAN sind eindeutig; der
     Name allein zaehlt nur bei exakter (normalisierter) Gleichheit und nur,
-    wenn genau ein Lieferant so heisst -- sonst lieber "unbekannt" als raten."""
+    wenn genau ein Lieferant so heisst -- sonst lieber "unbekannt" als raten.
+
+    ``suppliers`` soll bereits die zur erkannten Rechnungsadresse passende
+    Kandidatenmenge sein (``kandidaten()``, vom Aufrufer vorgefiltert) --
+    diese Funktion filtert selbst nicht nach Adresse, damit die Filterlogik
+    nur an einer Stelle steht."""
     ustid = (inv.verkaeufer_ustid or "").replace(" ", "").upper()
     ibans = {i.replace(" ", "").upper() for i in inv.verkaeufer_iban}
     hits = [s for s in suppliers

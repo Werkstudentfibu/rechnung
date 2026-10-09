@@ -84,10 +84,19 @@ def _fingerprint_key(doc) -> str:
 
 
 def _group_key(doc, store) -> tuple[str, str | None, str, str]:
-    """-> (gruppe_id, supplier_id, supplier_name, variant)."""
-    match, _why = identify_with_reason(doc, store.suppliers(), index=store.supplier_index())
+    """-> (gruppe_id, supplier_id, supplier_name, variant).
+
+    Lieferant je Rechnungsadresse (09.10.2026): die Adresse wird ZUERST
+    bestimmt, dann nur unter den ihr zugeordneten Lieferanten gesucht --
+    sonst wuerden zwei Altrechnungen verschiedener Adressen mit demselben
+    (fuer die andere Adresse eigentlich fremden) Lieferanten gruppiert."""
     addr = billing.detect(doc, store.addresses())
     variant = addr[0].id if addr else "standard"
+    address_id = addr[0].id if addr else None
+    has_addr = bool(store.addresses())
+    match, _why = identify_with_reason(
+        doc, store.suppliers(), index=store.supplier_index(address_id),
+        address_id=address_id, has_addresses=has_addr)
     if match:
         supplier, _score = match
         return f"{supplier.id}__{variant}", supplier.id, supplier.name, variant

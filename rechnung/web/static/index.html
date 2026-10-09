@@ -215,6 +215,7 @@ const LI_COLUMNS = ['pos', 'beschreibung', 'menge', 'einzelpreis_netto', 'gesamt
                     'mwst_satz', 'waehrung', 'einheit'];
 let STATE = null;
 let LIST_FILES = [];  // Reihenfolge der zuletzt geladenen Liste, fuer "naechste Rechnung"
+let SUP_ADDRESSES = [];  // Rechnungsadressen fuer die Checkboxen im Lieferanten-Formular
 
 function show(v) {
   document.querySelectorAll('.view').forEach(e => e.classList.remove('active'));
@@ -399,6 +400,19 @@ function zeigeAdresse() {
     `<label>${esc(k)}</label><div>${esc(v)}</div>`).join('')}</div>` : '';
 }
 
+/* Mensch waehlt im Reiter eine andere Rechnungsadresse -- Lieferantensuche
+   laeuft dann unter dieser Adresse neu (Lieferant je Rechnungsadresse,
+   09.10.2026): Rechnung mit ``address``-Parameter neu laden statt nur die
+   Detailanzeige zu aktualisieren. */
+async function adresseUebersteuern() {
+  zeigeAdresse();
+  const id = ($('#variant') || {}).value;
+  let url = '/api/invoice?file=' + encodeURIComponent(STATE.file);
+  if (id && id !== 'standard') url += '&address=' + encodeURIComponent(id);
+  const d = await api(url);
+  applyInvoiceData(d);
+}
+
 function renderInvoice(d) {
   const work = $('#work'); work.innerHTML = ''; work.classList.add('split');
   // Rechnung links, Werte rechts -- jede Spalte scrollt fuer sich, damit auf dem
@@ -446,7 +460,7 @@ function renderInvoice(d) {
   const s1 = abschnitt(1, 'Rechnungsadresse');
   s1.insertAdjacentHTML('beforeend', `
     <div class="form-grid">
-      <label>Geht an</label><select id="variant" onchange="zeigeAdresse()">${addrOpts}</select>
+      <label>Geht an</label><select id="variant" onchange="adresseUebersteuern()">${addrOpts}</select>
     </div>
     <div class="hint">${detAddr ? `erkannt: ${esc(detAddr.name)} (${detAddr.score})` : 'keine Rechnungsadresse sicher erkannt'}</div>
     <div id="addr-detail"></div>`);
@@ -1259,12 +1273,16 @@ async function loadHuman() {
 
 /* ================= Lieferanten ================= */
 async function loadSuppliers() {
-  const rows = await api('/api/suppliers');
+  const [rows, addresses] = await Promise.all([api('/api/suppliers'), api('/api/addresses')]);
+  SUP_ADDRESSES = addresses;
+  const addrName = id => (addresses.find(a => a.id === id) || {}).name || id;
   const t = document.createElement('table');
-  t.innerHTML = '<tr><th>ID</th><th>Name</th><th>Währung</th><th>USt-IdNr</th><th>IBAN</th><th>feste Werte</th><th>Templates</th><th></th></tr>';
+  t.innerHTML = '<tr><th>ID</th><th>Name</th><th>Lieferantennr.</th><th>Rechnungsadressen</th><th>Währung</th><th>USt-IdNr</th><th>IBAN</th><th>feste Werte</th><th>Templates</th><th></th></tr>';
   for (const s of rows) {
     const tr = document.createElement('tr'); tr.className = 'clickable';
     tr.innerHTML = `<td>${esc(s.id)}</td><td>${esc(s.name || '')}</td>
+      <td>${esc(s.external_id || '')}</td>
+      <td>${(s.addresses || []).length ? (s.addresses || []).map(a => esc(addrName(a))).join('<br>') : '<span class="hint">alle</span>'}</td>
       <td>${esc(s.currency || 'EUR')}</td>
       <td>${(s.ustids || []).map(esc).join('<br>')}</td>
       <td>${(s.ibans || []).map(esc).join('<br>')}</td>
@@ -1281,13 +1299,16 @@ async function loadSuppliers() {
 }
 
 function editSupplier(s) {
-  s = s || { id: '', name: '', ustids: [], ibans: [], domains: [], address_lines: [], fixed_fields: {} };
+  s = s || { id: '', name: '', ustids: [], ibans: [], domains: [], addresses: [],
+             external_id: '', address_lines: [], fixed_fields: {} };
   const ff = s.fixed_fields || {};
+  const sAddr = new Set(s.addresses || []);
   $('#sup-form').innerHTML = `
     <h3>${s.id ? 'Lieferant bearbeiten' : 'Neuer Lieferant'}</h3>
     <div class="form-grid">
       <label>ID</label><input id="f-id" value="${esc(s.id)}" ${s.id ? 'readonly' : ''}>
       <label>Name</label><input id="f-name" value="${esc(s.name || '')}">
+      <label>Lieferantennummer</label><input id="f-external-id" value="${esc(s.external_id || '')}" placeholder="Nummer im Fremdsystem (z.B. Abbyy)">
       <label>Währung</label>
       <select id="f-currency">
         <option value="EUR" ${(s.currency || 'EUR') === 'EUR' ? 'selected' : ''}>EUR</option>
@@ -1308,6 +1329,13 @@ function editSupplier(s) {
       <label>Notiz</label><textarea id="f-notes">${esc(s.notes || '')}</textarea>
     </div>
     <div class="box">
+      <h4>Rechnungsadressen</h4>
+      <div class="hint">Wie in Abbyy: der Lieferant wird nur unter den hier angekreuzten Rechnungsadressen gesucht. Keine angekreuzt = gilt für alle Adressen.</div>
+      <div class="form-grid">
+        ${SUP_ADDRESSES.map(a => `<label><input type="checkbox" class="f-addr" value="${esc(a.id)}" ${sAddr.has(a.id) ? 'checked' : ''}> ${esc(a.name || a.id)}</label><div></div>`).join('')}
+      </div>
+    </div>
+    <div class="box">
       <h4>Feste Werte</h4>
       <div class="hint">Wird auf jeder Rechnung dieses Lieferanten eingesetzt (leer = wird aus der Rechnung gelesen).</div>
       <div class="form-grid">
@@ -1323,10 +1351,12 @@ async function submitSupplier() {
   if (!id) return;
   const fixed_fields = {};
   FIXED_FIELDS.forEach(k => { const v = ($('#ff-' + k).value || '').trim(); if (v) fixed_fields[k] = v; });
+  const addresses = Array.from(document.querySelectorAll('#sup-form .f-addr:checked')).map(el => el.value);
   await api('/api/suppliers', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       id, name: $('#f-name').value.trim(), currency: $('#f-currency').value,
+      external_id: $('#f-external-id').value.trim(), addresses,
       ustids: lines('f-ustids'), ibans: lines('f-ibans'), domains: lines('f-domains'),
       address_lines: lines('f-address'), bank_name: $('#f-bank').value.trim(),
       bic: $('#f-bic').value.trim(),

@@ -29,8 +29,8 @@ from .timing import StageTimer
 from .config import jobrouter as _jr_cfg
 from .config import operator as _operator
 from .identify import (DEFAULT_CURRENCY, EXPECTED_RATES, FIXED_FIELD_TYPES, IBAN_DEVIATES,
-                       cross_check, extract_identifiers, identify_einvoice,
-                       identify_with_reason)
+                       _address_scope_reason, cross_check, extract_identifiers,
+                       identify_einvoice, identify_with_reason, kandidaten)
 from .store import Store
 from .suggest import suggest_category
 from .template import (STANDARD_FIELDS, FieldResult, Template, apply_line_items,
@@ -88,6 +88,11 @@ class Result:
     sha256: str = ""
     supplier_id: str | None = None
     supplier_name: str | None = None
+    # Lieferantennummer im Fremdsystem (Supplier.external_id, Abbyy-'Id') --
+    # fuer den JobRouter-Export (jobrouter.payload_from_result), unabhaengig
+    # von unserer eigenen (ggf. um die BusinessUnitId erweiterten) internen
+    # ``supplier_id``.
+    supplier_external_id: str | None = None
     match_score: float = 0.0
     template_id: str | None = None
     template_variant: str | None = None
@@ -152,6 +157,7 @@ class Result:
             "sha256": self.sha256,
             "supplier_id": self.supplier_id,
             "supplier_name": self.supplier_name,
+            "supplier_external_id": self.supplier_external_id,
             "match_score": self.match_score,
             "template_id": self.template_id,
             "template_variant": self.template_variant,
@@ -491,19 +497,29 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
     res.anlagen = anlagen.info(store, res.sha256)
 
     with timer.stage("lieferant"):
-        match = identify_einvoice(inv, store.suppliers())
+        # Rechnungsadresse zuerst bestimmen (wie beim PDF-Pfad unten) --
+        # Lieferant je Rechnungsadresse, Entscheidung Aaron 09.10.2026: eine
+        # E-Rechnung wird nur unter den zu dieser Adresse passenden
+        # Lieferanten gesucht, nie uebergreifend.
+        pdf_text = _einvoice_pdf_text(path, inv)
+        addr_check = _billing_check("\n".join([inv.kaeufer_name, pdf_text]), store, res)
+        has_addr = bool(store.addresses())
+        candidates = kandidaten(store.suppliers(), res.billing_address_id, has_addr)
+        match = identify_einvoice(inv, candidates)
         supplier = None
         if match:
             supplier, res.match_score = match
             res.supplier_id = supplier.id
             res.supplier_name = supplier.name
+            res.supplier_external_id = supplier.external_id or None
         else:
             # Lieferant nur aus der Bibliothek -- der Verkaeufername im XML ist
             # ein Hinweis fuer den Menschen, keine Identitaet.
             named = f" (Rechnung nennt: {inv.verkaeufer_name})" if inv.verkaeufer_name else ""
-            res.hold_reasons.append(f"Lieferant: kein Lieferant aus der Bibliothek passt{named}")
-        pdf_text = _einvoice_pdf_text(path, inv)
-        addr_check = _billing_check("\n".join([inv.kaeufer_name, pdf_text]), store, res)
+            grund = _address_scope_reason(has_addr, res.billing_address_id,
+                                          res.billing_address_name or "",
+                                          "kein Lieferant aus der Bibliothek passt")
+            res.hold_reasons.append(f"Lieferant: {grund}{named}")
         invoice_ibans = set(inv.verkaeufer_iban) | find_ibans(pdf_text)
 
     def put(name: str, value, raw: str | None = None) -> None:
@@ -891,9 +907,19 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     # Lieferant und Rechnungsadresse ausschliesslich per Abgleich mit der
     # Bibliothek. Kein eindeutiger Treffer -> zurueckgestellt; die Extraktion
     # laeuft trotzdem, damit der Mensch die Werte gleich vor sich hat.
+    #
+    # Lieferant je Rechnungsadresse (wie Abbyy FlexiCapture, Entscheidung
+    # Aaron 09.10.2026): die Rechnungsadresse wird ZUERST bestimmt, danach
+    # nur unter den ihr zugeordneten Lieferanten gesucht (``identify_with_
+    # reason`` filtert selbst ueber ``kandidaten()`` -- hier wird nur die
+    # dazu passende Kandidatenmenge des Index mitgegeben).
     with timer.stage("lieferant"):
-        match, why = identify_with_reason(doc, store.suppliers(), index=store.supplier_index())
         addr_check = _billing_check(doc.text, store, res)
+        has_addr = bool(store.addresses())
+        match, why = identify_with_reason(
+            doc, store.suppliers(), index=store.supplier_index(res.billing_address_id),
+            address_id=res.billing_address_id, has_addresses=has_addr,
+            address_name=res.billing_address_name or "")
     if not match:
         res.hold_reasons.insert(0, f"Lieferant: {why}")
         _finish_untemplated(res, doc, None, store, use_llm, [addr_check], timer, qr_obj)
@@ -905,6 +931,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     supplier, score = match
     res.supplier_id = supplier.id
     res.supplier_name = supplier.name
+    res.supplier_external_id = supplier.external_id or None
     res.match_score = score
 
     # Als veraltet markierte Vorlagen (learn.py, SPEC §7p: Layoutwechsel

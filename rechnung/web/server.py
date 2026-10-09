@@ -156,6 +156,8 @@ class SupplierPost(BaseModel):
     ustids: list[str] = []
     ibans: list[str] = []
     domains: list[str] = []
+    addresses: list[str] = []          # Rechnungsadressen, denen er zugeordnet ist (leer = alle)
+    external_id: str = ""              # Lieferantennummer im Fremdsystem (Abbyy-'Id')
     address_lines: list[str] = []
     bank_name: str = ""
     bic: str = ""
@@ -275,6 +277,21 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             return hp
         raise HTTPException(404, "Datei nicht gefunden")
 
+    def _address_scope(doc, override: str | None = None):
+        """-> (addr_match, address_id, has_addresses). Lieferant je
+        Rechnungsadresse (09.10.2026): erkennt die Rechnungsadresse (oder
+        uebernimmt eine vom Menschen uebersteuerte, siehe ``#variant`` im
+        Reiter "1 Rechnungsadresse" -- ``/api/invoice?...&address=<id>``) --
+        Grundlage fuer die Lieferantensuche nur unter dieser Adresse."""
+        addresses = store.addresses()
+        addr_match = billing.detect(doc, addresses)
+        if override:
+            ov = store.address(override)
+            if ov is not None:
+                addr_match = (ov, 1.0)
+        address_id = addr_match[0].id if addr_match else None
+        return addr_match, address_id, bool(addresses)
+
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
         # no-store: nach einem Update soll das Fenster nie die alte Oberflaeche zeigen
@@ -305,7 +322,11 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         })
 
     @app.get("/api/invoice")
-    def invoice(file: str) -> JSONResponse:
+    def invoice(file: str, address: str | None = None) -> JSONResponse:
+        """``address`` (optional): Mensch uebersteuert die erkannte
+        Rechnungsadresse im Reiter "1 Rechnungsadresse" (``#variant`` ->
+        ``zeigeAdresse()``) -- die Lieferantensuche laeuft dann unter dieser
+        Adresse neu (Lieferant je Rechnungsadresse, 09.10.2026)."""
         path = _resolve(file)
         if einvoice.load(path) is not None:
             return JSONResponse(_einvoice_view(path))
@@ -329,12 +350,17 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             }
             for pg in doc.pages
         ]
-        match = identify(doc, store.suppliers(), index=store.supplier_index())
         suggestion = supplier_from_doc(doc, "", "").to_dict()
-        addr_match = billing.detect(doc, store.addresses())
+        addr_match, address_id, has_addr = _address_scope(doc, override=address)
+        match = identify(doc, store.suppliers(), index=store.supplier_index(address_id),
+                         address_id=address_id, has_addresses=has_addr)
         current = {}
         tid = None
-        variant = "standard"
+        # Vorbelegt mit der erkannten/uebersteuerten Adresse, damit das
+        # Auswahlfeld (#variant) nach einem Reload die Wahl behaelt, auch
+        # wenn (noch) kein Template existiert -- unten ggf. auf die Variante
+        # der tatsaechlich gewaehlten Vorlage korrigiert.
+        variant = address_id or "standard"
         tpl_fields: list[dict] = []
         tpl_line_items = None
         line_items: list[dict] = []
@@ -824,7 +850,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         sup_id = sup_name = None
         try:
             doc = _load(path)
-            match = identify(doc, store.suppliers(), index=store.supplier_index())
+            _addr_match, address_id, has_addr = _address_scope(doc)
+            match = identify(doc, store.suppliers(), index=store.supplier_index(address_id),
+                             address_id=address_id, has_addresses=has_addr)
             if match:
                 sup_id, sup_name = match[0].id, match[0].name
         except HTTPException:
@@ -865,7 +893,10 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         store.save_correction(sha, key, rows, op)
         sup_id = sup_name = None
         try:
-            match = identify(_load(path), store.suppliers(), index=store.supplier_index())
+            doc = _load(path)
+            _addr_match, address_id, has_addr = _address_scope(doc)
+            match = identify(doc, store.suppliers(), index=store.supplier_index(address_id),
+                             address_id=address_id, has_addresses=has_addr)
             if match:
                 sup_id, sup_name = match[0].id, match[0].name
         except HTTPException:
@@ -976,6 +1007,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             ibans=sorted({x.strip().upper().replace(" ", "") for x in body.ibans if x.strip()}),
             domains=sorted({x.strip().lower() for x in body.domains if x.strip()}),
             fingerprint=fp,
+            addresses=sorted({x.strip() for x in body.addresses if x.strip()}),
+            external_id=body.external_id.strip(),
             address_lines=[x for x in body.address_lines if x.strip()],
             bank_name=body.bank_name.strip(), bic=body.bic.strip().upper(),
             bank_code=body.bank_code.strip(), bank_account=body.bank_account.strip(),

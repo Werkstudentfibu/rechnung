@@ -96,6 +96,11 @@ def payload_from_result(res: dict, cfg: JobRouterConfig | None = None) -> dict:
         "status": res.get("status"),
         "supplier": res.get("supplier_name") or res.get("supplier_id"),
         "supplierId": res.get("supplier_id"),
+        # Lieferantennummer im Fremdsystem (Supplier.external_id, Abbyy-'Id'),
+        # unabhaengig von unserer eigenen (ggf. um die BusinessUnitId
+        # erweiterten) internen supplierId -- nur mitgegeben, wenn vorhanden.
+        **({"lieferantennummer": res["supplier_external_id"]}
+           if res.get("supplier_external_id") else {}),
         "billingAddress": res.get("billing_address_name"),
         "billingAddressId": res.get("billing_address_id"),
         "confidence": res.get("overall_confidence"),

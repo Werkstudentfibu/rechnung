@@ -9,6 +9,18 @@ https://docs.abbyy.com/flexi-capture/invoice-reader/ir-columns-vendors und
 einen Lieferanten bzw. eine Rechnungsadresse an -- Upsert ueber die Abbyy-Id,
 mehrfaches Einspielen derselben Datei dupliziert also nicht.
 
+Vendors.BusinessUnitId (Entscheidung Aaron, 09.10.2026, Lieferant je
+Rechnungsadresse wie in Abbyy): ist sie gefuellt, ist ein Lieferant erst durch
+die Kombination (BusinessUnitId, Id) eindeutig -- dieselbe Abbyy-Id kann unter
+verschiedenen BusinessUnits verschiedene Lieferanten bezeichnen. Die interne
+Lieferanten-Id wird deshalb in diesem Fall zu ``f"{Id}@{BusinessUnitId}"``
+zusammengesetzt, ``Supplier.addresses`` bekommt die BusinessUnitId, und
+``Supplier.external_id`` behaelt die reine Abbyy-``Id`` (fuer den Export,
+siehe jobrouter.py). Ohne BusinessUnitId bleibt die interne Id wie bisher die
+Abbyy-``Id`` selbst, ``addresses`` bleibt leer (gilt fuer alle Rechnungs-
+adressen) -- rueckwaertskompatibel zu vor dieser Aenderung importierten bzw.
+manuell angelegten Lieferanten.
+
 Stand 2026-09-18: Das Programm ist noch nicht im Unternehmen im Einsatz, es
 gibt also noch keinen echten Abbyy-Export zum Testen -- dieser Import ist
 gegen das oben verlinkte, offiziell dokumentierte Schema und synthetische
@@ -72,15 +84,35 @@ def _address_lines(row: dict[str, str]) -> list[str]:
     return [x for x in (street, zip_city, state) if x]
 
 
-def import_vendors_csv(path: str | Path, store: Store) -> int:
+def import_vendors_csv(path: str | Path, store: Store,
+                       missing_business_units: list[str] | None = None) -> int:
     """Abbyy-'Vendors'-Datensatz -> je Zeile ein Supplier. Gibt die Anzahl
-    importierter/aktualisierter Lieferanten zurueck."""
+    importierter/aktualisierter Lieferanten zurueck.
+
+    ``BusinessUnitId`` (optional): ist sie gefuellt, ist der Lieferant erst
+    durch (BusinessUnitId, Id) eindeutig -- die interne Id wird dann zu
+    ``f"{Id}@{BusinessUnitId}"``, ``addresses`` bekommt die BusinessUnitId
+    (Lieferant je Rechnungsadresse, Entscheidung Aaron 09.10.2026),
+    ``external_id`` behaelt die reine Abbyy-Id fuer den Export (jobrouter.py).
+    Ohne BusinessUnitId bleibt die interne Id die Abbyy-Id selbst und
+    ``addresses`` leer (gilt fuer alle Rechnungsadressen) -- rueckwaerts-
+    kompatibel. ``missing_business_units`` (optional): wird um die
+    BusinessUnitId jedes Lieferanten ergaenzt, dessen BusinessUnitId (noch)
+    nicht als Rechnungsadresse in der Bibliothek existiert -- Grundlage fuer
+    den Hinweis im CLI-Befehl ``import-vendors``."""
     n = 0
+    existing_addr_ids = {a.id for a in store.addresses()}
     for row in _read_rows(path):
         sid = _get(row, "Id")
         if not sid:
             continue
-        sup = store.supplier(sid) or Supplier(id=sid, name="")
+        bu = _get(row, "BusinessUnitId")
+        internal_id = f"{sid}@{bu}" if bu else sid
+        sup = store.supplier(internal_id) or Supplier(id=internal_id, name="")
+        sup.external_id = sid
+        sup.addresses = [bu] if bu else []
+        if bu and bu not in existing_addr_ids and missing_business_units is not None:
+            missing_business_units.append(bu)
 
         name = _get(row, "Name")
         if name:
