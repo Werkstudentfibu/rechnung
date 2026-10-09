@@ -355,3 +355,21 @@ def test_process_scan_low_confidence_forces_review(tmp_path: Path, monkeypatch):
         assert d["fields"]["iban"]["via"] is None
     # Schattenbetrieb darf eine unsichere OCR-Rechnung nie durchlassen
     assert res.shadow["would_pass"] is False
+
+
+def test_portable_tesseract_liegt_neben_app():
+    p = ocr.portable_tesseract()
+    assert p.parts[-4:] == ("tesseract", "Library", "bin", "tesseract.exe")
+    assert p.parents[3] == Path(ocr.__file__).resolve().parents[2]
+
+
+def test_tessdata_env_fuer_conda_layout(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TESSDATA_PREFIX", raising=False)
+    exe = tmp_path / "Library" / "bin" / "tesseract.exe"
+    exe.parent.mkdir(parents=True); exe.write_bytes(b"")
+    td = tmp_path / "Library" / "share" / "tessdata"; td.mkdir(parents=True)
+    env = ocr._tessdata_env(str(exe))
+    assert env is not None and env["TESSDATA_PREFIX"] == str(td)
+    monkeypatch.setenv("TESSDATA_PREFIX", "x")          # gesetzt -> nicht anfassen
+    assert ocr._tessdata_env(str(exe)) is None
+    assert ocr._tessdata_env("/usr/bin/tesseract") is None

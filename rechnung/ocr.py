@@ -121,9 +121,29 @@ def _on_windows() -> bool:
     return os.name == "nt"
 
 
+def portable_tesseract() -> Path:
+    """Ohne Adminrechte eingerichtete Texterkennung (windows/
+    texterkennung-einrichten.ps1, 09.10.2026): ``<Basis>\\tesseract`` neben
+    ``app\\`` -- conda-forge-Layout ``Library\\bin\\tesseract.exe``."""
+    return Path(__file__).resolve().parents[2] / "tesseract" / "Library" / "bin" / "tesseract.exe"
+
+
+def _tessdata_env(cmd: str) -> dict | None:
+    """conda-Layout ohne Aktivierung: Tesseract findet seine Sprachdateien
+    nur ueber TESSDATA_PREFIX (``Library\\share\\tessdata``)."""
+    if os.environ.get("TESSDATA_PREFIX"):
+        return None
+    td = Path(cmd).parent.parent / "share" / "tessdata"
+    if Path(cmd).parent.name.lower() == "bin" and td.is_dir():
+        return dict(os.environ, TESSDATA_PREFIX=str(td))
+    return None
+
+
 def _windows_fallback() -> str | None:
     if not _on_windows():
         return None
+    if portable_tesseract().is_file():
+        return str(portable_tesseract())
     for cand in _WINDOWS_CANDIDATES:
         # %VAR% selbst aufloesen (os.path.expandvars kann das nur unter Windows)
         expanded = re.sub(r"%([^%]+)%", lambda m: os.environ.get(m.group(1), m.group(0)), cand)
@@ -143,6 +163,10 @@ def _run(args: list[str], timeout: float | None, **kw):
     (das Programm laeuft dort als Fenster-Anwendung/geplante Aufgabe)."""
     if _on_windows():
         kw.setdefault("creationflags", getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if args and args[0] and "env" not in kw:
+        env = _tessdata_env(str(args[0]))
+        if env is not None:
+            kw["env"] = env
     return subprocess.run(args, capture_output=True, timeout=timeout, **kw)
 
 

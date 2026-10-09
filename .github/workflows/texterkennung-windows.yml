@@ -1,0 +1,41 @@
+name: texterkennung-windows
+
+# Prueft windows/texterkennung-einrichten.ps1 auf echtem Windows: Tesseract
+# ohne Adminrechte (micromamba/conda-forge) einrichten, rechnung.env
+# umschalten, dann echte Texterkennung eines Scans ueber das Programm.
+on:
+  push:
+    branches: [release, "emmy/**"]
+    paths: ["windows/texterkennung-einrichten.ps1", "windows/tessdata/**", "rechnung/ocr.py",
+            ".github/workflows/texterkennung-windows.yml"]
+  workflow_dispatch:
+
+jobs:
+  ocr:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Abhaengigkeiten
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: rechnung.env wie auf dem Laptop (OCR aus, Passwort mit Umlaut)
+        shell: pwsh
+        run: |
+          $basis = (Resolve-Path "..").Path
+          $enc = [Text.Encoding]::GetEncoding(28591)
+          [IO.File]::WriteAllLines("$basis\rechnung.env", [string[]]@("RECHNUNG_IMAP_PASSWORD=Gr$([char]0xFC)n!", "RECHNUNG_OCR_ENABLED=0"), $enc)
+      - name: Einrichten (ohne Admin-Annahmen)
+        run: powershell -ExecutionPolicy Bypass -File windows\texterkennung-einrichten.ps1
+      - name: Pruefen
+        shell: pwsh
+        run: |
+          $basis = (Resolve-Path "..").Path
+          $enc = [Text.Encoding]::GetEncoding(28591)
+          $z = [IO.File]::ReadAllLines("$basis\rechnung.env", $enc)
+          if ($z -notcontains "RECHNUNG_OCR_ENABLED=1") { throw "OCR nicht eingeschaltet: $z" }
+          if ($z -notcontains "RECHNUNG_IMAP_PASSWORD=Gr$([char]0xFC)n!") { throw "Passwortzeile veraendert: $z" }
+          python tools/ocr_smoke.py
