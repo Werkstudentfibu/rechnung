@@ -115,7 +115,7 @@ class Result:
     # Von der KI auf der Rechnung belegte Lieferantenangaben (semantic
     # _SUPPLIER_KEYS) -- nur Hinweis, nie Identitaet; dient dazu, den Namen
     # eines Lieferanten-Entwurfs zu fuellen (09.10.2026).
-    ki_lieferant: dict[str, str] = field(default_factory=dict)
+    ki_lieferant: dict = field(default_factory=dict)
     # Ebenso der Rechnungsempfaenger (name/lines) -- Vorschlag fuer eine noch
     # unbekannte Rechnungsadresse, angelegt wird nur per Klick im UI.
     ki_empfaenger: dict = field(default_factory=dict)
@@ -554,9 +554,10 @@ def _auto_draft_pdf(res: "Result", doc, store: Store, use_llm: bool,
     USt-IdNr/IBAN/Domain kommen wie beim Bibliotheksabgleich selbst per
     Regex (``extract_identifiers``/``find_ibans``, kein Raten); der Name nur,
     nachtraeglich aus der ohnehin laufenden KI-Stufe, wenn sie ihn im Text
-    belegt findet (``_enrich_draft_name``; semantic.py ``_SUPPLIER_KEYS``,
-    Beleg-Pflicht dort schon eingebaut). Eine Anschrift liefert dieser Pfad (ohne E-Rechnungs-XML)
-    nicht belegt -- bleibt leer statt geraten."""
+    belegt findet (``_enrich_draft``; semantic.py ``_SUPPLIER_KEYS``,
+    Beleg-Pflicht dort schon eingebaut). Anschrift/Bank/BIC/Steuernummer/
+    Kontakt kommen ebenso nachtraeglich aus der KI-Stufe (``_enrich_draft``),
+    nur belegte Teile -- ohne KI bleiben sie leer statt geraten."""
     ids = extract_identifiers(doc)
     ibans = sorted(ids["ibans"] | find_ibans(doc.text))
     ustids = sorted(ids["ustids"])
@@ -566,7 +567,7 @@ def _auto_draft_pdf(res: "Result", doc, store: Store, use_llm: bool,
     if existing is not None:
         return existing, 0.0
     # Name kommt nicht hier, sondern aus der ohnehin folgenden KI-Stufe
-    # (_llm_full -> _enrich_draft_name) -- kein zweiter KI-Aufruf je Rechnung.
+    # (_llm_full -> _enrich_draft) -- kein zweiter KI-Aufruf je Rechnung.
     sup = _new_draft_supplier(
         store, name="", ustids=ustids, ibans=ibans, domains=sorted(ids["domains"]),
         address_lines=[], currency=_detect_currency(doc.text),
@@ -579,17 +580,30 @@ def _is_placeholder_name(name: str) -> bool:
     return not name.strip() or name.startswith("Unbekannt")
 
 
-def _enrich_draft_name(res: "Result", supplier: Supplier, store: Store) -> None:
-    """Platzhalter-Namen eines (unbestaetigten) Entwurfs durch den von der KI
-    auf der Rechnung belegten Lieferantennamen ersetzen. Nur in der echten
-    Verarbeitung aufgerufen (create_draft_supplier), nie in der Vorschau;
-    ein bestaetigter oder von Hand benannter Lieferant bleibt unberuehrt."""
-    name = (res.ki_lieferant.get("name") or "").strip()
-    if supplier.bestaetigt or not name or not _is_placeholder_name(supplier.name):
+_DRAFT_DETAIL_FIELDS = ("address_lines", "bank_name", "bic", "creditor_id", "contact")
+
+
+def _enrich_draft(res: "Result", supplier: Supplier, store: Store) -> None:
+    """Leere Felder eines (unbestaetigten) Entwurfs mit den von der KI auf
+    der Rechnung belegten Lieferantenangaben fuellen: Name (nur statt des
+    Platzhalters), Anschrift, Bank, BIC, Steuernummer, Kontakt. Nur in der
+    echten Verarbeitung (create_draft_supplier), nie in der Vorschau; ein
+    bestaetigter Lieferant und von Hand gepflegte Werte bleiben unberuehrt."""
+    if supplier.bestaetigt or not res.ki_lieferant:
         return
-    supplier.name = name
-    store.save_supplier(supplier)
-    res.supplier_name = name
+    changed = False
+    name = str(res.ki_lieferant.get("name") or "").strip()
+    if name and _is_placeholder_name(supplier.name):
+        supplier.name = name
+        res.supplier_name = name
+        changed = True
+    for attr in _DRAFT_DETAIL_FIELDS:
+        val = res.ki_lieferant.get(attr)
+        if val and not getattr(supplier, attr):
+            setattr(supplier, attr, list(val) if attr == "address_lines" else str(val))
+            changed = True
+    if changed:
+        store.save_supplier(supplier)
 
 
 def _auto_draft_einvoice(res: "Result", inv, store: Store) -> tuple[Supplier, float] | None:
@@ -840,7 +854,7 @@ def _llm_full(res: Result, doc) -> None:
     Lieferanten-Datensatz (``library``) gewinnen gegen das Modell."""
     full = semantic.extract_full(extraction_text(doc))
     res.llm_rejected.update(full.rejected)
-    res.ki_lieferant = dict(full.supplier or {})
+    res.ki_lieferant = {**(full.lieferant_details or {}), **(full.supplier or {})}
     res.ki_empfaenger = dict(full.empfaenger or {})
     for name, fr in full.fields.items():
         cur = res.fields.get(name)
@@ -1161,7 +1175,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
         _inject_library_fields(res.fields, supplier)
         _finish_untemplated(res, doc, supplier, store, use_llm, [addr_check], timer, qr_obj)
         if create_draft_supplier:
-            _enrich_draft_name(res, supplier, store)
+            _enrich_draft(res, supplier, store)
         _ocr_adjust(res, o)
         _apply_hold(res)
         res.stufenzeiten = timer.times

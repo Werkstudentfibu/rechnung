@@ -497,7 +497,7 @@ function renderInvoice(d) {
         ? ` · feste Werte: ${Object.keys(d.supplier.fixed_fields).join(', ')}` : ''}
     </div>`);
   if (isDraft) {
-    s2.appendChild(renderDraftSupplierBox(d.supplier));
+    s2.appendChild(renderDraftSupplierBox(d.supplier, d.ki_lieferant || {}));
   } else {
     if (d.supplier) s2.appendChild(renderSupplierInfoBox(d.supplier));
     if (!d.match) s2.appendChild(renderNewSupplierBox(ids));
@@ -722,7 +722,7 @@ async function saveNewAddressFromInvoice() {
   applyInvoiceData(d2);
 }
 
-function renderDraftSupplierBox(sup) {
+function renderDraftSupplierBox(sup, ki) {
   // Automatisch aus der Rechnung angelegter Entwurf (Entscheidung Aaron
   // 09.10.2026, ersetzt die fruehere Box "Neuer Lieferant erkannt" fuer
   // diesen Fall -- nur noch EIN Weg). Felder editierbar, aber erst der
@@ -730,14 +730,25 @@ function renderDraftSupplierBox(sup) {
   // Lieferanten; bis dahin bleibt jede seiner Rechnungen beim Menschen.
   const box = document.createElement('div'); box.className = 'box';
   const sAddr = new Set(sup.addresses || []);
+  // Leere Entwurfsfelder mit den von der KI auf der Rechnung belegten
+  // Angaben vorfuellen (09.10.2026) -- auch bei Entwuerfen, die vor dieser
+  // Aenderung entstanden; gespeichert wird erst beim Bestaetigen.
+  ki = ki || {};
+  const vor = k => sup[k] || ki[k] || '';
+  const adr = (sup.address_lines || []).length ? sup.address_lines : (ki.address_lines || []);
   box.innerHTML = `<h4><span class="badge zurueckgestellt">unbestätigt</span> Unbekannter Lieferant – bitte prüfen</h4>
     <div class="hint">Automatisch aus dieser Rechnung angelegt (Name/ID oben editierbar). Werte
       prüfen/korrigieren, dann bestätigen oder verwerfen.</div>
     <div class="form-grid">
       <label>USt-IdNr (je Zeile)</label><textarea id="ds-ustids">${(sup.ustids || []).join('\n')}</textarea>
       <label>IBAN (je Zeile)</label><textarea id="ds-ibans">${(sup.ibans || []).join('\n')}</textarea>
-      <label>Anschrift (je Zeile)</label><textarea id="ds-address">${(sup.address_lines || []).join('\n')}</textarea>
+      <label>Anschrift (je Zeile)</label><textarea id="ds-address">${esc(adr.join('\n'))}</textarea>
+      <label>Bank</label><input id="ds-bank" value="${esc(vor('bank_name'))}">
+      <label>BIC</label><input id="ds-bic" value="${esc(vor('bic'))}">
+      <label>Steuernummer / Gläubiger-ID</label><input id="ds-creditor" value="${esc(vor('creditor_id'))}">
+      <label>Kontakt</label><input id="ds-contact" value="${esc(vor('contact'))}">
     </div>
+    <div class="hint">Angaben stammen von der Rechnung (teils von der KI gelesen) – bitte prüfen.</div>
     <div class="box">
       <h4>Rechnungsadressen</h4>
       <div class="hint">Wie in Abbyy: der Lieferant wird nur unter den hier angekreuzten
@@ -762,9 +773,9 @@ async function confirmDraftSupplier() {
       ustids: lines('ds-ustids'), ibans: lines('ds-ibans'), domains: sup.domains || [],
       addresses, external_id: sup.external_id || '',
       address_lines: lines('ds-address'),
-      bank_name: sup.bank_name || '', bic: sup.bic || '',
+      bank_name: $('#ds-bank').value.trim(), bic: $('#ds-bic').value.trim(),
       bank_code: sup.bank_code || '', bank_account: sup.bank_account || '',
-      creditor_id: sup.creditor_id || '', contact: sup.contact || '',
+      creditor_id: $('#ds-creditor').value.trim(), contact: $('#ds-contact').value.trim(),
       default_payment_terms: sup.default_payment_terms || '',
       default_tax_rate: sup.default_tax_rate || '',
       notes: sup.notes || '', fixed_fields: sup.fixed_fields || {},

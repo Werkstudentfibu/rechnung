@@ -96,3 +96,61 @@ def test_addressless_draft_adopts_address_once_known(tmp_path: Path):
     assert res2.supplier_id == res1.supplier_id
     assert len(store.suppliers()) == 1
     assert store.supplier(res1.supplier_id).addresses == ["kunde"]
+
+
+# ---- weitere Lieferantenangaben (Anschrift, Kontakt, Bank ...) ------------
+DETAILS = dict(EMPF, lieferant_anschrift="Industriestr. 5, 50667 Koeln",
+               lieferant_kontakt="buchhaltung@muster-handel.de",
+               lieferant_bank="Erfundene Bank AG", lieferant_bic=None,
+               lieferant_steuernummer=None)
+
+
+def test_supplier_details_read_with_proof(monkeypatch, tmp_path: Path):
+    text = pdfmod.load(make_invoice(tmp_path / "a.pdf")).text
+    _mock(monkeypatch, DETAILS)
+    full = semantic.extract_full(text)
+    assert full.lieferant_details["address_lines"] == ["Industriestr. 5", "50667 Koeln"]
+    assert full.lieferant_details["contact"] == "buchhaltung@muster-handel.de"
+    assert "bank_name" not in full.lieferant_details          # steht nicht drauf
+    assert "lieferant_bank" in full.rejected
+
+
+def test_draft_gets_address_and_contact_from_invoice(monkeypatch, tmp_path: Path):
+    store = Store(tmp_path / "data")
+    inv = make_invoice(tmp_path / "a.pdf")
+    _mock(monkeypatch, DETAILS)
+
+    res = process(inv, store, create_draft_supplier=True)
+
+    sup = store.supplier(res.supplier_id)
+    assert sup.bestaetigt is False
+    assert sup.address_lines == ["Industriestr. 5", "50667 Koeln"]
+    assert sup.contact == "buchhaltung@muster-handel.de"
+    assert sup.bank_name == ""
+
+
+def test_draft_details_do_not_overwrite_hand_values(monkeypatch, tmp_path: Path):
+    store = Store(tmp_path / "data")
+    store.save_supplier(Supplier(id="neu-x", name="Von Hand", ustids=["DE123456789"],
+                                 address_lines=["Handweg 1"], bestaetigt=False))
+    inv = make_invoice(tmp_path / "a.pdf")
+    _mock(monkeypatch, DETAILS)
+
+    process(inv, store, create_draft_supplier=True)
+
+    sup = store.supplier("neu-x")
+    assert sup.address_lines == ["Handweg 1"]
+    assert sup.contact == "buchhaltung@muster-handel.de"   # war leer -> gefuellt
+
+
+def test_confirmed_supplier_never_enriched(monkeypatch, tmp_path: Path):
+    store = Store(tmp_path / "data")
+    store.save_supplier(Supplier(id="fest", name="Muster Handels GmbH",
+                                 ustids=["DE123456789"], bestaetigt=True))
+    inv = make_invoice(tmp_path / "a.pdf")
+    _mock(monkeypatch, DETAILS)
+
+    process(inv, store, create_draft_supplier=True)
+
+    sup = store.supplier("fest")
+    assert sup.address_lines == [] and sup.contact == ""

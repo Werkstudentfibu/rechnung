@@ -419,6 +419,12 @@ _SUPPLIER_KEYS = {"lieferant_name": "name", "lieferant_iban": "iban",
 # fuer eine noch unbekannte Rechnungsadresse (Abschnitt "1 Rechnungsadresse",
 # 09.10.2026), nie Identitaet; angelegt wird erst per Klick.
 _RECIPIENT_KEYS = {"empfaenger_name": "name", "empfaenger_anschrift": "anschrift"}
+# Weitere Stammdaten des Rechnungsstellers (Anschrift, Bank, Steuernummer,
+# Kontakt) -- fuellen nur leere Felder eines Lieferanten-ENTWURFS vor
+# (Wunsch Aaron 09.10.2026), nie Identitaet, gleiche Beleg-Pflicht.
+_SUPPLIER_DETAIL_KEYS = {"lieferant_anschrift": "address_lines", "lieferant_bank": "bank_name",
+                         "lieferant_bic": "bic", "lieferant_steuernummer": "creditor_id",
+                         "lieferant_kontakt": "contact"}
 _LINE_KEYS = {"beschreibung": "text", "menge": "amount", "einzelpreis": "amount",
               "netto": "amount", "ust_satz": "amount"}
 
@@ -430,6 +436,7 @@ def _schema(with_lines: bool) -> dict:
     props = {n: scalar for n, (t, _r) in sichtbare_felder().items() if t in _SIMPLE_TYPES}
     props.update({k: {"type": ["string", "null"]} for k in _SUPPLIER_KEYS})
     props.update({k: {"type": ["string", "null"]} for k in _RECIPIENT_KEYS})
+    props.update({k: {"type": ["string", "null"]} for k in _SUPPLIER_DETAIL_KEYS})
     if with_lines:
         props["positionen"] = {"type": "array", "items": {
             "type": "object", "properties": {k: scalar for k in _LINE_KEYS}}}
@@ -470,6 +477,8 @@ class FullExtraction:
     fields: dict[str, FieldResult] = field(default_factory=dict)
     supplier: dict[str, str] = field(default_factory=dict)  # name/iban/ustid, belegt
     empfaenger: dict[str, object] = field(default_factory=dict)  # name/lines, belegt
+    # address_lines (Liste)/bank_name/bic/creditor_id/contact, belegt
+    lieferant_details: dict[str, object] = field(default_factory=dict)
     line_items: list[dict] = field(default_factory=list)
     rejected: dict[str, str] = field(default_factory=dict)  # Feld -> Grund
 
@@ -481,6 +490,7 @@ Gib jeden Wert GENAU so wieder, wie er im Text steht (gleiche Schreibweise, kein
 Felder:
 - rechnungsnummer, rechnungsdatum, netto, ust_betrag, ust_satz (Prozent), brutto, bestellnummer, kostenstelle
 - lieferant_name, lieferant_iban, lieferant_ustid: Rechnungssteller (NICHT der Rechnungsempfaenger)
+- lieferant_anschrift (Strasse, PLZ Ort, Land mit Komma getrennt), lieferant_bank (Name der Bank), lieferant_bic, lieferant_steuernummer, lieferant_kontakt (Telefon/E-Mail): ebenfalls vom Rechnungssteller
 - empfaenger_name, empfaenger_anschrift: Rechnungsempfaenger (an wen die Rechnung adressiert ist); Anschrift als Strasse, PLZ Ort mit Komma getrennt
 {lines}
 JSON-Schema der Antwort:
@@ -509,6 +519,35 @@ def _recipient(data: dict, verify_text: str, res: "FullExtraction") -> None:
             res.empfaenger["lines"] = ok
         if len(ok) < len(parts):
             res.rejected["empfaenger_anschrift"] = f"teilweise nicht im PDF gefunden: {raw}"
+
+
+def _split_verified(raw, verify_text: str) -> tuple[list[str], bool]:
+    """Kommagetrennte Angabe in Teile zerlegen, nur im Text belegte behalten
+    -> (belegte Teile, alle belegt?)."""
+    parts = [x.strip() for x in re.split(r"[,\n;]", str(raw)) if x.strip()]
+    ok = [x for x in parts if verify_in_text(verify_text, x, "name")]
+    return ok, len(ok) == len(parts)
+
+
+def _supplier_details(data: dict, verify_text: str, res: "FullExtraction") -> None:
+    """Anschrift/Bank/BIC/Steuernummer/Kontakt des Rechnungsstellers mit
+    Beleg-Pflicht (Anschrift und Kontakt teilweise, Rest ganz oder gar nicht)."""
+    for key, kind in _SUPPLIER_DETAIL_KEYS.items():
+        raw = data.get(key)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        if kind in ("address_lines", "contact"):
+            ok, alle = _split_verified(raw, verify_text)
+            if ok:
+                res.lieferant_details[kind] = ok if kind == "address_lines" else ", ".join(ok)
+            if not alle:
+                res.rejected[key] = f"teilweise nicht im PDF gefunden: {raw}"
+            continue
+        val = raw.strip()
+        if verify_in_text(verify_text, val, "name"):
+            res.lieferant_details[kind] = val.upper().replace(" ", "") if kind == "bic" else val
+        else:
+            res.rejected[key] = f"nicht im PDF gefunden: {val}"
 
 
 def _extract_full_once(prompt_text: str, verify_text: str, cfg, schema: dict) -> FullExtraction:
@@ -554,6 +593,7 @@ def _extract_full_once(prompt_text: str, verify_text: str, cfg, schema: dict) ->
             continue
         res.supplier[kind] = value
     _recipient(data, verify_text, res)
+    _supplier_details(data, verify_text, res)
     for kind in ("iban", "ustid"):
         if kind in res.supplier:
             res.fields[kind] = FieldResult(kind, res.supplier[kind], res.supplier[kind],
@@ -611,6 +651,8 @@ def extract_full(text: str) -> FullExtraction:
             res.supplier.setdefault(kind, value)
         for kind, value in retry.empfaenger.items():
             res.empfaenger.setdefault(kind, value)
+        for kind, value in retry.lieferant_details.items():
+            res.lieferant_details.setdefault(kind, value)
         if not res.line_items and retry.line_items:
             res.line_items = retry.line_items
         for n, why in retry.rejected.items():
