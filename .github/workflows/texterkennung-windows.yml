@@ -6,7 +6,7 @@ name: texterkennung-windows
 on:
   push:
     branches: [release, "emmy/**"]
-    paths: ["windows/texterkennung-einrichten.ps1", "windows/tessdata/**", "rechnung/ocr.py", "tools/ocr_smoke.py",
+    paths: ["windows/texterkennung-einrichten.ps1", "windows/tessdata/**", "rechnung/ocr.py", "tools/ocr_smoke.py", "tests/**",
             ".github/workflows/texterkennung-windows.yml"]
   workflow_dispatch:
 
@@ -39,3 +39,5 @@ jobs:
           if ($z -notcontains "RECHNUNG_OCR_ENABLED=1") { throw "OCR nicht eingeschaltet: $z" }
           if ($z -notcontains "RECHNUNG_IMAP_PASSWORD=Gr$([char]0xFC)n!") { throw "Passwortzeile veraendert: $z" }
           python tools/ocr_smoke.py
+      - name: Alle Tests MIT eingerichteter Texterkennung (wie Laptop-Update)
+        run: python -m pytest -q -rf
