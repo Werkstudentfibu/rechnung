@@ -33,8 +33,9 @@ from ..guard import Guard
 from ..ocr import IMAGE_SUFFIXES
 from ..identify import FIXED_FIELD_TYPES, Supplier, identify, supplier_from_doc
 from ..pipeline import (CONF_MIN, EXTRACT_EINVOICE, EXTRACT_TEMPLATE, MASTER_FIELDS,
-                        POSITIONEN_KEY, STATUS_LABELS, dispatch, invoice_files, journal_rows,
-                        journal_totals, load_document, origin)
+                        POSITIONEN_KEY, STATUS_LABELS, confirm_supplier, discard_supplier,
+                        dispatch, invoice_files, journal_rows, journal_totals, load_document,
+                        origin)
 from ..store import Store
 from ..suggest import similar_suppliers
 from ..template import (STANDARD_FIELDS, ausgeblendet, sichtbare_felder, Anchor, Column, FieldResult, LineItemSpec,
@@ -249,8 +250,13 @@ def create_app(store: Store, samples: Path) -> FastAPI:
     # Antwort-Cache mit /api/invoice teilen -- bestaetigt wird, was angezeigt wurde.
     guard = Guard(store.root, mode="thread")
 
-    def _process(path: Path, use_llm: bool = True):
-        return guard.process(path, use_llm=use_llm)
+    def _process(path: Path, use_llm: bool = True, create_draft_supplier: bool = False):
+        # create_draft_supplier=False bleibt der Standard fuer jede Vorschau/
+        # jeden Einzelaufruf (/api/invoice, /api/confirm, ...) -- nur das
+        # echte Verarbeiten des Posteingangs (/api/scan, wie CLI "rechnung
+        # scan") legt bei einem unbekannten Lieferanten einen Entwurf an
+        # (Entscheidung Aaron 09.10.2026).
+        return guard.process(path, use_llm=use_llm, create_draft_supplier=create_draft_supplier)
 
     def _load(path: Path):
         """PDF bzw. OCR-Arbeitskopie eines Scans/Bildes laden."""
@@ -310,7 +316,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         out = []
         split.prepare_folder(samples, store)
         for p in invoice_files(samples):
-            r = _process(p, use_llm=False)
+            # Echte Verarbeitung des Posteingangs (wie CLI "rechnung scan") --
+            # legt bei einem unbekannten Lieferanten einen Entwurf an.
+            r = _process(p, use_llm=False, create_draft_supplier=True)
             # Unsichere Rechnungen in den Ordner "Menschliche Bearbeitung"
             dispatch(r, store)
             out.append(r.to_dict())
@@ -1018,12 +1026,43 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             notes=body.notes.strip(),
             fixed_fields=fixed,
             currency=(body.currency or "EUR").strip().upper(),
+            # Entwurfsstatus bleibt unberuehrt, solange nur Felder gespeichert
+            # werden -- bestaetigt wird ausschliesslich ueber den eigenen
+            # Weg (POST .../bestaetigen), sonst wuerde ein einfaches
+            # Speichern der Felder (z.B. beim Pruefen eines Entwurfs) den
+            # Entwurf unbemerkt ohne Audit-Eintrag bestaetigen.
+            bestaetigt=existing.bestaetigt if existing else True,
+            entwurf_quelle=existing.entwurf_quelle if existing else "",
+            entwurf_am=existing.entwurf_am if existing else "",
         ))
         return JSONResponse({"ok": True})
 
     @app.delete("/api/suppliers/{supplier_id}")
     def delete_supplier_ep(supplier_id: str) -> JSONResponse:
         store.delete_supplier(supplier_id)
+        return JSONResponse({"ok": True})
+
+    @app.post("/api/suppliers/{supplier_id}/bestaetigen")
+    def confirm_supplier_ep(supplier_id: str) -> JSONResponse:
+        """Lieferanten-Entwurf bestaetigen (Abschnitt "2 Lieferant" bzw.
+        Reiter "Lieferanten") -- ab jetzt ein normaler Lieferant."""
+        from ..config import operator as _operator
+
+        try:
+            sup = confirm_supplier(store, supplier_id, _operator())
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        return JSONResponse({"ok": True, "supplier": sup.to_dict()})
+
+    @app.post("/api/suppliers/{supplier_id}/verwerfen")
+    def discard_supplier_ep(supplier_id: str) -> JSONResponse:
+        """Lieferanten-Entwurf verwerfen -- nur fuer unbestaetigte erlaubt."""
+        from ..config import operator as _operator
+
+        try:
+            discard_supplier(store, supplier_id, _operator())
+        except ValueError as e:
+            raise HTTPException(409, str(e))
         return JSONResponse({"ok": True})
 
     @app.delete("/api/templates/{template_id}")

@@ -83,7 +83,12 @@ Lieferanten-Datensatz (`library`), manuelle Korrekturen (`manual`) gewinnen imme
    KI-Extraktion eingeschaltet, sind die Felder bereits vorbefüllt (Quelle
    `llm`); Vorschläge, die nicht im PDF stehen, werden verworfen und unter
    „Verworfene KI-Vorschläge“ angezeigt.
-3. Lieferant anlegen bzw. Lieferanten-ID + Name eintragen.
+3. Lieferant anlegen bzw. Lieferanten-ID + Name eintragen – bei der echten
+   Verarbeitung (`rechnung scan`, Nachtlauf, „Neu scannen“) legt das Programm
+   bei einem unbekannten Lieferanten selbst schon einen **Entwurf** an
+   (Name/Anschrift/USt-IdNr/IBAN/Domain/Währung aus der Rechnung, nur belegte
+   Werte) – dann hier nur noch prüfen, ggf. korrigieren und **bestätigen**
+   oder **verwerfen** (Entscheidung Aaron 09.10.2026, siehe unten).
 4. Werte prüfen und ggf. korrigieren (Klick in die Spalte „aktuell“) –
    **oder** wie bisher pro Feld anlernen: Zeile wählen → im PDF **das Label
    mit Shift anklicken** (Anker) → **den Wert anklicken**, dann **Template speichern**.
@@ -167,7 +172,7 @@ bleiben unverändert – sie entscheiden nur darüber, ob eine Rechnung
 | `auto` | gesichertes Template, Konfidenz + Prüfungen ok → hohe Zuversicht, braucht aber trotzdem Bestätigung |
 | `review` | Template vorhanden, aber Konfidenz/Prüfung schwach → manuell ansehen |
 | `no_template` | Lieferant bekannt, noch kein Template → anlernen |
-| `zurückgestellt – menschlich bearbeiten` | kein eindeutiger Lieferant/keine eindeutige Rechnungsadresse aus der Bibliothek, IBAN weicht von den Stammdaten ab, OCR nicht verfügbar/fehlgeschlagen, Zeitgrenze überschritten → ein Mensch muss ran, Gründe stehen in `hold_reasons` |
+| `zurückgestellt – menschlich bearbeiten` | kein eindeutiger Lieferant/keine eindeutige Rechnungsadresse aus der Bibliothek, IBAN weicht von den Stammdaten ab, OCR nicht verfügbar/fehlgeschlagen, Zeitgrenze überschritten, neuer Lieferanten-Entwurf wartet auf Bestätigung → ein Mensch muss ran, Gründe stehen in `hold_reasons` |
 
 `scan_no_textlayer` ist historisch und wird nicht mehr vergeben – Scans laufen
 seit der Texterkennung (siehe unten) automatisch durch.
@@ -183,9 +188,32 @@ Feldern und den Vorschlagswerten samt Herkunft (`einvoice`/`template`/`llm`/
 
 Nicht sicher heißt: zurückgestellt (kein eindeutiger Lieferant/keine
 eindeutige Rechnungsadresse, IBAN weicht von den Stammdaten ab, OCR nicht
-verfügbar, Zeitgrenze, Verarbeitungsfehler), Pflichtfeld fehlt, Prüfung rot
-(Summen, IBAN-Prüfziffer, Datum, Dublette …), OCR unsicher oder ein gelesener
-Wert unter der Mindestkonfidenz 0,7 (z.B. ein reiner KI-Vorschlag).
+verfügbar, Zeitgrenze, Verarbeitungsfehler, neuer Lieferanten-Entwurf wartet
+auf Bestätigung), Pflichtfeld fehlt, Prüfung rot (Summen, IBAN-Prüfziffer,
+Datum, Dublette …), OCR unsicher oder ein gelesener Wert unter der
+Mindestkonfidenz 0,7 (z.B. ein reiner KI-Vorschlag).
+
+### Unbekannte Lieferanten: automatischer Entwurf (Entscheidung Aaron, 09.10.2026)
+
+Ersetzt die frühere Regel „Lieferanten werden nie automatisch angelegt“.
+Findet die echte Verarbeitung (`rechnung scan`, Nachtlauf, `/api/scan` –
+**nicht** `/api/invoice`-Vorschau, `rechnung messen`, `rechnung vorlernen`)
+keinen Lieferanten, legt sie einen `Supplier` mit `bestaetigt=False` an,
+gefüllt aus genau dieser Rechnung (Name, Anschrift, USt-IdNr, IBAN, Domain,
+Währung – nur was belegt ist, kein Raten). Die nächste Rechnung desselben
+unbekannten Lieferanten (gleiche USt-IdNr/IBAN unter derselben
+Rechnungsadresse) findet denselben Entwurf statt einen zweiten anzulegen.
+
+Jede Rechnung eines unbestätigten Lieferanten (frisch angelegt oder ein
+vorhandener Entwurf) bleibt **immer** bei „Menschliche Bearbeitung“ – auch im
+Betriebsmodus `autonom` – und geht nie automatisch an JobRouter. Im
+Training-UI (Abschnitt „2 Lieferant“ bzw. Reiter „Lieferanten“, Badge
+„unbestätigt“) lassen sich die Werte prüfen/korrigieren und der Lieferant
+**bestätigen** (`POST /api/suppliers/{id}/bestaetigen`) oder **verwerfen**
+(`POST /api/suppliers/{id}/verwerfen`, nur für unbestätigte erlaubt) – beides
+mit Audit-/Ereigniseintrag. Ein unbestätigter Entwurf verdrängt nie einen
+bereits bestätigten Lieferanten; zeigen USt-IdNr/IBAN auf einen bestätigten
+UND einen unbestätigten Lieferanten, ist das ein Widerspruch → Mensch.
 
 Im Training-UI zeigt der Reiter **„Menschliche Bearbeitung“** die Liste mit
 diesen Gründen (`GET /api/menschlich`, CLI `rechnung menschlich`). Klick auf

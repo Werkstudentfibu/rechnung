@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from rechnung.guard import Guard
+from rechnung.identify import NEW_SUPPLIER_HOLD
 from rechnung.pipeline import DEFERRED, scan_folder
 from rechnung.store import Store
 
@@ -39,7 +40,10 @@ def test_hanging_invoice_does_not_block_queue(tmp_path: Path):
     assert hung.status == DEFERRED and hung.aborted == "zeitgrenze"
     assert "Zeitgrenze 2 s" in hung.hold_reasons[0]
     assert hung.shadow["would_pass"] is False and hung.sha256
-    assert by["b_ok.pdf"].aborted == "" and by["b_ok.pdf"].hold_reasons[0].startswith("Lieferant")
+    # scan_folder legt bei unbekanntem Lieferanten einen Entwurf an
+    # (Entscheidung Aaron 09.10.2026) -- die Rechnung bleibt trotzdem beim
+    # Menschen, nur mit anderem Grund als vorher ("kein Lieferant...").
+    assert by["b_ok.pdf"].aborted == "" and NEW_SUPPLIER_HOLD in by["b_ok.pdf"].hold_reasons
     assert by["c_ok.pdf"].aborted == ""
     assert by["b_ok.pdf"].duration_s > 0
     log = [a for a in store.audit_log() if a["action"] == "verarbeitung_abgebrochen"]
@@ -63,7 +67,7 @@ def test_thread_mode_timeout(tmp_path: Path, monkeypatch):
     d = _files(tmp_path, "a.pdf")
     import _guard_helpers
     monkeypatch.setattr(_guard_helpers, "maybe_hang",
-                        lambda path, store, use_llm=True: time.sleep(5))
+                        lambda path, store, use_llm=True, create_draft_supplier=False: time.sleep(5))
     g = Guard(store.root, timeout=0.3, mode="thread", target=TARGET)
     res = g.process(d / "a.pdf")
     assert res.aborted == "zeitgrenze" and res.status == DEFERRED

@@ -8,6 +8,7 @@ from pathlib import Path
 import hashlib
 import json
 import re
+import time
 
 from . import anlagen
 from . import belegart
@@ -29,8 +30,9 @@ from .timing import StageTimer
 from .config import jobrouter as _jr_cfg
 from .config import operator as _operator
 from .identify import (DEFAULT_CURRENCY, EXPECTED_RATES, FIXED_FIELD_TYPES, IBAN_DEVIATES,
-                       _address_scope_reason, cross_check, extract_identifiers,
-                       identify_einvoice, identify_with_reason, kandidaten)
+                       NEW_SUPPLIER_HOLD, Supplier, _address_scope_reason, _detect_currency,
+                       cross_check, extract_identifiers, identify_einvoice,
+                       identify_with_reason, kandidaten)
 from .store import Store
 from .suggest import suggest_category
 from .template import (STANDARD_FIELDS, FieldResult, Template, apply_line_items,
@@ -424,6 +426,158 @@ def _apply_hold(res: "Result") -> None:
         res.shadow["reasons"] = list(res.shadow.get("reasons") or []) + [note]
 
 
+# ---- Unbekannte Lieferanten: automatischer Entwurf (Entscheidung Aaron,
+# 09.10.2026) -------------------------------------------------------------
+# Findet die Pipeline beim Verarbeiten einer Rechnung keinen Lieferanten,
+# legt sie -- nur in der echten Verarbeitung, siehe ``create_draft_supplier``
+# unten -- einen Lieferanten mit ``bestaetigt=False`` an, gefuellt aus genau
+# dieser Rechnung. Ersetzt die fruehere Regel "Lieferanten werden nie
+# automatisch angelegt" (SPEC §7h); unveraendert gilt: kein Raten (nur
+# belegte Werte), nichts laeuft automatisch durch, was ein Mensch nicht
+# bestaetigt hat -- siehe NEW_SUPPLIER_HOLD unten.
+
+def _draft_placeholder_name(ustids: list[str], ibans: list[str]) -> str:
+    ident = (ustids or ibans or [""])[0]
+    return f"Unbekannt ({ident})" if ident else "Unbekannt"
+
+
+def _draft_id_base(name: str, ustid: str, iban: str) -> str:
+    """Stabiler, lesbarer Id-Rohling -- aus dem Namen, sonst aus der
+    USt-IdNr/IBAN (``neu-<kennung>``). Eindeutigkeit stellt
+    ``_unique_supplier_id`` sicher."""
+    if name:
+        slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+        if slug:
+            return slug
+    ident = compact(ustid or iban or "")
+    return f"neu-{ident.lower()}" if ident else "neu"
+
+
+def _unique_supplier_id(store: Store, base: str) -> str:
+    existing = {s.id for s in store.suppliers()}
+    if base not in existing:
+        return base
+    i = 2
+    while f"{base}-{i}" in existing:
+        i += 1
+    return f"{base}-{i}"
+
+
+def _new_draft_supplier(store: Store, *, name: str, ustids: list[str], ibans: list[str],
+                        domains: list[str], address_lines: list[str], currency: str,
+                        address_id: str | None, sha: str) -> Supplier:
+    """Nur belegte Werte (Beleg-Pflicht wie im Rest des Programms) -- fehlt
+    der Name, ein lesbarer Platzhalter. ``addresses=[address_id]`` (leer,
+    wenn keine Adresse erkannt wurde) -- ein Entwurf ohne Adresse gilt dann
+    ueber ``identify.kandidaten`` nur fuer Rechnungen ohne erkannte Adresse,
+    nie global."""
+    display_name = name.strip() or _draft_placeholder_name(ustids, ibans)
+    base = _draft_id_base(name.strip(), ustids[0] if ustids else "", ibans[0] if ibans else "")
+    sid = _unique_supplier_id(store, base)
+    return Supplier(
+        id=sid, name=display_name, ustids=ustids, ibans=ibans, domains=domains,
+        address_lines=address_lines, currency=currency or DEFAULT_CURRENCY,
+        addresses=[address_id] if address_id else [],
+        bestaetigt=False, entwurf_quelle=sha,
+        entwurf_am=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    )
+
+
+def _find_draft_by_identifiers(store: Store, address_id: str | None,
+                               ustids: list[str], ibans: list[str]) -> Supplier | None:
+    """Vorhandenen (unbestaetigten) Entwurf unter derselben Rechnungsadresse
+    mit einer der Kennungen finden -- keine Duplikate: die naechste Rechnung
+    desselben unbekannten Lieferanten (gleiche USt-IdNr/IBAN unter derselben
+    Adresse) soll den vorhandenen Entwurf treffen statt einen zweiten
+    anzulegen. Nur ein Sicherheitsnetz fuer den (seltenen) Fall, dass der
+    Entwurf aus irgendeinem Grund nicht schon ueber den normalen
+    Index-Abgleich (``identify_with_reason``) gefunden wurde."""
+    from .textnorm import norm_ustid
+
+    has_addr = bool(store.addresses())
+    cands = kandidaten(store.suppliers(), address_id, has_addr)
+    u = {norm_ustid(x) for x in ustids if x}
+    i = {compact(x).upper() for x in ibans if x}
+    hits = [s for s in cands
+            if u & {norm_ustid(x) for x in s.ustids}
+            or i & {compact(x).upper() for x in s.ibans}]
+    drafts = [s for s in hits if not s.bestaetigt]
+    if len(drafts) == 1 and len(hits) == 1:
+        return drafts[0]
+    return None
+
+
+def _draft_blocked(store: Store, address_id: str | None,
+                   ustids: list[str], ibans: list[str]) -> bool:
+    """True, wenn USt-IdNr/IBAN der Rechnung schon bei einem Lieferanten
+    unter dieser Adresse stehen, der Treffer aber nicht eindeutig ein
+    einzelner Entwurf ist (z. B. bestaetigter Lieferant + Entwurf mit
+    derselben IBAN). Dann weder einen Entwurf nehmen noch einen neuen
+    anlegen -- Widerspruch -> Mensch (Betrugsschutz, Entscheidung Aaron
+    09.10.2026: ein Entwurf darf nie einen bestaetigten verdraengen)."""
+    from .textnorm import norm_ustid
+
+    has_addr = bool(store.addresses())
+    cands = kandidaten(store.suppliers(), address_id, has_addr)
+    u = {norm_ustid(x) for x in ustids if x}
+    i = {compact(x).upper() for x in ibans if x}
+    hits = [s for s in cands
+            if u & {norm_ustid(x) for x in s.ustids}
+            or i & {compact(x).upper() for x in s.ibans}]
+    return bool(hits) and not (len(hits) == 1 and not hits[0].bestaetigt)
+
+
+def _auto_draft_pdf(res: "Result", doc, store: Store, use_llm: bool,
+                    timer: StageTimer) -> tuple[Supplier, float] | None:
+    """Entwurf eines unbekannten Lieferanten aus einer PDF-Rechnung anlegen.
+    USt-IdNr/IBAN/Domain kommen wie beim Bibliotheksabgleich selbst per
+    Regex (``extract_identifiers``/``find_ibans``, kein Raten); der Name nur,
+    wenn die KI aktiv ist UND ihn im Text findet (semantic.py
+    ``_SUPPLIER_KEYS`` -> ``semantic.extract_full``, Beleg-Pflicht dort schon
+    eingebaut). Eine Anschrift liefert dieser Pfad (ohne E-Rechnungs-XML)
+    nicht belegt -- bleibt leer statt geraten."""
+    ids = extract_identifiers(doc)
+    ibans = sorted(ids["ibans"] | find_ibans(doc.text))
+    ustids = sorted(ids["ustids"])
+    if _draft_blocked(store, res.billing_address_id, ustids, ibans):
+        return None
+    existing = _find_draft_by_identifiers(store, res.billing_address_id, ustids, ibans)
+    if existing is not None:
+        return existing, 0.0
+    name = ""
+    if use_llm:
+        with timer.stage("ki"):
+            full = semantic.extract_full(extraction_text(doc))
+        name = full.supplier.get("name", "")
+    sup = _new_draft_supplier(
+        store, name=name, ustids=ustids, ibans=ibans, domains=sorted(ids["domains"]),
+        address_lines=[], currency=_detect_currency(doc.text),
+        address_id=res.billing_address_id, sha=res.sha256)
+    store.save_supplier(sup)
+    return sup, 0.0
+
+
+def _auto_draft_einvoice(res: "Result", inv, store: Store) -> tuple[Supplier, float] | None:
+    """Entwurf eines unbekannten Lieferanten aus einer E-Rechnung -- die
+    Verkaeuferdaten des XML sind bereits strukturiert/belegt, keine KI
+    noetig."""
+    ustid = (inv.verkaeufer_ustid or "").strip().upper()
+    ustids = [ustid] if ustid else []
+    ibans = sorted({compact(i).upper() for i in (inv.verkaeufer_iban or []) if i})
+    if _draft_blocked(store, res.billing_address_id, ustids, ibans):
+        return None
+    existing = _find_draft_by_identifiers(store, res.billing_address_id, ustids, ibans)
+    if existing is not None:
+        return existing, 1.0
+    sup = _new_draft_supplier(
+        store, name=(inv.verkaeufer_name or "").strip(), ustids=ustids, ibans=ibans,
+        domains=[], address_lines=[a for a in (inv.verkaeufer_adresse or []) if a],
+        currency=inv.waehrung or DEFAULT_CURRENCY,
+        address_id=res.billing_address_id, sha=res.sha256)
+    store.save_supplier(sup)
+    return sup, 1.0
+
+
 # Felder, die bei einer E-Rechnung gesetzt sein muessen, damit sie ohne
 # Rueckfrage als "sieht sicher aus" (AUTO) gilt.
 _EINVOICE_REQUIRED = ("rechnungsnummer", "rechnungsdatum", "netto", "ust_betrag", "brutto")
@@ -484,7 +638,8 @@ def _einvoice_check(c: Check, inv, line_items: list[dict]) -> Check:
     return c
 
 
-def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = None) -> Result:
+def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = None,
+                      create_draft_supplier: bool = False) -> Result:
     """Stufe 0: Werte direkt aus dem XML, kein Template, keine KI.
 
     Konfidenz 1.0 je vorhandenem Feld -- der Wert ist nicht geraten, sondern
@@ -506,12 +661,16 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
         has_addr = bool(store.addresses())
         candidates = kandidaten(store.suppliers(), res.billing_address_id, has_addr)
         match = identify_einvoice(inv, candidates)
+        if not match and create_draft_supplier:
+            match = _auto_draft_einvoice(res, inv, store)
         supplier = None
         if match:
             supplier, res.match_score = match
             res.supplier_id = supplier.id
             res.supplier_name = supplier.name
             res.supplier_external_id = supplier.external_id or None
+            if not supplier.bestaetigt:
+                res.hold_reasons.append(NEW_SUPPLIER_HOLD)
         else:
             # Lieferant nur aus der Bibliothek -- der Verkaeufername im XML ist
             # ein Hinweis fuer den Menschen, keine Identitaet.
@@ -586,8 +745,9 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
 
         res.checks = checks_for(res.fields)
         _set_dublette(res, store, text=pdf_text)
-        res.shadow = shadow.decide(machine, checks_for(machine) if corrections else res.checks,
-                                   new_supplier=supplier is None)
+        res.shadow = shadow.decide(
+            machine, checks_for(machine) if corrections else res.checks,
+            new_supplier=supplier is None or not supplier.bestaetigt)
 
     present = [n for n in _EINVOICE_REQUIRED if n in res.fields]
     res.overall_confidence = 1.0 if len(present) == len(_EINVOICE_REQUIRED) else 0.5
@@ -845,7 +1005,15 @@ def _set_dublette(res: "Result", store: Store, doc=None, text: str = "") -> None
                                        doc, text)[1]
 
 
-def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
+def process(path: str | Path, store: Store, use_llm: bool = True,
+           create_draft_supplier: bool = False) -> Result:
+    """``create_draft_supplier`` (Standard ``False``): legt bei einem nicht
+    erkannten Lieferanten einen Entwurf an (``Supplier.bestaetigt=False``,
+    Entscheidung Aaron 09.10.2026) -- nur in der echten Verarbeitung
+    (``scan_folder``/CLI ``rechnung scan``/Web-UI ``/api/scan``), NIE im
+    Trockenlauf/Vorschau (``/api/invoice``-Anzeige, ``messen``,
+    ``vorlernen``) -- deshalb ein expliziter Parameter statt eines
+    Seiteneffekts, den jeder Aufrufer woertlich entscheiden muss."""
     path = Path(path)
     timer = StageTimer()
     # Passwortgeschuetztes PDF: nichts lesbar, nichts zu raten -> Mensch.
@@ -859,7 +1027,8 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     with timer.stage("erechnung"):
         inv = einvoice.load(path)
     if inv is not None:
-        res = _process_einvoice(path, inv, store, timer)
+        res = _process_einvoice(path, inv, store, timer,
+                                create_draft_supplier=create_draft_supplier)
         res.stufenzeiten = timer.times
         return res
     if path.suffix.lower() not in (".pdf",) + ocr.IMAGE_SUFFIXES:
@@ -920,6 +1089,8 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
             doc, store.suppliers(), index=store.supplier_index(res.billing_address_id),
             address_id=res.billing_address_id, has_addresses=has_addr,
             address_name=res.billing_address_name or "")
+        if not match and create_draft_supplier:
+            match = _auto_draft_pdf(res, doc, store, use_llm, timer)
     if not match:
         res.hold_reasons.insert(0, f"Lieferant: {why}")
         _finish_untemplated(res, doc, None, store, use_llm, [addr_check], timer, qr_obj)
@@ -933,6 +1104,12 @@ def process(path: str | Path, store: Store, use_llm: bool = True) -> Result:
     res.supplier_name = supplier.name
     res.supplier_external_id = supplier.external_id or None
     res.match_score = score
+    if not supplier.bestaetigt:
+        # Entwurf (frisch angelegt oder ein vorhandener, noch nicht
+        # bestaetigter) -- die Extraktion laeuft normal weiter, die Rechnung
+        # bleibt aber immer beim Menschen (_apply_hold -> DEFERRED), auch im
+        # autonomen Modus (Entscheidung Aaron 09.10.2026).
+        res.hold_reasons.append(NEW_SUPPLIER_HOLD)
 
     # Als veraltet markierte Vorlagen (learn.py, SPEC §7p: Layoutwechsel
     # erkennen) werden nicht mehr angewendet -- die Rechnung laeuft ueber die
@@ -1069,13 +1246,13 @@ def scan_folder(folder: str | Path, store: Store, guard=None) -> list[Result]:
         split.prepare_folder(folder, store)
         fast, slow = split_by_effort(invoice_files(folder), store)
         for p in fast:
-            res = guard.process(p)
+            res = guard.process(p, create_draft_supplier=True)
             eventlog.record(store, res)
             dispatch(res, store)
             results.append(res)
         had_slow = bool(slow)
         for p in slow:
-            res = guard.process(p)
+            res = guard.process(p, create_draft_supplier=True)
             eventlog.record(store, res)
             dispatch(res, store)
             results.append(res)
@@ -1332,3 +1509,44 @@ def journal_totals(rows: list[dict]) -> dict:
     for k in sorted(keys):
         tot[k] = round(sum(x[k] for x in rows if x.get(k) is not None), 2)
     return tot
+
+
+# ---- Lieferanten-Entwurf bestaetigen/verwerfen (Training-UI, Abschnitt
+# "2 Lieferant" und Reiter "Lieferanten") -------------------------------
+def confirm_supplier(store: Store, supplier_id: str, operator: str = "") -> Supplier:
+    """Entwurf bestaetigen -- ab jetzt ein normaler Lieferant: die naechste
+    Rechnung dieses Lieferanten laeuft ohne ``NEW_SUPPLIER_HOLD``. Ein
+    bereits bestaetigter Lieferant ist ein No-op (kein doppelter
+    Audit-/Ereigniseintrag)."""
+    from . import eventlog
+    from .config import operator as _op
+
+    sup = store.supplier(supplier_id)
+    if sup is None:
+        raise ValueError(f"Lieferant {supplier_id!r} nicht gefunden")
+    if not sup.bestaetigt:
+        sup.bestaetigt = True
+        store.save_supplier(sup)
+        op = operator or _op()
+        store.audit("lieferant_bestaetigt", {"id": supplier_id, "name": sup.name}, op)
+        eventlog.record_supplier(store, supplier_id, sup.name, "bestaetigt", op)
+    return sup
+
+
+def discard_supplier(store: Store, supplier_id: str, operator: str = "") -> None:
+    """Entwurf verwerfen -- nur fuer unbestaetigte erlaubt (fuer einen
+    bestaetigten Lieferanten gibt es den normalen "Loeschen"-Knopf im
+    Reiter "Lieferanten"; der soll nicht aus Versehen ueber diesen Weg
+    ausgeloest werden)."""
+    from . import eventlog
+    from .config import operator as _op
+
+    sup = store.supplier(supplier_id)
+    if sup is None:
+        raise ValueError(f"Lieferant {supplier_id!r} nicht gefunden")
+    if sup.bestaetigt:
+        raise ValueError("Nur unbestaetigte Lieferanten-Entwuerfe koennen verworfen werden")
+    store.delete_supplier(supplier_id)
+    op = operator or _op()
+    store.audit("lieferant_verworfen", {"id": supplier_id, "name": sup.name}, op)
+    eventlog.record_supplier(store, supplier_id, sup.name, "verworfen", op)

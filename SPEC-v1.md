@@ -281,7 +281,12 @@ den Anker an. Dabei zwei Haertungen, die vorher fehlten:
   fuer immer Quelle "manual", obwohl die Positions-Extraktion es jetzt selbst
   zuverlaessig findet.
 
-## 7h. Neuer Lieferant: Vorschlag statt Automatik (2026-09-18)
+## 7h. Neuer Lieferant: Vorschlag statt Automatik (2026-09-18, ersetzt durch §7ab)
+
+**Ueberholt** -- Aaron hat diese Regel am 09.10.2026 bewusst umgedreht, siehe
+§7ab weiter unten (automatischer Entwurf statt reiner Vorschlag). Abschnitt
+hier bleibt als historischer Kontext (Abbyy-Import war zum Zeitpunkt dieser
+Entscheidung noch nicht angebunden).
 
 Aaron pflegt Lieferanten-/Rechnungsadress-Stammdaten (Name, Adresse, IBAN,
 BLZ, ggf. USt-IdNr/Steuernummer) aktuell in Abbyy FlexiCapture; ein sauberer
@@ -1125,6 +1130,79 @@ als "errechnet" gekennzeichnet, oder fehlt mit Grund. Kein Raten.
      Ändert der Mensch eine solche Zelle, verschwindet die Markierung sofort
      (wird `korrigiert`); die Rechen-Prüfungen (Baustein 9/11b) zeigen
      Abweichungen weiterhin rot mit "erwartet .../gefunden ...".
+
+## 7ab. Unbekannte Lieferanten: automatischer Entwurf statt reiner Vorschlag (2026-10-09)
+
+Ersetzt §7h ("Neuer Lieferant: Vorschlag statt Automatik") -- Entscheidung
+Aaron, 09.10.2026: "Wenn der Lieferant noch nicht existiert, soll das
+Programm die Daten aus der Rechnung in den Lieferanten eintragen, ihn aber
+als unbekannten Lieferanten markieren und auf eine menschliche Bestätigung
+warten." Unveraendert bleibt: kein Raten (nur belegte Werte), nichts laeuft
+automatisch durch, was ein Mensch nicht bestaetigt hat.
+
+1. **Entwurfsstatus am Lieferanten** (`identify.Supplier`): `bestaetigt: bool
+   = True` (alte `suppliers.json` ohne das Feld laedt als bestaetigt, siehe
+   `Supplier.from_dict`), `entwurf_quelle`/`entwurf_am` (Dateiname/sha256 und
+   Zeitstempel, rein informativ).
+
+2. **Automatischer Entwurf** (`pipeline._auto_draft_pdf`/
+   `_auto_draft_einvoice`): findet `identify_with_reason`/`identify_einvoice`
+   keinen Lieferanten, legt die Pipeline einen mit `bestaetigt=False` an --
+   USt-IdNr/IBAN/Domain per Regex (`identify.extract_identifiers`,
+   `textnorm.find_ibans`, E-Rechnung: Verkaeufer-Felder aus dem XML, schon
+   strukturiert), Name nur wenn die KI aktiv ist und ihn im Text findet
+   (`semantic.extract_full`, `_SUPPLIER_KEYS`, dieselbe Beleg-Pflicht wie
+   jeder KI-Wert) -- sonst ein Platzhalter ("Unbekannt (<USt-IdNr/IBAN>)").
+   `addresses=[erkannte Rechnungsadresse]`, leer bei keiner erkannten
+   Adresse -- ein Entwurf ohne Adresse gilt dann ueber `identify.kandidaten`
+   nur fuer Rechnungen ohne erkannte Adresse, nie global. Id: Slug aus dem
+   Namen, sonst `neu-<USt-IdNr/IBAN>`, kollisionsfrei (`_unique_supplier_id`).
+   Keine Duplikate: ein vorhandener unbestaetigter Entwurf mit derselben
+   Kennung unter derselben Adresse wird gefunden (sowohl ueber den normalen
+   Index-Abgleich als auch zusaetzlich `_find_draft_by_identifiers` als
+   Sicherheitsnetz) statt eines zweiten.
+
+   Expliziter Parameter statt Seiteneffekt: `pipeline.process`/
+   `_process_einvoice` bekommen `create_draft_supplier: bool = False`
+   (Standard aus!) -- nur `scan_folder` (CLI `rechnung scan`, Nachtlauf) und
+   `/api/scan` (Web-UI, dieselbe echte Verarbeitung des Posteingangs) rufen
+   mit `True` auf. `/api/invoice` (Vorschau), `rechnung messen`,
+   `rechnung vorlernen` legen nie einen Entwurf an.
+
+3. **Rueckstellgrund** (`identify.NEW_SUPPLIER_HOLD`): wird ein Lieferant mit
+   `bestaetigt=False` erkannt (frisch angelegt oder vorhandener Entwurf),
+   laeuft die Extraktion normal, die Rechnung bleibt aber immer bei
+   `DEFERRED` (`pipeline._apply_hold`) -- auch im Betriebsmodus `autonom`,
+   zaehlt nie als "wuerde durchlassen" im Schattenbetrieb und geht nie an
+   JobRouter.
+
+4. **Bestaetigen/Verwerfen** (`pipeline.confirm_supplier`/
+   `discard_supplier`, `POST /api/suppliers/{id}/bestaetigen`/`.../
+   verwerfen`): bestaetigen setzt `bestaetigt=True` (No-op, wenn schon
+   bestaetigt); verwerfen loescht den Datensatz, nur fuer unbestaetigte
+   erlaubt. Beides mit Audit- (`store.audit`) UND Ereignis-Eintrag
+   (`eventlog.record_supplier`, Operator). `POST /api/suppliers` (normales
+   Felder-Speichern, z.B. beim Pruefen eines Entwurfs) laesst den
+   Entwurfsstatus bewusst unberuehrt -- sonst wuerde ein einfaches Speichern
+   der Felder den Entwurf unbemerkt ohne Audit-Eintrag bestaetigen.
+
+   Training-UI: Abschnitt "2 Lieferant" zeigt bei unbestaetigtem Lieferanten
+   eine eigene Box ("Unbekannter Lieferant – bitte prüfen", Badge
+   "unbestätigt") mit editierbaren Feldern + "Lieferant bestätigen"/
+   "Entwurf verwerfen" -- ersetzt/vereint mit der fruehreren Box "Neuer
+   Lieferant erkannt" (die bleibt nur noch als Rueckfallebene fuer den
+   seltenen Fall, dass gar kein Lieferant -- auch kein Entwurf -- vorliegt,
+   z.B. Altbestand von vor dieser Aenderung). Reiter "Lieferanten": Badge
+   + Filter "nur unbestätigte zeigen", Bestaetigen/Verwerfen auch dort.
+
+5. **Sicherheit**: ein unbestaetigter Entwurf verdraengt nie einen
+   bestaetigten Lieferanten (`identify.identify_with_reason`: beim
+   Fingerprint-/Domain-/Namens-Scoring gewinnt ein bestaetigter Lieferant
+   innerhalb der normalen Mehrdeutigkeits-Spanne gegen einen Entwurf).
+   Zeigen USt-IdNr/IBAN auf einen bestaetigten UND einen unbestaetigten
+   Lieferanten (harter Index-Treffer auf beide), bleibt es wie bei jedem
+   Mehrfachtreffer "mehrdeutig" -> Mensch -- keiner der beiden gewinnt
+   stillschweigend.
 
 ## 8. Offene Punkte für v1.1
 

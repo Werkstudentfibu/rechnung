@@ -34,6 +34,8 @@ TYPE_CORRECTION = "korrektur"
 TYPE_HUMAN = "menschlich"
 HUMAN_PLACED = "abgelegt"
 HUMAN_DONE = "erledigt"
+# Lieferanten-Entwurf (pipeline.confirm_supplier/discard_supplier)
+TYPE_SUPPLIER = "lieferant"
 
 # wie viele Beispiel-Rechnungen je Haeufungs-Gruppe im Fehlerbericht stehen
 MAX_EXAMPLES = 5
@@ -123,6 +125,22 @@ def record_human(store, rec: dict, aktion: str, operator: str = "") -> dict:
                     for g in rec.get("gruende") or []],
         "korrigiert": rec.get("korrigiert") or [],
         "freigabe": rec.get("freigabe"),
+        "operator": operator or "?",
+    }
+    store.event_append(ev)
+    return ev
+
+
+def record_supplier(store, supplier_id: str, supplier_name: str, aktion: str,
+                    operator: str = "") -> dict:
+    """Lieferanten-Entwurf bestaetigt/verworfen (``aktion``:
+    "bestaetigt"/"verworfen")."""
+    ev = {
+        "type": TYPE_SUPPLIER,
+        "aktion": aktion,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "supplier_id": supplier_id,
+        "supplier_name": supplier_name,
         "operator": operator or "?",
     }
     store.event_append(ev)

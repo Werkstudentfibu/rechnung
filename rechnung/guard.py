@@ -56,9 +56,10 @@ def _worker(conn, data_root: str, target: str) -> None:
             return
         if msg is None:
             return
-        path, use_llm = msg
+        path, use_llm, create_draft_supplier = msg
         try:
-            conn.send(("ok", func(path, Store(data_root), use_llm=use_llm)))
+            conn.send(("ok", func(path, Store(data_root), use_llm=use_llm,
+                                  create_draft_supplier=create_draft_supplier)))
         except Exception as e:  # noqa: BLE001 -- jede Rechnung einzeln abfangen
             conn.send(("err", f"{type(e).__name__}: {e}"))
 
@@ -129,7 +130,7 @@ class Guard:
         self.close()
 
     # ---- Verarbeitung --------------------------------------------------
-    def process(self, path, use_llm: bool = True):
+    def process(self, path, use_llm: bool = True, create_draft_supplier: bool = False):
         from . import lock
         from .store import Store
 
@@ -140,11 +141,13 @@ class Guard:
         t0 = time.monotonic()
         with self._lock:
             if self.timeout <= 0:
-                res = _resolve(self.target)(path, Store(self.data_root), use_llm=use_llm)
+                res = _resolve(self.target)(path, Store(self.data_root), use_llm=use_llm,
+                                            create_draft_supplier=create_draft_supplier)
                 res.duration_s = round(time.monotonic() - t0, 2)
                 return res
-            kind, payload = (self._run_process(path, use_llm) if self.mode == "process"
-                             else self._run_thread(path, use_llm))
+            kind, payload = (self._run_process(path, use_llm, create_draft_supplier)
+                             if self.mode == "process"
+                             else self._run_thread(path, use_llm, create_draft_supplier))
         duration = time.monotonic() - t0
         if kind == "ok":
             payload.duration_s = round(duration, 2)
@@ -161,12 +164,12 @@ class Guard:
         }, _operator())
         return res
 
-    def _run_process(self, path, use_llm: bool):
+    def _run_process(self, path, use_llm: bool, create_draft_supplier: bool = False):
         if self._proc is None or not self._proc.is_alive():
             self._kill()
             self._start()
         try:
-            self._conn.send((str(path), use_llm))
+            self._conn.send((str(path), use_llm, create_draft_supplier))
             if not self._conn.poll(self.timeout):
                 self._kill()   # haengt -> hart beenden, naechste Rechnung neuer Prozess
                 return "timeout", None
@@ -175,7 +178,7 @@ class Guard:
             self._kill()
             return "err", f"Arbeitsprozess abgestuerzt ({type(e).__name__})"
 
-    def _run_thread(self, path, use_llm: bool):
+    def _run_thread(self, path, use_llm: bool, create_draft_supplier: bool = False):
         from .store import Store
 
         box: dict = {}
@@ -183,7 +186,8 @@ class Guard:
 
         def run():
             try:
-                box["res"] = ("ok", func(path, Store(self.data_root), use_llm=use_llm))
+                box["res"] = ("ok", func(path, Store(self.data_root), use_llm=use_llm,
+                                         create_draft_supplier=create_draft_supplier))
             except Exception as e:  # noqa: BLE001
                 box["res"] = ("err", f"{type(e).__name__}: {e}")
 

@@ -12,6 +12,10 @@ normaler Dateiordner: man sieht im Explorer sofort, was liegen geblieben ist.
 - zurueckgestellt (kein eindeutiger Lieferant/keine eindeutige
   Rechnungsadresse aus der Bibliothek, IBAN weicht von den Stammdaten ab, OCR
   nicht verfuegbar, Zeitgrenze, Verarbeitungsfehler),
+- ein neuer (automatisch aus der Rechnung angelegter oder von Hand noch
+  nicht bestaetigter) Lieferanten-Entwurf wartet auf Bestaetigung
+  (``identify.NEW_SUPPLIER_HOLD``, Entscheidung Aaron 09.10.2026) --
+  unabhaengig davon, wie gut die Extraktion sonst aussieht,
 - ein Pflichtfeld fehlt,
 - eine Pruefung ist rot (Summen, IBAN-Pruefziffer, Datum, Dublette, ...),
 - OCR unsicher (Pruefung ``ocr-konfidenz`` rot),
@@ -47,6 +51,7 @@ ART_ZEITGRENZE = "zeitgrenze"
 ART_FEHLER = "fehler"
 ART_OCR = "ocr"
 ART_IBAN = "iban"
+ART_NEUER_LIEFERANT = "neuer_lieferant"
 ART_PFLICHTFELD = "pflichtfeld"
 ART_PRUEFUNG = "pruefung"
 ART_UNSICHER = "unsicher"
@@ -102,8 +107,10 @@ def file_name(path) -> str:
 
 
 def _hold_art(reason: str) -> str:
-    from .identify import IBAN_DEVIATES
+    from .identify import IBAN_DEVIATES, NEW_SUPPLIER_HOLD
 
+    if NEW_SUPPLIER_HOLD in reason:
+        return ART_NEUER_LIEFERANT
     if IBAN_DEVIATES in reason:
         return ART_IBAN
     if reason.startswith("Zeitgrenze"):

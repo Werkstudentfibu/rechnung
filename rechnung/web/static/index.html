@@ -120,7 +120,7 @@
   <b>Rechnung</b>
   <button id="nav-scan" class="active" onclick="show('scan')">Rechnungen</button>
   <button id="nav-human" onclick="show('human')">Menschliche Bearbeitung <span id="human-count"></span></button>
-  <button id="nav-suppliers" onclick="show('suppliers')">Lieferanten</button>
+  <button id="nav-suppliers" onclick="show('suppliers')">Lieferanten <span id="sup-unconfirmed-count"></span></button>
   <button id="nav-addresses" onclick="show('addresses')">Rechnungsadressen</button>
   <button id="nav-categories" onclick="show('categories')">Kategorien</button>
   <button id="nav-journal" onclick="show('journal')">Journal</button>
@@ -154,6 +154,7 @@
       <b>feste Werte</b> – Felder, die das Programm nicht aus jeder Rechnung liest, sondern
       hier einträgt und auf der Rechnung nur gegenprüft.</p>
     <button class="ghost" onclick="editSupplier(null)">+ Neuer Lieferant</button>
+    <label class="hint"><input type="checkbox" id="sup-filter-unconfirmed" onchange="loadSuppliers()"> nur unbestätigte Entwürfe zeigen</label>
     <div id="sup-table"></div>
     <div id="sup-form"></div>
   </div>
@@ -467,22 +468,28 @@ function renderInvoice(d) {
   const t1 = feldTabelle(['kostenstelle']); if (t1) s1.appendChild(t1);
 
   // 2 -- Lieferant
+  const isDraft = !!(d.supplier && d.supplier.bestaetigt === false);
   const s2 = abschnitt(2, 'Lieferant');
   s2.insertAdjacentHTML('beforeend', `
     <div class="form-grid">
-      <label>Lieferant-ID</label><input id="sid" value="${esc(sup.id || '')}" placeholder="z.B. muster-gmbh">
+      <label>Lieferant-ID</label><input id="sid" value="${esc(sup.id || '')}" placeholder="z.B. muster-gmbh" ${isDraft ? 'readonly' : ''}>
       <label>Name</label><input id="sname" value="${esc(sup.name || '')}">
     </div>
     <div class="hint">
-      ${d.match && d.match.score != null ? `erkannt: ${esc(d.match.name)} (${d.match.score})` :
+      ${isDraft ? 'Entwurf – automatisch aus einer Rechnung angelegt, noch nicht bestätigt (siehe unten).' :
+        d.match && d.match.score != null ? `erkannt: ${esc(d.match.name)} (${d.match.score})` :
         d.match && d.match.id ? '' :
         `neuer Lieferant – USt-IdNr ${(ids.ustids || []).join(',') || '?'}` +
         (ids.currency && ids.currency !== 'EUR' ? ` · Währung erkannt: ${esc(ids.currency)}` : '')}
       ${d.supplier && d.supplier.fixed_fields && Object.keys(d.supplier.fixed_fields).length
         ? ` · feste Werte: ${Object.keys(d.supplier.fixed_fields).join(', ')}` : ''}
     </div>`);
-  if (d.supplier) s2.appendChild(renderSupplierInfoBox(d.supplier));
-  if (!d.match) s2.appendChild(renderNewSupplierBox(ids));
+  if (isDraft) {
+    s2.appendChild(renderDraftSupplierBox(d.supplier));
+  } else {
+    if (d.supplier) s2.appendChild(renderSupplierInfoBox(d.supplier));
+    if (!d.match) s2.appendChild(renderNewSupplierBox(ids));
+  }
   if ((STATE.similar || []).length) {
     const simBox = document.createElement('div'); simBox.className = 'box';
     simBox.innerHTML = `<h4>Ähnliche bekannte Lieferanten</h4>
@@ -652,6 +659,71 @@ async function saveNewSupplierFromInvoice() {
     }),
   });
   $('#msg').textContent = `Lieferant „${sname || sid}“ angelegt -- jetzt die Felder unten anlernen.`;
+  const d2 = await api('/api/invoice?file=' + encodeURIComponent(STATE.file));
+  applyInvoiceData(d2);
+}
+
+function renderDraftSupplierBox(sup) {
+  // Automatisch aus der Rechnung angelegter Entwurf (Entscheidung Aaron
+  // 09.10.2026, ersetzt die fruehere Box "Neuer Lieferant erkannt" fuer
+  // diesen Fall -- nur noch EIN Weg). Felder editierbar, aber erst der
+  // Klick auf "Lieferant bestätigen" macht ihn zu einem normalen
+  // Lieferanten; bis dahin bleibt jede seiner Rechnungen beim Menschen.
+  const box = document.createElement('div'); box.className = 'box';
+  const sAddr = new Set(sup.addresses || []);
+  box.innerHTML = `<h4><span class="badge zurueckgestellt">unbestätigt</span> Unbekannter Lieferant – bitte prüfen</h4>
+    <div class="hint">Automatisch aus dieser Rechnung angelegt (Name/ID oben editierbar). Werte
+      prüfen/korrigieren, dann bestätigen oder verwerfen.</div>
+    <div class="form-grid">
+      <label>USt-IdNr (je Zeile)</label><textarea id="ds-ustids">${(sup.ustids || []).join('\n')}</textarea>
+      <label>IBAN (je Zeile)</label><textarea id="ds-ibans">${(sup.ibans || []).join('\n')}</textarea>
+      <label>Anschrift (je Zeile)</label><textarea id="ds-address">${(sup.address_lines || []).join('\n')}</textarea>
+    </div>
+    <div class="box">
+      <h4>Rechnungsadressen</h4>
+      <div class="hint">Wie in Abbyy: der Lieferant wird nur unter den hier angekreuzten
+        Rechnungsadressen gesucht. Keine angekreuzt = gilt für alle Adressen.</div>
+      <div class="form-grid">
+        ${(STATE.addresses || []).map(a => `<label><input type="checkbox" class="ds-addr" value="${esc(a.id)}" ${sAddr.has(a.id) ? 'checked' : ''}> ${esc(a.name || a.id)}</label><div></div>`).join('')}
+      </div>
+    </div>
+    <button onclick="confirmDraftSupplier()">✓ Lieferant bestätigen</button>
+    <button class="danger" onclick="discardDraftSupplier()">Entwurf verwerfen</button>`;
+  return box;
+}
+
+async function confirmDraftSupplier() {
+  const sup = STATE.supplier || {};
+  if (!sup.id) return;
+  const addresses = Array.from(document.querySelectorAll('#work .ds-addr:checked')).map(el => el.value);
+  await api('/api/suppliers', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      id: sup.id, name: $('#sname').value.trim(),
+      ustids: lines('ds-ustids'), ibans: lines('ds-ibans'), domains: sup.domains || [],
+      addresses, external_id: sup.external_id || '',
+      address_lines: lines('ds-address'),
+      bank_name: sup.bank_name || '', bic: sup.bic || '',
+      bank_code: sup.bank_code || '', bank_account: sup.bank_account || '',
+      creditor_id: sup.creditor_id || '', contact: sup.contact || '',
+      default_payment_terms: sup.default_payment_terms || '',
+      default_tax_rate: sup.default_tax_rate || '',
+      notes: sup.notes || '', fixed_fields: sup.fixed_fields || {},
+      currency: sup.currency || 'EUR',
+    }),
+  });
+  await api('/api/suppliers/' + encodeURIComponent(sup.id) + '/bestaetigen', { method: 'POST' });
+  $('#msg').textContent = `Lieferant „${$('#sname').value.trim() || sup.id}“ bestätigt.`;
+  const d2 = await api('/api/invoice?file=' + encodeURIComponent(STATE.file));
+  applyInvoiceData(d2);
+}
+
+async function discardDraftSupplier() {
+  const sup = STATE.supplier || {};
+  if (!sup.id) return;
+  if (!confirm(`Entwurf „${sup.name || sup.id}“ verwerfen?`)) return;
+  await api('/api/suppliers/' + encodeURIComponent(sup.id) + '/verwerfen', { method: 'POST' });
+  $('#msg').textContent = 'Entwurf verworfen.';
   const d2 = await api('/api/invoice?file=' + encodeURIComponent(STATE.file));
   applyInvoiceData(d2);
 }
@@ -1276,11 +1348,20 @@ async function loadSuppliers() {
   const [rows, addresses] = await Promise.all([api('/api/suppliers'), api('/api/addresses')]);
   SUP_ADDRESSES = addresses;
   const addrName = id => (addresses.find(a => a.id === id) || {}).name || id;
+  const unconfirmed = rows.filter(s => s.bestaetigt === false).length;
+  $('#sup-unconfirmed-count').textContent = unconfirmed ? `(${unconfirmed} unbestätigt)` : '';
+  const onlyUnconfirmed = $('#sup-filter-unconfirmed') && $('#sup-filter-unconfirmed').checked;
+  // Unbestaetigte Entwuerfe zuerst (Entscheidung Aaron 09.10.2026) --
+  // fallen damit sofort auf, statt in einer langen Liste zu verschwinden.
+  const sorted = [...rows].sort((a, b) =>
+    (a.bestaetigt === false ? 0 : 1) - (b.bestaetigt === false ? 0 : 1));
   const t = document.createElement('table');
-  t.innerHTML = '<tr><th>ID</th><th>Name</th><th>Lieferantennr.</th><th>Rechnungsadressen</th><th>Währung</th><th>USt-IdNr</th><th>IBAN</th><th>feste Werte</th><th>Templates</th><th></th></tr>';
-  for (const s of rows) {
+  t.innerHTML = '<tr><th></th><th>ID</th><th>Name</th><th>Lieferantennr.</th><th>Rechnungsadressen</th><th>Währung</th><th>USt-IdNr</th><th>IBAN</th><th>feste Werte</th><th>Templates</th><th></th></tr>';
+  for (const s of sorted) {
+    if (onlyUnconfirmed && s.bestaetigt !== false) continue;
     const tr = document.createElement('tr'); tr.className = 'clickable';
-    tr.innerHTML = `<td>${esc(s.id)}</td><td>${esc(s.name || '')}</td>
+    tr.innerHTML = `<td>${s.bestaetigt === false ? '<span class="badge zurueckgestellt">unbestätigt</span>' : ''}</td>
+      <td>${esc(s.id)}</td><td>${esc(s.name || '')}</td>
       <td>${esc(s.external_id || '')}</td>
       <td>${(s.addresses || []).length ? (s.addresses || []).map(a => esc(addrName(a))).join('<br>') : '<span class="hint">alle</span>'}</td>
       <td>${esc(s.currency || 'EUR')}</td>
@@ -1290,12 +1371,27 @@ async function loadSuppliers() {
       <td>${(s.templates || []).map(x =>
         `${esc(x.variant)} <span class="hint">(${x.confirmations}×${x.secured ? ', gesichert' : ''})</span>
          <button class="danger" onclick="event.stopPropagation();delTemplate('${esc(x.id)}')">×</button>`).join('<br>')}</td>
-      <td><button class="danger" onclick="event.stopPropagation();delSupplier('${esc(s.id)}')">Löschen</button></td>`;
+      <td>${s.bestaetigt === false
+        ? `<button onclick="event.stopPropagation();confirmSupplierRow('${esc(s.id)}')">Bestätigen</button>
+           <button class="danger" onclick="event.stopPropagation();discardSupplierRow('${esc(s.id)}')">Verwerfen</button>`
+        : ''}
+        <button class="danger" onclick="event.stopPropagation();delSupplier('${esc(s.id)}')">Löschen</button></td>`;
     tr.onclick = () => editSupplier(s);
     t.appendChild(tr);
   }
   $('#sup-table').innerHTML = ''; $('#sup-table').appendChild(t);
   $('#sup-form').innerHTML = '';
+}
+
+async function confirmSupplierRow(id) {
+  await api('/api/suppliers/' + encodeURIComponent(id) + '/bestaetigen', { method: 'POST' });
+  loadSuppliers();
+}
+
+async function discardSupplierRow(id) {
+  if (!confirm(`Entwurf „${id}“ verwerfen?`)) return;
+  await api('/api/suppliers/' + encodeURIComponent(id) + '/verwerfen', { method: 'POST' });
+  loadSuppliers();
 }
 
 function editSupplier(s) {

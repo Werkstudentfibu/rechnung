@@ -142,10 +142,11 @@ def test_scan_folder_processes_fast_before_slow(tmp_path: Path):
     order: list[str] = []
 
     class _OrderGuard:
-        def process(self, path, use_llm=True):
+        def process(self, path, use_llm=True, create_draft_supplier=False):
             from rechnung.pipeline import process as _process
             order.append(Path(path).name)
-            return _process(path, store, use_llm=use_llm)
+            return _process(path, store, use_llm=use_llm,
+                            create_draft_supplier=create_draft_supplier)
 
         def close(self):
             pass
@@ -166,9 +167,10 @@ def test_scan_folder_releases_model_only_when_slow_batch_ran(tmp_path: Path, mon
     monkeypatch.setattr(semantic, "release_model", lambda: calls.append("released"))
 
     class _StubGuard:
-        def process(self, path, use_llm=True):
+        def process(self, path, use_llm=True, create_draft_supplier=False):
             from rechnung.pipeline import process as _process
-            return _process(path, store, use_llm=use_llm)
+            return _process(path, store, use_llm=use_llm,
+                            create_draft_supplier=create_draft_supplier)
 
         def close(self):
             pass

@@ -108,7 +108,12 @@ def test_scan_places_unsure_invoice_with_sidecar(tmp_path: Path):
     side = json.loads((folder / ("re.pdf" + human.SIDECAR_SUFFIX)).read_text("utf-8"))
     assert side["sha256"] == res.sha256
     arten = {g["art"] for g in side["gruende"]}
-    assert "zurueckgestellt" in arten        # kein Lieferant aus der Bibliothek
+    # scan_folder legt bei unbekanntem Lieferanten einen Entwurf an
+    # (Entscheidung Aaron 09.10.2026) -- der Grund ist jetzt "neuer
+    # Lieferant wartet auf Bestaetigung" statt "kein Lieferant...".
+    assert "neuer_lieferant" in arten
+    assert res.supplier_id and res.supplier_name
+    assert res.supplier_id.startswith("neu-")
     assert side["abgelegt"] and "vorschlaege" in side
     # Original im Eingangsordner bleibt unveraendert liegen
     assert (samples / "re.pdf").exists()
@@ -155,8 +160,8 @@ class _NoGuard:
         from rechnung.guard import Guard
         self._g = Guard(store.root, timeout=0)
 
-    def process(self, p, use_llm=True):
-        return self._g.process(p, use_llm=use_llm)
+    def process(self, p, use_llm=True, create_draft_supplier=False):
+        return self._g.process(p, use_llm=use_llm, create_draft_supplier=create_draft_supplier)
 
 
 # ---- Bearbeitung im Training-UI -> verlaesst den Ordner, lernt -------------

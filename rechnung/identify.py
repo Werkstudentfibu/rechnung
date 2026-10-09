@@ -37,6 +37,11 @@ DEFAULT_CURRENCY = "EUR"
 # Bankverbindung). Wortgleich in Pruefung, Rueckstellgrund und Fehlerbericht.
 IBAN_DEVIATES = "IBAN weicht von Stammdaten ab (Betrugsschutz)"
 
+# Rueckstellgrund fuer einen (automatisch angelegten oder von Hand noch
+# nicht bestaetigten) Lieferanten-Entwurf (Supplier.bestaetigt=False,
+# Entscheidung Aaron 09.10.2026) -- wortgleich in pipeline.py/human.py.
+NEW_SUPPLIER_HOLD = "Neuer Lieferant -- wartet auf Bestaetigung"
+
 
 @dataclass
 class Supplier:
@@ -56,6 +61,18 @@ class Supplier:
     # BusinessUnitId ist die interne ``id`` zusammengesetzt (siehe importers.py),
     # ``external_id`` bleibt die reine Fremd-Id fuer den Export (jobrouter.py).
     external_id: str = ""
+    # Entwurfsstatus (Entscheidung Aaron 09.10.2026): ersetzt die bisherige
+    # Regel "Lieferanten werden nie automatisch angelegt" (SPEC §7h) -- ein
+    # beim Verarbeiten einer Rechnung automatisch angelegter, noch nicht
+    # bestaetigter Lieferant hat ``bestaetigt=False``. Standard ``True``,
+    # damit von Hand angelegte/importierte (Abbyy) Lieferanten sofort gelten
+    # UND alte ``suppliers.json`` ohne dieses Feld beim Laden als bestaetigt
+    # zaehlen (siehe ``from_dict``). ``entwurf_quelle``/``entwurf_am``: aus
+    # welcher Rechnung (Dateiname/sha256) und wann der Entwurf entstand --
+    # nur informativ, keine Fachlogik haengt daran.
+    bestaetigt: bool = True
+    entwurf_quelle: str = ""
+    entwurf_am: str = ""
     # --- gepflegte Stammdaten -------------------------------------------
     address_lines: list[str] = field(default_factory=list)
     bank_name: str = ""
@@ -85,6 +102,8 @@ class Supplier:
             "default_payment_terms": self.default_payment_terms,
             "default_tax_rate": self.default_tax_rate, "notes": self.notes,
             "fixed_fields": self.fixed_fields, "currency": self.currency,
+            "bestaetigt": self.bestaetigt, "entwurf_quelle": self.entwurf_quelle,
+            "entwurf_am": self.entwurf_am,
         }
 
     @classmethod
@@ -103,6 +122,12 @@ class Supplier:
             notes=d.get("notes", ""),
             fixed_fields=d.get("fixed_fields", {}) or {},
             currency=d.get("currency") or DEFAULT_CURRENCY,
+            # ``bestaetigt`` fehlt in altem ``suppliers.json`` (vor dieser
+            # Aenderung) -- ``True`` als Default heisst: bereits vorhandene
+            # Lieferanten laden unveraendert als bestaetigt.
+            bestaetigt=d.get("bestaetigt", True),
+            entwurf_quelle=d.get("entwurf_quelle", ""),
+            entwurf_am=d.get("entwurf_am", ""),
         )
 
 
@@ -166,19 +191,28 @@ def kandidaten(suppliers: list[Supplier], address_id: str | None,
     wie in Abbyy FlexiCapture wird ein Lieferant nur unter der Rechnungsadresse
     (BusinessUnit) gesucht, der er zugeordnet ist, nie uebergreifend
     (Entscheidung Aaron, 09.10.2026). ``Supplier.addresses`` leer = gilt fuer
-    alle Adressen.
+    alle Adressen -- AUSSER bei einem unbestaetigten Entwurf (Entscheidung
+    Aaron, 09.10.2026, automatischer Lieferanten-Entwurf): dessen leere
+    ``addresses`` bedeutet "fuer DIESE Rechnung wurde keine Adresse erkannt",
+    nicht "gilt global" -- sonst wuerde ein ohne Adresse angelegter Entwurf
+    spaeter faelschlich auch Rechnungen MIT einer erkannten (anderen)
+    Adresse treffen. Ein bestaetigter Lieferant ohne Adresse bleibt
+    rueckwaertskompatibel global.
 
     Gibt es in der Bibliothek ueberhaupt Rechnungsadressen (``has_addresses``),
     wurde aber fuer DIESE Rechnung keine erkannt (``address_id`` ``None``),
-    werden nur die globalen Lieferanten durchsucht -- nie stillschweigend die
-    ganze Bibliothek. Sind in der Bibliothek ueberhaupt keine Rechnungsadressen
-    gepflegt (``has_addresses=False``), bleibt das Verhalten wie vor dieser
-    Aenderung: alle Lieferanten sind Kandidaten."""
+    werden nur die globalen Lieferanten durchsucht (dort zaehlt ein Entwurf
+    ohne Adresse mit) -- nie stillschweigend die ganze Bibliothek. Sind in
+    der Bibliothek ueberhaupt keine Rechnungsadressen gepflegt
+    (``has_addresses=False``), bleibt das Verhalten wie vor dieser Aenderung:
+    alle Lieferanten sind Kandidaten."""
     if not has_addresses:
         return list(suppliers)
     if address_id is None:
         return [s for s in suppliers if not s.addresses]
-    return [s for s in suppliers if not s.addresses or address_id in s.addresses]
+    return [s for s in suppliers
+           if (s.addresses and address_id in s.addresses)
+           or (not s.addresses and s.bestaetigt)]
 
 
 def _address_scope_reason(has_addresses: bool, address_id: str | None,
@@ -210,10 +244,18 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
                          address_name: str = ""):
     """-> ((Supplier, score) oder None, Grund).
 
-    Einzige Quelle fuer die Lieferanten-Identitaet ist die Bibliothek
-    (Abbyy-Import, Lieferanten-Tab) -- erkannt wird nur per Abgleich, nie
-    angelegt oder per KI abgeleitet. Kein eindeutiger Treffer -> ``None`` und
-    ein Grund fuer den Menschen (Rechnung wird zurueckgestellt).
+    Die Lieferanten-Identitaet kommt ausschliesslich aus der Bibliothek
+    (Abbyy-Import, Lieferanten-Tab, oder ein automatisch angelegter Entwurf,
+    ``Supplier.bestaetigt=False`` -- siehe ``pipeline.process``,
+    Entscheidung Aaron 09.10.2026) -- erkannt wird nur per Abgleich, nie per
+    KI abgeleitet; diese Funktion selbst legt nie etwas an. Kein eindeutiger
+    Treffer -> ``None`` und ein Grund fuer den Menschen (Rechnung wird
+    zurueckgestellt). Ein Entwurf wird genauso gefunden wie ein bestaetigter
+    Lieferant -- dass die Rechnung trotzdem beim Menschen bleibt, entscheidet
+    ``pipeline.process`` ueber ``NEW_SUPPLIER_HOLD``, nicht diese Funktion.
+    Bei einem Widerspruch (USt-IdNr/IBAN passen zu einem bestaetigten UND
+    einem unbestaetigten Lieferanten) gilt wie bei jedem Mehrfachtreffer:
+    ``mehrdeutig`` -> Mensch, keiner der beiden gewinnt stillschweigend.
 
     Lieferant je Rechnungsadresse (wie Abbyy FlexiCapture, Entscheidung Aaron
     09.10.2026): ``suppliers`` wird zuerst ueber ``kandidaten()`` auf die zur
@@ -289,7 +331,17 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
                                            "kein Lieferant aus der Bibliothek passt")
     if len(scored) > 1:
         second_s, second_score = scored[1]
-        if (best_score - second_score) < min_margin:
+        # Ein unbestaetigter Entwurf darf einen bestaetigten Lieferanten nie
+        # verdraengen (Entscheidung Aaron 09.10.2026): liegt der Zweitplatzierte
+        # innerhalb der normalen Mehrdeutigkeits-Spanne UND ist er bestaetigt,
+        # waehrend der Erstplatzierte nur ein Entwurf ist, gewinnt der
+        # bestaetigte -- statt "mehrdeutig" zu melden oder stillschweigend den
+        # Entwurf zu nehmen. Dasselbe in umgekehrter Reihenfolge (Entwurf auf
+        # Platz 2) bleibt unveraendert: dort entscheidet weiter die Spanne.
+        if (not best_s.bestaetigt and second_s.bestaetigt
+                and second_score >= threshold and (best_score - second_score) < min_margin):
+            best_s, best_score = second_s, second_score
+        elif (best_score - second_score) < min_margin:
             return None, (f"mehrdeutig: {best_s.id} / {second_s.id} "
                           f"(Score {best_score} vs. {second_score})")
     return (best_s, best_score), ""
