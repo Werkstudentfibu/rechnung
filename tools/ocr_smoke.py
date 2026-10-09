@@ -23,7 +23,7 @@ with tempfile.TemporaryDirectory() as d:
     ocr._run([ocr.tesseract_cmd(), str(png), str(out), "-l", ocr.LANG], 120)
     text = (out.with_suffix(".txt")).read_text("utf-8", "replace")
 print(text[:400])
-for wort in ("Rechnung", "Muster", "1.190,00"):
+for wort in ("Rechnung", "Muster Handels GmbH", "Gesamtbetrag", "DE89370400440532013000"):
     assert wort in text, f"'{wort}' nicht erkannt"
 print("OK")
 sys.exit(0)
