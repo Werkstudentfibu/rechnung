@@ -943,6 +943,11 @@ und die 120-s-Zeitgrenze (§7m) bleiben unverändert verbindlich.
    Menschen; ein einzelner nicht zuzuordnender Anhang (weder Belegart
    noch bekannte Beschriftung) geht einzeln an den Menschen, der Rest der
    Mail läuft normal weiter -- nie stillschweigend verworfen.
+   **Änderung 09.10.2026:** Hat eine Mail keinen erkannten Beleg, aber
+   nicht beschriftete Anhänge (und keine Anlagen wie AGB), werden diese als
+   Rechnung verarbeitet statt die ganze Mail als .eml an den Menschen zu
+   geben -- im Rechnungs-Postfach ist ein unbeschriftetes PDF fast immer die
+   Rechnung; die Pipeline stellt Unsicheres ohnehin zurück.
 
 ## 7z. Rechen-Prüfungen, Gegencheck, Selbstlernen von Tabelle/USt-Block (2026-10-05)
 

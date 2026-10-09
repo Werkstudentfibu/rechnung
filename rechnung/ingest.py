@@ -313,6 +313,14 @@ def analyse_mail(raw: bytes, extensions: tuple[str, ...] = (".pdf",)) -> MailOut
                 anlage.append((att.filename, att.content, art))
             else:
                 unklar.append((att, grund))
+        if not beleg and unklar and not anlage:
+            # Rechnungs-Postfach (09.10.2026, echte Rechnung "verschwand" in
+            # Menschliche Bearbeitung): ein nicht beschrifteter Anhang ist
+            # hier fast immer die Rechnung -- also normal verarbeiten. Die
+            # Pipeline stellt sie zurueck, wenn sie unsicher ist; der Mensch
+            # sieht sie dann MIT Seitenbild statt nur als .eml.
+            beleg = [att for att, _g in unklar]
+            unklar = []
         if not beleg:
             out.attachments = []
             teile = sorted({a for _n, _c, a in anlage})

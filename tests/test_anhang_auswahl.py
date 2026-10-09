@@ -72,7 +72,9 @@ def test_mail_nur_mit_agb_geht_an_mensch(tmp_path, monkeypatch):
     assert "AGB" in offen[0]["gruende"][0]["grund"]
 
 
-def test_unbeschrifteter_anhang_geht_an_mensch(tmp_path, monkeypatch):
+def test_unbeschrifteter_anhang_wird_als_rechnung_verarbeitet(tmp_path, monkeypatch):
+    """Rechnungs-Postfach (09.10.2026): einziger, nicht beschrifteter Anhang
+    -> in den Eingang (Pipeline entscheidet), nicht als .eml an den Menschen."""
     monkeypatch.delenv("RECHNUNG_MENSCHLICH", raising=False)
     store = Store(tmp_path / "data")
     raw = _mail(attachments=[("dokument123.pdf", _pdf("Nur ein Textblock ohne Beschriftung"),
@@ -81,11 +83,22 @@ def test_unbeschrifteter_anhang_geht_an_mensch(tmp_path, monkeypatch):
     monkeypatch.setattr(ingest.imaplib, "IMAP4_SSL", lambda *a, **k: fake)
     ingest.fetch(CFG, tmp_path / "inbox", store=store)
 
+    assert [p.name for p in (tmp_path / "inbox").iterdir()] == ["dokument123.pdf"]
+    assert human.offen(store) == []
+
+
+def test_unbeschriftet_neben_agb_geht_weiter_an_mensch(tmp_path, monkeypatch):
+    monkeypatch.delenv("RECHNUNG_MENSCHLICH", raising=False)
+    store = Store(tmp_path / "data")
+    raw = _mail(attachments=[
+        ("AGB.pdf", _pdf("Allgemeine Geschaeftsbedingungen"), "application/pdf"),
+        ("dokument123.pdf", _pdf("Nur ein Textblock"), "application/pdf")])
+    fake = FakeImap({b"1": raw})
+    monkeypatch.setattr(ingest.imaplib, "IMAP4_SSL", lambda *a, **k: fake)
+    ingest.fetch(CFG, tmp_path / "inbox", store=store)
+
     assert not (tmp_path / "inbox").exists() or list((tmp_path / "inbox").iterdir()) == []
-    offen = human.offen(store)
-    assert len(offen) == 1
-    assert ingest.MAIL_OHNE_BELEG_ANHANG in offen[0]["gruende"][0]["grund"]
-    assert "nicht zuzuordnen" in offen[0]["gruende"][0]["grund"]
+    assert len(human.offen(store)) == 1
 
 
 def test_unzuordenbarer_anhang_neben_beleg_geht_einzeln_an_mensch(tmp_path, monkeypatch):
