@@ -410,6 +410,12 @@ und Herkunft des Werts davor (`quelle_vorher`, z.B. `template-anchor`/
 Ergänzungen rund um das IONOS-Postfach (`ingest.py`), siehe `SPEC-v1.md`
 §7y für Details je Baustein:
 
+- **Regelmäßige Abholung (09.10.2026, `abholung.py`)**: solange die App läuft,
+  prüft sie das Postfach alle `RECHNUNG_IMAP_POLL_MINUTES` Minuten (Standard
+  5, `0` = aus) und legt neue Anhänge in ihren Posteingang; die Liste lädt
+  sich dann selbst neu. Knopf „Postfach prüfen“ in der Kopfzeile = sofort.
+  Nur Abholen, keine JobRouter-Übergabe.
+
 - **Jede Mail führt zu einem Ergebnis** (BODY.PEEK[] statt RFC822): eine
   Mail ohne passenden Anhang wird nicht mehr still übersprungen, sondern
   geht mit Grund in den Ordner „Menschliche Bearbeitung“.

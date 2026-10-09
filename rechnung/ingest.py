@@ -442,7 +442,12 @@ def _save(att: Attachment, dest: Path) -> Path:
     if target.exists():
         stem, suf = target.stem, target.suffix
         target = dest / f"{stem}_{int(time.time())}{suf}"
-    target.write_bytes(att.content)
+    # Erst unter Hilfsnamen schreiben, dann umbenennen: die laufende App
+    # (regelmaessige Abholung, abholung.py) liest den Ordner parallel und
+    # darf nie ein halb geschriebenes PDF erwischen.
+    part = target.with_name(target.name + ".part")
+    part.write_bytes(att.content)
+    part.replace(target)
     return target
 
 

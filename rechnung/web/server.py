@@ -298,6 +298,27 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         address_id = addr_match[0].id if addr_match else None
         return addr_match, address_id, bool(addresses)
 
+    # Regelmaessige Postfach-Abholung in den Posteingang der App (abholung.py)
+    from ..abholung import aus_konfiguration
+
+    abholer = aus_konfiguration(samples)
+    if abholer is not None:
+        abholer.start()
+
+    @app.get("/api/abholung")
+    def abholung_status() -> JSONResponse:
+        if abholer is None:
+            return JSONResponse({"aktiv": False, "eingerichtet": False})
+        return JSONResponse(dict(abholer.status, eingerichtet=True))
+
+    @app.post("/api/abholung")
+    def abholung_jetzt() -> JSONResponse:
+        """Postfach sofort pruefen (Knopf in der Kopfzeile)."""
+        if abholer is None:
+            return JSONResponse({"aktiv": False, "eingerichtet": False,
+                                 "fehler": "Postfach nicht eingerichtet (rechnung.env)"})
+        return JSONResponse(dict(abholer.einmal(), eingerichtet=True))
+
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
         # no-store: nach einem Update soll das Fenster nie die alte Oberflaeche zeigen

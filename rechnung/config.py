@@ -104,6 +104,15 @@ def data_dir() -> Path:
     return Path(os.environ.get("RECHNUNG_DATA", "./data"))
 
 
+def imap_poll_minutes() -> float:
+    """Regelmaessige Postfach-Abholung, solange die App laeuft (abholung.py,
+    Wunsch Aaron 09.10.2026): alle N Minuten; 0 = aus."""
+    try:
+        return max(0.0, float(os.environ.get("RECHNUNG_IMAP_POLL_MINUTES", "5")))
+    except ValueError:
+        return 5.0
+
+
 def inbox_dir() -> Path:
     """Ablage fuer per IMAP abgeholte PDFs (Standard: <data>/inbox)."""
     v = os.environ.get("RECHNUNG_INBOX")

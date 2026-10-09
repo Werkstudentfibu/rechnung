@@ -126,6 +126,9 @@
   <button id="nav-journal" onclick="show('journal')">Journal</button>
   <button id="nav-vorlernen" onclick="show('vorlernen')">Vorlernen</button>
   <span id="stats" class="hint" style="color:#eaf5ef"></span>
+  <button id="btn-postfach" style="display:none" onclick="postfachJetzt()"
+          title="Postfach sofort auf neue Rechnungen prüfen">Postfach prüfen</button>
+  <span id="postfach" class="hint" style="color:#eaf5ef"></span>
   <span id="modus" class="hint" style="color:#eaf5ef; margin-left:auto"
         title="Umschalten nur per Befehl: rechnung modus autonom|testphase --operator NAME"></span>
   <span id="version" class="hint" style="color:#eaf5ef"></span>
@@ -1382,6 +1385,37 @@ async function holeUpdate() {
   }
   b.disabled = false; b.textContent = 'Update holen';
 }
+
+/* ================= Postfach-Abholung (abholung.py) ================= */
+// Die App holt das Postfach selbst regelmaessig ab (Standard alle 5 Min.);
+// hier nur Anzeige + Liste neu laden, sobald etwas Neues angekommen ist.
+let POSTFACH_NEU = null;
+function zeigePostfach(st) {
+  if (!st || !st.eingerichtet) return;
+  $('#btn-postfach').style.display = '';
+  const t = st.fehler ? `Postfach: Fehler (${st.letzte_pruefung || '–'})`
+    : st.letzte_pruefung ? `Postfach geprüft ${st.letzte_pruefung}` : 'Postfach: noch nicht geprüft';
+  $('#postfach').textContent = t;
+  $('#postfach').title = st.fehler || `alle ${st.minuten} Min. automatisch`;
+  if (POSTFACH_NEU !== null && st.neu_gesamt > POSTFACH_NEU
+      && $('#v-scan').classList.contains('active')) loadList();
+  POSTFACH_NEU = st.neu_gesamt;
+}
+async function pruefePostfach() {
+  try { zeigePostfach(await api('/api/abholung')); } catch (e) { /* App startet gerade neu */ }
+}
+async function postfachJetzt() {
+  const b = $('#btn-postfach'); b.disabled = true; b.textContent = 'prüfe …';
+  try {
+    const st = await api('/api/abholung', { method: 'POST' });
+    zeigePostfach(st);
+    if (st.fehler) $('#postfach').textContent = 'Postfach: ' + st.fehler;
+    else $('#postfach').textContent += ` – ${st.zuletzt_neu} neu`;
+    if (st.zuletzt_neu && $('#v-scan').classList.contains('active')) loadList();
+  } finally { b.disabled = false; b.textContent = 'Postfach prüfen'; }
+}
+pruefePostfach();
+setInterval(pruefePostfach, 30000);
 
 /* ================= Menschliche Bearbeitung ================= */
 async function loadHuman() {
