@@ -14,6 +14,8 @@ for _k in [k for k in os.environ if k.startswith("RECHNUNG_")]:
 # Die bestehenden Tests pruefen den vollen Feldumfang; das Ausblenden einzelner
 # Felder (Standard im Einsatz) testet tests/test_felder_aus.py gezielt.
 os.environ["RECHNUNG_FELDER_AUS"] = ""
+# Keine Hintergrund-Vorverarbeitung in Tests (nebenlaeufige KI-Mocks)
+os.environ["RECHNUNG_VORVERARBEITUNG"] = "0"
 
 import pytest
 from reportlab.lib.pagesizes import A4
@@ -110,5 +112,7 @@ def _clear_llm_cache():
     Tests mit unterschiedlich gemockten Antworten darf nichts haengen bleiben."""
     from rechnung import semantic
     semantic._resp_cache.clear()
+    semantic.set_cache_dir(None)
     yield
     semantic._resp_cache.clear()
+    semantic.set_cache_dir(None)

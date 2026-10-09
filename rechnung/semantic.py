@@ -29,12 +29,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .config import llm as _llm_cfg
 from .template import STANDARD_FIELDS, FieldResult, sichtbare_felder
@@ -207,7 +209,14 @@ def _dynamic_num_ctx(prompt: str, cap: int) -> int:
     ``RECHNUNG_LLM_CTX`` ist damit eine Obergrenze (Laptop-RAM), kein fester
     Wert. Grobe Schaetzung: ~4 Zeichen/Token (Deutsch) plus Luft fuer die
     Antwort, auf die naechste gaengige Ollama-Kontextgroesse aufgerundet."""
-    needed = len(prompt) // 4 + 256
+    # ~2 Zeichen/Token statt 4: deutsche Rechnungstexte bestehen zu einem
+    # grossen Teil aus Zahlen, Datumsangaben, IBANs und Satzzeichen, die je
+    # 1-2 Zeichen ein Token kosten. Mit /4 lag ein typischer Prompt (2.800
+    # Zeichen = 1.077 Token) knapp ueber 1024 -- Ollama schneidet dann still
+    # den ANFANG ab (Anweisungen, Rechnungskopf, Summen) und die Antwort ist
+    # unbrauchbar; danach folgte ein zweiter Volltext-Aufruf (Befund 09.10.2026:
+    # Scan auf dem Laptop > 120 s). Lieber eine Stufe zu gross als abgeschnitten.
+    needed = len(prompt) // 2 + 512
     for step in (512, 1024, 2048, 4096, 8192, 16384):
         if needed <= step:
             return min(step, cap)
@@ -299,6 +308,37 @@ def _call_openai(cfg, prompt: str, schema: dict | None = None) -> str | None:
 # ausfallen, und bestaetigt waere etwas anderes als das Gesehene.
 _resp_cache: dict[str, str] = {}
 _RESP_CACHE_MAX = 64
+# Zusaetzlich auf der Platte (``set_cache_dir``, von App/CLI gesetzt): eine
+# Rechnung wird damit nur EINMAL vom Modell gelesen -- auch ueber Neustarts
+# hinweg und auch, wenn die Hintergrund-Vorverarbeitung sie schon gelesen hat.
+# Auf einem Laptop ohne Grafikkarte kostet ein Aufruf 30-90 s.
+_cache_dir: Path | None = None
+
+
+def set_cache_dir(path) -> None:
+    global _cache_dir
+    _cache_dir = Path(path) if path else None
+
+
+def _disk_get(key: str) -> str | None:
+    if _cache_dir is None:
+        return None
+    try:
+        return (_cache_dir / f"{key}.json").read_text("utf-8")
+    except OSError:
+        return None
+
+
+def _disk_put(key: str, raw: str) -> None:
+    if _cache_dir is None:
+        return
+    try:
+        _cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp = _cache_dir / f"{key}.part"
+        tmp.write_text(raw, "utf-8")
+        os.replace(tmp, _cache_dir / f"{key}.json")
+    except OSError:
+        pass
 
 
 def _call(cfg, prompt: str, schema: dict | None = None) -> str | None:
@@ -306,8 +346,12 @@ def _call(cfg, prompt: str, schema: dict | None = None) -> str | None:
     key = hashlib.sha256(f"{cfg.backend}|{cfg.model}|{schema_part}|{prompt}".encode("utf-8")).hexdigest()
     if key in _resp_cache:
         return _resp_cache[key]
-    raw = (_call_openai(cfg, prompt, schema) if cfg.backend == "openai"
-           else _call_ollama(cfg, prompt, schema))
+    raw = _disk_get(key)
+    if raw is None:
+        raw = (_call_openai(cfg, prompt, schema) if cfg.backend == "openai"
+               else _call_ollama(cfg, prompt, schema))
+        if raw:
+            _disk_put(key, raw)
     if raw:
         if len(_resp_cache) >= _RESP_CACHE_MAX:
             _resp_cache.pop(next(iter(_resp_cache)))

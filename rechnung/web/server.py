@@ -46,6 +46,7 @@ from ..textnorm import parse_amount
 from ..validate import rechen_pruefungen
 
 RENDER_SCALE = 2.0
+VORVERARBEITUNG_TIMEOUT_S = 600
 _STATIC = Path(__file__).parent / "static"
 
 
@@ -250,6 +251,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
     # Zeitgrenze je Rechnung (guard.py). Thread-Modus: die UI muss den KI-
     # Antwort-Cache mit /api/invoice teilen -- bestaetigt wird, was angezeigt wurde.
     guard = Guard(store.root, mode="thread")
+    # KI-Antworten auf der Platte merken: jede Rechnung nur einmal vom Modell lesen
+    semantic.set_cache_dir(store.root / "ki-cache")
 
     def _process(path: Path, use_llm: bool = True, create_draft_supplier: bool = False):
         # create_draft_supplier=False bleibt der Standard fuer jede Vorschau/
@@ -302,7 +305,21 @@ def create_app(store: Store, samples: Path) -> FastAPI:
     # Regelmaessige Postfach-Abholung in den Posteingang der App (abholung.py)
     from ..abholung import aus_konfiguration
 
-    abholer = aus_konfiguration(samples)
+    # Vorverarbeitung im Hintergrund (vorverarbeitung.py): Rechnungen schon
+    # auslesen, bevor sie angeklickt werden. Eigene, grosszuegigere Zeitgrenze --
+    # es wird nur vorgewaermt, die verbindliche Grenze gilt beim Anklicken.
+    from ..config import vorverarbeitung_an
+    from ..vorverarbeitung import Vorverarbeiter
+
+    vorverarbeiter = None
+    if vorverarbeitung_an():
+        bg_guard = Guard(store.root, timeout=VORVERARBEITUNG_TIMEOUT_S, mode="thread")
+        vorverarbeiter = Vorverarbeiter(lambda p: bg_guard.process(p, use_llm=True))
+        if samples.is_dir():
+            vorverarbeiter.einreihen(invoice_files(samples))
+
+    abholer = aus_konfiguration(samples,
+                                bei_neuen=vorverarbeiter.einreihen if vorverarbeiter else None)
     if abholer is not None:
         abholer.start()
 
@@ -541,7 +558,13 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             # Stammdaten und Korrekturen -- erst sehen, dann bestaetigen (§7c).
             # ``res.fields``/``res.line_items`` sind dabei schon die
             # Rechenstufe durchlaufen (pipeline.process/rechnen.rechne).
-            res = _process(path)
+            if vorverarbeiter is not None:
+                # laeuft genau diese Datei gerade im Hintergrund: auf das
+                # Ergebnis warten statt dieselbe Arbeit parallel zu starten
+                with vorverarbeiter.sperre(path):
+                    res = _process(path)
+            else:
+                res = _process(path)
             current = {k: {"value": v.value, "raw": v.raw, "confidence": v.confidence,
                            "source": v.source} for k, v in res.fields.items()}
             llm_rejected = res.llm_rejected

@@ -19,8 +19,11 @@ from typing import Callable
 
 
 class Abholer:
-    def __init__(self, dest: Path, minuten: float, fetch: Callable | None = None):
+    def __init__(self, dest: Path, minuten: float, fetch: Callable | None = None,
+                 bei_neuen: Callable | None = None):
         self.dest = Path(dest)
+        # z.B. Vorverarbeitung im Hintergrund anstossen (vorverarbeitung.py)
+        self.bei_neuen = bei_neuen
         self.minuten = minuten
         self._fetch = fetch
         self._lock = threading.Lock()
@@ -50,6 +53,9 @@ class Abholer:
                 self.status["zuletzt_neu"] = len(res.saved)
                 self.status["mails_zuletzt"] = res.mails
                 self.status["neu_gesamt"] += len(res.saved)
+                neu = [Path(s) for s in res.saved if not str(s).startswith("(dry)")]
+                if neu and self.bei_neuen is not None:
+                    self.bei_neuen(neu)
             except Exception as e:  # Netz weg, Login falsch ... -> naechster Takt
                 self.status["fehler"] = f"{type(e).__name__}: {e}"
             self.status["letzte_pruefung"] = time.strftime("%H:%M")
@@ -78,10 +84,10 @@ class Abholer:
         self._jetzt.set()
 
 
-def aus_konfiguration(dest: Path) -> Abholer | None:
+def aus_konfiguration(dest: Path, bei_neuen: Callable | None = None) -> Abholer | None:
     """Abholer fuer die App -- nur, wenn das Postfach eingerichtet ist."""
     from .config import ImapConfig, imap_poll_minutes
 
     if not ImapConfig().configured:
         return None
-    return Abholer(dest, imap_poll_minutes())
+    return Abholer(dest, imap_poll_minutes(), bei_neuen=bei_neuen)

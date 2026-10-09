@@ -245,3 +245,9 @@ def jobrouter() -> JobRouterConfig:
 
 def llm() -> LlmConfig:
     return LlmConfig()
+
+
+def vorverarbeitung_an() -> bool:
+    """Rechnungen im Hintergrund vorab auslesen (vorverarbeitung.py).
+    ``RECHNUNG_VORVERARBEITUNG=0`` schaltet ab (Tests, sehr knapper Rechner)."""
+    return os.environ.get("RECHNUNG_VORVERARBEITUNG", "1").strip() not in ("0", "", "nein", "false")
