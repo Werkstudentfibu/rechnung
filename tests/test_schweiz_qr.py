@@ -62,3 +62,17 @@ def test_verschiedene_namen_bleiben():
     res.empfaenger["name"] = "AMERON Zuerich"
     semantic._absender_nicht_empfaenger(res)
     assert res.supplier["name"] == "Zuerich Tourismus"
+
+
+def test_reverse_charge_aus_text():
+    from rechnung import belegart
+
+    f = {}
+    belegart.reverse_charge(f, "Steuerschuldnerschaft des Leistungsempfaengers (Reverse Charge)")
+    assert f["reverse_charge"].value == "ja"
+    g = {}
+    belegart.reverse_charge(g, "Zahlbar innerhalb 14 Tagen")
+    assert "reverse_charge" not in g
+    h = {"reverse_charge": FieldResult("reverse_charge", "nein", "nein", 1.0, "manual")}
+    belegart.reverse_charge(h, "Reverse Charge")
+    assert h["reverse_charge"].value == "nein"

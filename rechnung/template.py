@@ -47,6 +47,8 @@ STANDARD_FIELDS: dict[str, tuple[str, bool]] = {
     # Zahlungsreferenz einer Schweizer QR-Rechnung (QRR/SCOR), aus dem
     # QR-Zahlteil (swissqr.py) -- kommt nie aus einer gelernten Vorlage.
     "zahlungsreferenz": ("text", False),
+    # Einkaeufer/Besteller auf Kundenseite ("Sonstige Daten" der Abbyy-Maske)
+    "einkaeufer": ("text", False),
 }
 
 # In diesem Einsatz nicht gebraucht (Aaron, 08.10.2026): nicht angezeigt, nicht
@@ -54,7 +56,8 @@ STANDARD_FIELDS: dict[str, tuple[str, bool]] = {
 # (Skonto -> Faelligkeit, USt-Aufstellung -> Rechen-Pruefungen, QR-Referenz ->
 # QR-Pruefung). RECHNUNG_FELDER_AUS ueberschreibt die Liste (leer = alle an).
 # ust_aufstellung ist seit dem Umbau der Betraege (feste 0/7/19-%-Zeilen) wieder sichtbar.
-_AUS_STANDARD = "bestellnummer,skonto_prozent,skonto_frist,zahlungsreferenz,faelligkeit"
+# Faelligkeit/Referenz stehen in der Abbyy-Maske, die nachgebaut wird (Aaron 09.10.2026)
+_AUS_STANDARD = "bestellnummer,skonto_prozent,skonto_frist"
 
 
 def ausgeblendet() -> frozenset[str]:

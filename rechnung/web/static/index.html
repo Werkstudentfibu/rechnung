@@ -91,6 +91,47 @@
   .fval .val-input { flex: 1; min-width: 120px; border: none; background: transparent; font: inherit; outline: none; padding: 2px; }
   .fmeta { white-space: nowrap; }
   button.mini { padding: 1px 6px; font-size: 12px; white-space: nowrap; }
+  /* ---- Prüfmaske wie Abbyy FlexiCapture ---- */
+  #fields .ab-top { display: flex; align-items: center; gap: 12px; margin: 4px 0 10px; }
+  #fields .ab-top label { font-weight: 600; }
+  #fields .ab-top select { border: 2px solid #2f6fd0; padding: 3px 8px; min-width: 200px; }
+  .ab-grp { border: 1px solid #b8b8b8; margin: 8px 0; background: #fafafa; }
+  .ab-gh { font-weight: 600; padding: 4px 8px; cursor: pointer; user-select: none; }
+  .ab-gh .pf::before { content: '▲'; font-size: 10px; }
+  .ab-grp.zu > .ab-gh .pf::before { content: '▼'; }
+  .ab-grp.zu > .ab-body { display: none; }
+  .ab-body { padding: 4px 10px 8px; }
+  .ab-sect { margin: 10px 0; }
+  .ab-h { font-weight: 600; margin-bottom: 2px; }
+  .af { margin: 3px 0; min-width: 0; }
+  .af label { display: block; font-size: 12px; color: #444; margin-bottom: 1px; }
+  .ab-in { width: 100%; box-sizing: border-box; border: 1px solid #a9a9a9; background: #fff;
+           padding: 3px 6px; font: inherit; }
+  .ab-in.gut { background: #d9f2d9; }
+  .ab-in.vorschlag { background: #fff6d5; }
+  .ab-in.unsicher { background: #f9d6d6; }
+  .ab-in[readonly] { color: #222; }
+  .af .raw { font: 12px/1.3 ui-monospace, Consolas, monospace; color: #555; padding: 1px 6px; }
+  .af.sel .ab-in { outline: 2px solid #2f6fd0; }
+  .af .ass:empty { display: none; }
+  .af .ass { font-size: 12px; }
+  .ab-row { display: flex; align-items: center; gap: 8px; margin: 2px 0 4px; }
+  .ab-row .inl { font-size: 12px; } .ab-row .ab-in { flex: 1; }
+  .ab-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+  .ab-row2.wrap { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+  .ab-row3 { display: grid; grid-template-columns: 1fr 1fr 0.6fr; gap: 0 10px; }
+  .af.w50 { max-width: 50%; } .af.w-kurz .ab-in { max-width: 90px; }
+  .af.ab-inline { display: grid; grid-template-columns: 70px 1fr; align-items: center; }
+  .ab-chk { display: inline-flex; gap: 6px; align-items: center; margin: 2px 0 4px; font-size: 13px; }
+  .ab-dlg { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 50; display: flex;
+            align-items: flex-start; justify-content: center; padding-top: 10vh; }
+  .ab-dlg-in { background: #fff; padding: 14px; width: min(560px, 90vw); max-height: 70vh; overflow: auto;
+               border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.25); }
+  .ab-dlg-in #ab-q { width: 100%; box-sizing: border-box; padding: 5px; margin: 6px 0; }
+  .ab-hit { padding: 5px 6px; border-bottom: 1px solid #eee; cursor: pointer; }
+  .ab-hit:hover { background: #e3efe9; }
+  .li-scroll { overflow-x: auto; }
+  table.ab-li { min-width: 520px; } table.ab-li th { font-weight: 500; font-size: 12px; text-align: left; background: #eee; }
   .actionbar { position: sticky; bottom: 0; background: #fff; border-top: 2px solid #1c7550;
                padding: 8px 0; margin-top: 10px; z-index: 6; }
   td.abw { background: #fff1b8; outline: 1px solid #faad14; }
@@ -317,7 +358,10 @@ function applyInvoiceData(d) {
           const tb = (d.tax_breakdown || []).find(t => t.satz === r.satz);
           return tb && tb._herkunft ? { ...r, _herkunft: tb._herkunft } : { ...r };
         })
-      : [],
+      // keine gelesene USt-Aufstellung: die vom Programm aus Kopf/Positionen
+      // ergänzte Aufschlüsselung zeigen (Beträge-Zeilen der Abbyy-Maske)
+      : (d.tax_breakdown || []).filter(t => t && (t.netto != null || t.ust != null))
+          .map(t => ({ satz: t.satz, netto: t.netto, ust: t.ust, _herkunft: t._herkunft || {}, _abgeleitet: true })),
     markierungen: d.markierungen || null,
     pruefung: d.pruefung_live || null,
     positionenKorrigiert: !!d.positionen_korrigiert,
@@ -438,6 +482,177 @@ async function adresseUebersteuern() {
   applyInvoiceData(d);
 }
 
+const BELEGARTEN = ['Rechnung', 'Gutschrift', 'Rechnungskorrektur', 'Storno', 'Mahnung',
+                    'Abschlagsrechnung', 'Schlussrechnung'];
+
+/* Aufklappbare Gruppe wie in Abbyy (▲ offen / ▼ zu) */
+function gruppe(titel, html, zu = false) {
+  const g = document.createElement('div'); g.className = 'ab-grp' + (zu ? ' zu' : '');
+  g.innerHTML = `<div class="ab-gh" onclick="this.parentNode.classList.toggle('zu')"><span class="pf"></span> ${esc(titel)}</div>
+    <div class="ab-body">${html}</div>`;
+  return g;
+}
+
+/* Stammdaten-Feld (Geschäftsbereich/Lieferant): Beschriftung über dem Feld */
+function abFeld(label, id, val, cls = '', ro = '', extra = '') {
+  return `<div class="af ${extra}"><label>${esc(label)}</label>
+    <input class="ab-in ${val ? cls : ''}" id="${id}" value="${esc(val || '')}" ${ro}></div>`;
+}
+
+/* Rechnungsfeld: wie Abbyy grün = sicher erkannt, rot = unsicher; darunter der
+   gelesene Rohtext. Anklicken wählt das Feld fürs Markieren im PDF. */
+function fmtWert(v, typ) {
+  if (v === null || v === undefined || v === '') return '';
+  if (typ === 'date' && /^\d{4}-\d{2}-\d{2}$/.test(String(v))) {
+    const [y, m, d] = String(v).split('-'); return `${d}.${m}.${y}`;
+  }
+  if (typ === 'amount' && typeof v === 'number')
+    return v.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return typeof v === 'object' ? JSON.stringify(v) : String(v);
+}
+function fBox(name, label, cls = '') {
+  const def = STATE.defs[name] || { value_type: 'text', required: false };
+  const cur = STATE.current[name] || {};
+  const val = fmtWert(cur.value, def.value_type);
+  const da = cur.source && cur.source !== 'missing' && val !== '';
+  const st = !da ? '' : (cur.source === 'manual' || cur.confidence == null || cur.confidence >= 0.7) ? 'gut' : 'unsicher';
+  const raw = da && cur.raw && String(cur.raw).trim() !== val && cur.source !== 'manual'
+    ? `<div class="raw" title="gelesen (${esc(cur.source)})">${esc(String(cur.raw).slice(0, 60))}</div>` : '';
+  return `<div class="af ${cls}" data-field="${esc(name)}" onclick="selectField('${esc(name)}', this)">
+    <label>${esc(label)}${def.required ? ' *' : ''}</label>
+    <input class="ab-in val-input ${st}" data-field="${esc(name)}" value="${esc(val)}"
+           title="${esc(name)}${cur.source ? ' · ' + esc(cur.source) : ''}${cur.confidence ? ' · ' + cur.confidence : ''}"
+           onchange="saveCorrection('${esc(name)}', this.value)">
+    ${raw}<div class="ass"></div></div>`;
+}
+
+/* Anschrift-Zeilen <-> Straße/PLZ/Ort/Land */
+const LAENDER = { deutschland: 'DE', germany: 'DE', schweiz: 'CH', suisse: 'CH', switzerland: 'CH',
+                  'österreich': 'AT', oesterreich: 'AT', austria: 'AT' };
+function splitAdresse(lines) {
+  const out = { strasse: '', plz: '', ort: '', land: '' };
+  for (const raw of (lines || []).map(x => String(x).trim()).filter(Boolean)) {
+    const m = raw.match(/^(?:([A-Z]{2})[- ])?(\d{4,5})\s+(.+)$/);
+    if (m && !out.plz) { out.plz = m[2]; out.ort = m[3]; if (m[1]) out.land = m[1]; continue; }
+    if (/^[A-Z]{2}$/.test(raw)) { out.land = raw; continue; }
+    if (LAENDER[raw.toLowerCase()]) { out.land = LAENDER[raw.toLowerCase()]; continue; }
+    if (!out.strasse) out.strasse = raw;
+  }
+  return out;
+}
+function joinAdresse(p) {
+  return [$('#' + p + '-strasse').value.trim(),
+          `${$('#' + p + '-plz').value.trim()} ${$('#' + p + '-ort').value.trim()}`.trim(),
+          $('#' + p + '-land').value.trim()].filter(Boolean);
+}
+function landAus(ust, iban) {
+  const c = String(ust || iban || '').slice(0, 2).toUpperCase();
+  return /^[A-Z]{2}$/.test(c) ? c : '';
+}
+function ustAusNotiz(notes) {
+  const m = String(notes || '').match(/USt-IdNr:\s*(\S+)/); return m ? m[1] : '';
+}
+function slug(t) {
+  return String(t || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+/* "Suchen..." wie in Abbyy: Geschäftsbereich bzw. Lieferant aus der Bibliothek wählen */
+async function suchen(art) {
+  const liste = art === 'adresse' ? (STATE.addresses || [])
+    : await api('/api/suppliers').then(r => Array.isArray(r) ? r : (r.suppliers || []));
+  const adr = $('#variant').value;
+  const passend = art === 'adresse' ? liste
+    : liste.filter(sp => sp.bestaetigt !== false     // Entwürfe anderer Rechnungen nicht anbieten
+        && (!(sp.addresses || []).length || (sp.addresses || []).includes(adr)));
+  const dlg = document.createElement('div'); dlg.className = 'ab-dlg';
+  dlg.innerHTML = `<div class="ab-dlg-in">
+      <h4>${art === 'adresse' ? 'Geschäftsbereich' : 'Lieferant'} suchen</h4>
+      ${art === 'lieferant' && adr && adr !== 'standard' ? '<div class="hint">Nur Lieferanten dieses Geschäftsbereichs (wie in Abbyy).</div>' : ''}
+      <input id="ab-q" placeholder="Name, ID, USt-IdNr, Ort ..." autofocus>
+      <div id="ab-list"></div>
+      <button class="ghost" onclick="this.closest('.ab-dlg').remove()">Abbrechen</button></div>`;
+  document.body.appendChild(dlg);
+  const zeichne = () => {
+    const q = $('#ab-q').value.toLowerCase();
+    const hits = passend.filter(x => JSON.stringify(x).toLowerCase().includes(q)).slice(0, 50);
+    $('#ab-list').innerHTML = hits.length ? hits.map(x => `<div class="ab-hit" data-id="${esc(x.id)}">
+        <b>${esc(x.name || x.id)}</b> <span class="hint">${esc(x.id)} · ${esc((x.lines || x.address_lines || []).join(', '))}</span></div>`).join('')
+      : '<div class="hint">Nichts gefunden.</div>';
+    $('#ab-list').querySelectorAll('.ab-hit').forEach(el => el.onclick = () => {
+      dlg.remove();
+      if (art === 'adresse') { $('#variant').value = el.dataset.id; adresseUebersteuern(); }
+      else lieferantGewaehlt(passend.find(x => x.id === el.dataset.id));
+    });
+  };
+  $('#ab-q').oninput = zeichne; zeichne(); $('#ab-q').focus();
+}
+function lieferantGewaehlt(sp) {
+  // Lieferant für diese Rechnung festlegen -- gilt beim Speichern der Vorlage /
+  // Bestätigen (wie bisher die Lieferant-ID von Hand)
+  STATE.supplier = sp; STATE.match = { id: sp.id, name: sp.name };
+  const d = { match: { id: sp.id, name: sp.name }, supplier: sp, addresses: STATE.addresses,
+              variant: $('#variant').value, identifiers: STATE.identifiers, pages: STATE.pages,
+              current: STATE.current, line_items: STATE.lineItems };
+  renderInvoice(d); refreshPruefung();
+  $('#msg').textContent = `Lieferant „${sp.name || sp.id}“ gewählt – mit „Template speichern“/Bestätigen übernehmen.`;
+}
+
+async function geschaeftsbereichAnlegen() {
+  const name = $('#ga-name').value.trim();
+  if (!name) { $('#msg').textContent = 'Name des Geschäftsbereichs fehlt'; return; }
+  const id = slug(name) || 'adresse';
+  if ((STATE.addresses || []).some(a => a.id === id)) {
+    $('#msg').textContent = `Geschäftsbereich „${id}“ gibt es schon – über „Suchen...“ wählen.`; return;
+  }
+  const ust = $('#ga-ust').value.trim();
+  await api('/api/addresses', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id, name, lines: joinAdresse('ga'), match_terms: [name],
+                          notes: ust ? `USt-IdNr: ${ust}` : '' }),
+  });
+  // Ein Lieferanten-Entwurf dieser Rechnung ohne Adresse gehört ab jetzt dazu
+  const sup = STATE.supplier;
+  if (sup && sup.bestaetigt === false && !(sup.addresses || []).length) {
+    await api('/api/suppliers', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...sup, addresses: [id] }) });
+  }
+  STATE.addresses = await api('/api/addresses').then(r => Array.isArray(r) ? r : (r.addresses || STATE.addresses));
+  $('#variant').value = id;
+  await adresseUebersteuern();
+  $('#msg').textContent = `Geschäftsbereich „${name}“ angelegt.`;
+}
+
+async function lieferantSpeichern(bestaetigen) {
+  const sup = STATE.supplier || {};
+  const name = $('#sname').value.trim();
+  const id = sup.id || $('#sid').value.trim() || slug(name);
+  if (!id) { $('#msg').textContent = 'Name des Lieferanten fehlt'; return; }
+  const adr = $('#variant').value;
+  const zeile = x => x ? [x] : [];
+  await api('/api/suppliers', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      ...sup, id, name,
+      ustids: zeile($('#ls-ust').value.trim().replace(/\s+/g, '').toUpperCase()),
+      ibans: zeile($('#ls-iban').value.trim().replace(/\s+/g, '').toUpperCase()),
+      domains: sup.domains || (STATE.identifiers || {}).domains || [],
+      addresses: (sup.addresses || []).length ? sup.addresses : (adr && adr !== 'standard' ? [adr] : []),
+      address_lines: joinAdresse('ls'),
+      creditor_id: $('#ls-stnr').value.trim(),
+      bank_account: $('#ls-konto').value.trim(),
+      bank_code: /^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test($('#ls-blz').value.trim()) ? (sup.bank_code || '') : $('#ls-blz').value.trim(),
+      bic: /^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test($('#ls-blz').value.trim()) ? $('#ls-blz').value.trim() : (sup.bic || ''),
+      currency: sup.currency || (((STATE.current.waehrung || {}).value) || 'EUR'),
+    }),
+  });
+  if (bestaetigen) await api('/api/suppliers/' + encodeURIComponent(id) + '/bestaetigen', { method: 'POST' });
+  const d2 = await api('/api/invoice?file=' + encodeURIComponent(STATE.file)
+                       + (adr && adr !== 'standard' ? '&address=' + encodeURIComponent(adr) : ''));
+  applyInvoiceData(d2);
+  $('#msg').textContent = `Lieferant „${name || id}“ ${bestaetigen ? 'bestätigt' : 'angelegt'}.`;
+}
+
 function renderInvoice(d) {
   const work = $('#work'); work.innerHTML = ''; work.classList.add('split');
   // Rechnung links, Werte rechts -- jede Spalte scrollt fuer sich, damit auf dem
@@ -481,57 +696,70 @@ function renderInvoice(d) {
     fbox.appendChild(h);
   }
 
-  // 1 -- Rechnungsadresse
-  const s1 = abschnitt(1, 'Rechnungsadresse');
-  s1.insertAdjacentHTML('beforeend', `
-    <div class="form-grid">
-      <label>Geht an</label><select id="variant" onchange="adresseUebersteuern()">${addrOpts}</select>
-    </div>
-    <div class="hint">${detAddr ? `erkannt: ${esc(detAddr.name)} (${detAddr.score})` : 'keine Rechnungsadresse sicher erkannt'}</div>
-    <div id="addr-detail"></div>`);
-  const kiEmpf = d.ki_empfaenger || {};
-  if (!detAddr && kiEmpf.name) s1.appendChild(renderNewAddressBox(kiEmpf));
-  const t1 = feldTabelle(['kostenstelle']); if (t1) s1.appendChild(t1);
-
-  // 2 -- Lieferant
+  // ===== Prüfmaske wie Abbyy FlexiCapture "European Invoice" (Vorlage Aaron, 09.10.2026) =====
   const isDraft = !!(d.supplier && d.supplier.bestaetigt === false);
-  // Von der KI auf der Rechnung belegter Name als Vorschlag: bei einem
-  // Entwurf mit Platzhalter-Namen ("Unbekannt (...)") und bei einem noch
-  // gar nicht angelegten Lieferanten -- nie bei einem bestaetigten.
-  const kiName = ((d.ki_lieferant || {}).name || '').trim();
-  const platzhalter = !sup.name || /^Unbekannt\b/.test(sup.name);
-  const nameVorschlag = kiName && platzhalter && (isDraft || !d.match) ? kiName : '';
-  const idVorschlag = nameVorschlag && !d.match && !sup.id
-    ? nameVorschlag.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') : '';
-  const s2 = abschnitt(2, 'Lieferant');
-  s2.insertAdjacentHTML('beforeend', `
-    <div class="form-grid">
-      <label>Lieferant-ID</label><input id="sid" value="${esc(sup.id || idVorschlag)}" placeholder="z.B. muster-gmbh" ${isDraft ? 'readonly' : ''}>
-      <label>Name</label><input id="sname" value="${esc(nameVorschlag || sup.name || '')}">
-    </div>
-    ${nameVorschlag ? '<div class="hint">Name von der KI auf der Rechnung gelesen – bitte prüfen.</div>' : ''}
-    <div class="hint">
-      ${isDraft ? 'Entwurf – automatisch aus einer Rechnung angelegt, noch nicht bestätigt (siehe unten).' :
-        d.match && d.match.score != null ? `erkannt: ${esc(d.match.name)} (${d.match.score})` :
-        d.match && d.match.id ? '' :
-        `neuer Lieferant – USt-IdNr ${(ids.ustids || []).join(',') || '?'}` +
-        (ids.currency && ids.currency !== 'EUR' ? ` · Währung erkannt: ${esc(ids.currency)}` : '')}
-      ${d.supplier && d.supplier.fixed_fields && Object.keys(d.supplier.fixed_fields).length
-        ? ` · feste Werte: ${Object.keys(d.supplier.fixed_fields).join(', ')}` : ''}
-    </div>`);
-  if (isDraft) {
-    s2.appendChild(renderDraftSupplierBox(d.supplier, d.ki_lieferant || {}));
-  } else {
-    if (d.supplier) s2.appendChild(renderSupplierInfoBox(d.supplier));
-    if (!d.match) s2.appendChild(renderNewSupplierBox(ids));
-  }
+  const kiL = d.ki_lieferant || {};
+  const kiE = d.ki_empfaenger || {};
+  const addrObj = (STATE.addresses || []).find(a => a.id === variant) || null;
+
+  // Rechnungstyp
+  const belegart = ((STATE.current.belegart || {}).value) || 'Rechnung';
+  fbox.insertAdjacentHTML('beforeend', `
+    <div class="ab-top"><label>Rechnungstyp</label>
+      <select id="ab-typ" onchange="saveCorrection('belegart', this.value)">
+        ${BELEGARTEN.map(b => `<option ${b === belegart ? 'selected' : ''}>${esc(b)}</option>`).join('')}
+      </select></div>
+    <input type="hidden" id="variant" value="${esc(variant)}">`);
+
+  // Geschäftsbereich (= Rechnungsadresse)
+  const gaA = addrObj ? splitAdresse(addrObj.lines || [])
+                      : splitAdresse(kiE.lines || (kiE.anschrift ? String(kiE.anschrift).split(',') : []));
+  const gaVorschlag = !addrObj && !!kiE.name;
+  const gaCls = addrObj ? 'gut' : (gaVorschlag ? 'vorschlag' : '');
+  const gaRO = addrObj ? 'readonly' : '';
+  const ga = gruppe('Geschäftsbereich', `
+    <div class="ab-row"><button class="ghost mini" onclick="suchen('adresse')">Suchen...</button>
+      <label class="inl">ID</label><input class="ab-in ${gaCls}" id="ga-id" value="${esc(addrObj ? addrObj.id : '')}" readonly></div>
+    ${abFeld('Name', 'ga-name', addrObj ? addrObj.name : (kiE.name || ''), gaCls, gaRO)}
+    ${abFeld('Umsatzsteuer ID', 'ga-ust', addrObj ? (addrObj.vatid || ustAusNotiz(addrObj.notes)) : '', gaCls, gaRO, 'w50')}
+    ${abFeld('Straße', 'ga-strasse', gaA.strasse, gaCls, gaRO)}
+    <div class="ab-row3">${abFeld('Postleitzahl', 'ga-plz', gaA.plz, gaCls, gaRO)}${abFeld('Ort', 'ga-ort', gaA.ort, gaCls, gaRO)}${abFeld('Land', 'ga-land', gaA.land, gaCls, gaRO)}</div>
+    <div class="hint">${addrObj ? (detAddr && detAddr.id === addrObj.id ? `erkannt (${detAddr.score})` : 'von Hand gewählt')
+      : gaVorschlag ? 'Nicht in den Geschäftsbereichen – von der Rechnung gelesen, bitte prüfen.'
+      : 'Kein Geschäftsbereich erkannt – über „Suchen...“ wählen.'}</div>
+    ${!addrObj && gaVorschlag ? `<button onclick="geschaeftsbereichAnlegen()">✓ Als Geschäftsbereich anlegen</button>` : ''}`);
+  fbox.appendChild(ga);
+
+  // Lieferant
+  const supO = d.supplier || null;
+  const lA = supO && (supO.address_lines || []).length ? splitAdresse(supO.address_lines)
+           : splitAdresse(kiL.address_lines || []);
+  const lName = supO && !/^Unbekannt\b/.test(supO.name || '') ? supO.name : (kiL.name || (supO ? supO.name : '') || '');
+  const lIban = supO && (supO.ibans || []).length ? supO.ibans[0] : (kiL.iban || (ids.ibans || [])[0] || '');
+  const lUst = supO && (supO.ustids || []).length ? supO.ustids[0] : (kiL.ustid || (ids.ustids || [])[0] || '');
+  const lId = supO ? supO.id : '';
+  const lCls = supO && !isDraft ? 'gut' : (lName || lIban || lUst ? 'vorschlag' : '');
+  const lRO = supO && !isDraft ? 'readonly' : '';
+  const li = gruppe('Lieferant', `
+    <div class="ab-row"><button class="ghost mini" onclick="suchen('lieferant')">Suchen...</button>
+      <label class="inl">ID</label><input class="ab-in ${lCls}" id="sid" value="${esc(lId)}" ${supO ? 'readonly' : ''} placeholder="neu: wird beim Anlegen vergeben"></div>
+    ${isDraft ? '<div class="hint"><span class="badge zurueckgestellt">unbestätigt</span> Unbekannter Lieferant – aus dieser Rechnung angelegt, bitte prüfen.</div>' : ''}
+    ${abFeld('Name', 'sname', lName, lCls, lRO)}
+    <div class="ab-row2">${abFeld('Umsatzsteuer ID', 'ls-ust', lUst, lCls, lRO)}${abFeld('Steuernummer', 'ls-stnr', supO ? (supO.creditor_id || kiL.creditor_id || '') : (kiL.creditor_id || ''), lCls, lRO)}</div>
+    ${abFeld('Straße', 'ls-strasse', lA.strasse, lCls, lRO)}
+    <div class="ab-row3">${abFeld('PLZ', 'ls-plz', lA.plz, lCls, lRO)}${abFeld('Ort', 'ls-ort', lA.ort, lCls, lRO)}${abFeld('Land', 'ls-land', lA.land || landAus(lUst, lIban), lCls, lRO)}</div>
+    ${abFeld('IBAN', 'ls-iban', lIban, lCls, lRO)}
+    <div class="ab-row2">${abFeld('Bankkonto', 'ls-konto', supO ? (supO.bank_account || '') : '', lCls, lRO)}${abFeld('Bankleitzahl', 'ls-blz', supO ? (supO.bank_code || supO.bic || kiL.bic || '') : (kiL.bic || ''), lCls, lRO)}</div>
+    <div class="hint">${supO && !isDraft ? (d.match && d.match.score != null ? `erkannt (${d.match.score})` : 'gewählt') + ' – Stammdaten ändern im Reiter „Lieferanten“'
+      : (lName || lIban || lUst) ? 'Von der Rechnung gelesen (teils KI) – bitte prüfen.' : 'Kein Lieferant erkannt – über „Suchen...“ wählen.'}</div>
+    ${isDraft ? `<button onclick="lieferantSpeichern(true)">✓ Lieferant bestätigen</button>
+                 <button class="danger" onclick="discardDraftSupplier()">Entwurf verwerfen</button>`
+      : !supO && (lName || lIban || lUst) ? `<button onclick="lieferantSpeichern(false)">✓ Als Lieferant anlegen</button>` : ''}`);
+  fbox.appendChild(li);
   if ((STATE.similar || []).length) {
     const simBox = document.createElement('div'); simBox.className = 'box';
     simBox.innerHTML = `<h4>Ähnliche bekannte Lieferanten</h4>
-      <div class="hint">Kein sicherer Treffer, aber das Layout ähnelt einem bekannten
-        Lieferanten – Vorlage als Startpunkt übernehmen statt neu anzulernen
-        (Lieferant-ID oben zuerst eintragen).</div>` +
+      <div class="hint">Layout ähnelt einem bekannten Lieferanten – Vorlage als Startpunkt übernehmen.</div>` +
       STATE.similar.map(s => `
         <div style="margin:4px 0">
           ${esc(s.name || s.id)} <span class="hint">(Ähnlichkeit ${s.score})</span>
@@ -540,44 +768,55 @@ function renderInvoice(d) {
               Vorlage „${esc(t.variant)}“ übernehmen${t.secured ? ' ✓' : ''}
             </button>`).join(' ')}
         </div>`).join('');
-    s2.appendChild(simBox);
+    fbox.appendChild(simBox);
   }
 
-  // 3 -- Rechnung
-  const s3 = abschnitt(3, 'Rechnung');
-  const t3 = feldTabelle(['rechnungsnummer', 'rechnungsdatum', 'faelligkeit', 'waehrung']);
-  if (t3) s3.appendChild(t3);
+  // Rechnungsdaten
+  const rd = document.createElement('div'); rd.className = 'ab-sect';
+  rd.innerHTML = `<div class="ab-h">Rechnungsdaten</div>
+    <div class="ab-row2">${fBox('rechnungsnummer', 'Rechnungsnummer')}${fBox('rechnungsdatum', 'Rechnungsdatum')}</div>`;
+  fbox.appendChild(rd);
+  fbox.appendChild(gruppe('Sonstige Daten',
+    `<div class="ab-row2">${fBox('faelligkeit', 'Fälligkeitsdatum')}${fBox('einkaeufer', 'Einkäufer')}</div>`));
 
-  // 4 -- Betraege: Aufschluesselung je Steuersatz + Gesamtsummen
-  const s4 = abschnitt(4, 'Beträge');
-  s4.appendChild(renderTaxPreview());
-  const t4 = feldTabelle(['netto', 'ust_betrag', 'brutto']);
-  if (t4) { t4.classList.add('summen'); s4.appendChild(t4); }
-  s4.appendChild(renderPruefBox());
+  // Beträge
+  const rc = ((STATE.current.reverse_charge || {}).value || '') === 'ja';
+  const be = document.createElement('div'); be.className = 'ab-sect';
+  be.innerHTML = `<div class="ab-h">Beträge</div>
+    <label class="ab-chk"><input type="checkbox" ${rc ? 'checked' : ''}
+      onchange="saveCorrection('reverse_charge', this.checked ? 'ja' : 'nein')"> Reversed Charge</label>
+    <div class="ab-row2">${fBox('brutto', 'Bruttogesamtbetrag')}${fBox('waehrung', 'Währung', 'w-kurz')}</div>`;
+  fbox.appendChild(be);
+  const wb = gruppe('Weitere Beträge', '');
+  wb.querySelector('.ab-body').appendChild(renderTaxPreview());
+  wb.querySelector('.ab-body').insertAdjacentHTML('beforeend',
+    `<div class="ab-row2">${fBox('netto', 'Nettogesamtbetrag')}${fBox('ust_betrag', 'Steuergesamtbetrag')}</div>`);
+  be.appendChild(wb);
+  be.appendChild(gruppe('AdditionalCosts',
+    '<div class="hint">Zusatzkosten (Fracht, Porto, Verpackung) – werden noch nicht eigens ausgelesen; stehen sie als Position auf der Rechnung, erscheinen sie unter Positionsdaten.</div>', true));
+  be.appendChild(renderPruefBox());
 
-  // uebrige Felder (z.B. MwSt-Satz aus dem Kopf, eigene/gelernte Felder)
-  const rest = Object.keys(STATE.defs).filter(n => !platziert.has(n));
-  const tRest = feldTabelle(rest);
-  if (tRest) {
-    const sx = document.createElement('div'); sx.className = 'box';
-    sx.innerHTML = '<h4>Weitere Felder</h4>'; sx.appendChild(tRest); fbox.appendChild(sx);
-  }
+  // Positionsdaten
+  const pd = gruppe('Positionsdaten', '');
+  if (STATE.li.active) pd.querySelector('.ab-body').appendChild(renderLiPanel());
+  pd.querySelector('.ab-body').appendChild(renderLiPreviewBox(STATE.lineItems));
+  fbox.appendChild(pd);
+  const ref = document.createElement('div'); ref.className = 'ab-sect';
+  ref.innerHTML = fBox('zahlungsreferenz', 'Referenz', 'ab-inline');
+  fbox.appendChild(ref);
 
-  // 5 -- Positionen
-  const s5 = abschnitt(5, 'Positionen');
-  if (STATE.li.active) s5.appendChild(renderLiPanel());
-  s5.appendChild(renderLiPreviewBox(STATE.lineItems));
+  // übrige Felder (z.B. Kostenstelle, MwSt-Satz aus dem Kopf, eigene/gelernte Felder)
+  const ABBYY_FELDER = new Set(['rechnungsnummer', 'rechnungsdatum', 'faelligkeit', 'einkaeufer',
+    'brutto', 'waehrung', 'netto', 'ust_betrag', 'zahlungsreferenz', 'ust_aufstellung', 'belegart']);
+  const rest = Object.keys(STATE.defs).filter(n => !ABBYY_FELDER.has(n) && STATE.defs[n].value_type !== 'taxblock');
+  if (rest.length) fbox.appendChild(gruppe('Weitere Felder',
+    `<div class="ab-row2 wrap">${rest.map(n => fBox(n, FELD_LABEL[n] || n)).join('')}</div>`, true));
 
-  // KI-Vorschlaege, die NICHT im PDF-Text belegt waren -- verworfen, aber
-  // sichtbar (Halluzinations-Schutz, Stufe 2).
+  // KI-Vorschläge, die NICHT im PDF-Text belegt waren -- verworfen, aber sichtbar
   const rej = Object.entries(d.llm_rejected || STATE.llmRejected || {});
-  if (rej.length) {
-    const rbox = document.createElement('div'); rbox.className = 'box';
-    rbox.innerHTML = `<h4>Verworfene KI-Vorschläge</h4>
-      <div class="hint">Nicht im PDF-Text gefunden – nicht übernommen:</div>` +
-      rej.map(([f, why]) => `<div class="hint">${esc(f)}: ${esc(why)}</div>`).join('');
-    fbox.appendChild(rbox);
-  }
+  if (rej.length) fbox.appendChild(gruppe('Verworfene KI-Vorschläge',
+    '<div class="hint">Nicht im PDF-Text gefunden – nicht übernommen:</div>' +
+    rej.map(([f, why]) => `<div class="hint">${esc(f)}: ${esc(why)}</div>`).join(''), true));
 
   const bar = document.createElement('div'); bar.className = 'actionbar';
   bar.innerHTML = `
@@ -586,11 +825,10 @@ function renderInvoice(d) {
     <button class="ghost" onclick="addCustomField()">+ eigenes Feld</button>
     <button class="ghost" onclick="toggleLi()">Positionstabelle ${STATE.li.active ? 'ausblenden' : 'anlernen'}</button>
     <button class="ghost danger" onclick="ausEingangEntfernen()" title="Z.B. Testmail oder Spam – wird nicht gelöscht, sondern nach data\\entfernt verschoben">Aus Eingang entfernen</button>
-    <div class="hint">Feld-Zeile wählen · Klick = Wert · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = bestätigen + nächste' : ''}</div>
+    <div class="hint">Feld anklicken, dann Wort im PDF anklicken = Position lernen · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = bestätigen + nächste' : ''}</div>
     <div id="msg" class="hint"></div>`;
   fbox.appendChild(bar);
   w.appendChild(fbox);
-  zeigeAdresse();
 
   for (const pg of d.pages) {
     const wrap = document.createElement('div'); wrap.className = 'pdfwrap';
@@ -850,7 +1088,7 @@ function renderSupplierInfoBox(sup) {
 function selectField(name, tr) {
   STATE.li.selCol = null;
   STATE.selField = name;
-  document.querySelectorAll('#fields tr').forEach(x => x.classList.remove('sel'));
+  document.querySelectorAll('#fields [data-field].sel, #fields tr.sel').forEach(x => x.classList.remove('sel'));
   tr.classList.add('sel');
   document.querySelectorAll('.mk[data-field]').forEach(e =>
     e.classList.toggle('active', e.dataset.field === name));
@@ -859,7 +1097,7 @@ function selectField(name, tr) {
 }
 
 function markInPdf(name) {
-  const tr = document.querySelector(`#fields tr[data-field="${name}"]`);
+  const tr = document.querySelector(`#fields .af[data-field="${name}"], #fields tr[data-field="${name}"]`);
   if (!tr) return;
   selectField(name, tr);
   tr.scrollIntoView({ block: 'nearest' });
@@ -946,52 +1184,48 @@ function stCell(st) {
 }
 function rowCls(st) { return st && st.ok === false ? 'bad' : st && st.ok ? 'ok' : ''; }
 
+// Spalten wie die Abbyy-Positionsdaten (Vorlage Aaron, 09.10.2026)
+const LI_STD = [['beschreibung', 'Description'], ['menge', 'Quantity'],
+                ['einzelpreis_netto', 'Unit price'], ['gesamt_netto', 'Total price netto'],
+                ['mwst_satz', 'VAT percent'], ['waehrung', 'Currency']];
 function renderLiPreviewBox(items) {
-  // Immer sichtbar (nicht erst nach dem Speichern) -- Ueberblick "was wurde
-  // bestellt" soll jederzeit da sein. Editierbar (Baustein 11b): Zelle
-  // aendern, Zeile hinzufuegen/loeschen, Spalte umbenennen (= neu zuordnen);
-  // "Positionen übernehmen" speichert die Korrektur, beim Bestaetigen lernt
+  // Editierbar (Baustein 11b): Zelle ändern, Zeile hinzufügen/löschen;
+  // "Positionen übernehmen" speichert die Korrektur, beim Bestätigen lernt
   // das Programm daraus die Tabelle selbst.
-  const box = document.createElement('div'); box.className = 'box'; box.id = 'li-preview-box';
-  const cols = liCols(items || []);
+  const box = document.createElement('div'); box.id = 'li-preview-box';
+  items = items || [];
+  const std = LI_STD.map(([k]) => k);
+  const extra = liCols(items).filter(c => !std.includes(c) && c !== 'pos');
+  const cols = [...std, ...extra];
+  const label = c => (LI_STD.find(([k]) => k === c) || [c, c])[1];
   const pr = (STATE.pruefung || {}).positionen || [];
-  const bar = STATE.positionenFest ? '' : `<div style="margin-top:6px">
-      <button class="ghost" onclick="liAddRow()">+ Zeile</button>
-      <button class="ghost" onclick="liAddCol()">+ Spalte</button>
-      <button onclick="saveTabelle('positionen')" ${STATE.tabDirty.positionen ? '' : 'class="ghost"'}>Positionen übernehmen</button>
-      ${STATE.positionenKorrigiert ? `<button class="danger" title="Korrektur zurücknehmen" onclick="clearCorrection('_positionen')">↺</button>` : ''}
-      <span class="hint">${STATE.tabDirty.positionen ? 'geändert – noch nicht übernommen' : ''}</span>
-    </div>`;
-  if (!items || !items.length) {
-    box.innerHTML = `<h4>Positionen</h4>
-      <div class="hint">Noch keine Position erkannt – Zeilen hier eintragen (das Programm findet
-        die Spalten beim Bestätigen selbst im PDF) oder Spalten der Positionstabelle anlegen und
-        deren Kopfzelle anklicken.</div>` + bar;
-    return box;
-  }
-  box.innerHTML = `<h4>Positionen (${items.length})${STATE.positionenKorrigiert ? ' <span class="badge manual">manual</span>' : ''}</h4>
-    <table class="edit"><tr>${cols.map((c, ci) => c === 'kategorie' ? `<th>kategorie</th>` :
-        `<th><input value="${esc(c)}" title="Spaltenname – ändern ordnet die Spalte neu zu"
-               onchange="liRenameCol(${ci}, this.value)"></th>`).join('')}<th>Prüfung</th><th></th></tr>
+  const fest = STATE.positionenFest;
+  box.innerHTML = `
+    <div class="li-scroll"><table class="edit ab-li"><tr>${cols.map(c => `<th title="${esc(c)}">${esc(label(c))}</th>`).join('')}<th>Prüfung</th><th></th></tr>
     ${items.map((it, ri) => `<tr class="${rowCls(pr[ri])}">${cols.map(c => {
         if (c === 'kategorie') {
           const conf = it.kategorie_konfidenz;
-          return `<td>
-            <input value="${esc(nz(it.kategorie))}" size="14" placeholder="Kategorie …"
+          return `<td><input value="${esc(nz(it.kategorie))}" size="14" placeholder="Kategorie …"
                    onchange="saveCategoryCorrection('${esc((it._kategorie_text || '').replace(/'/g, "\\'"))}', this.value)">
-            ${conf != null ? `<span class="hint">(${conf})</span>` : ''}
-          </td>`;
+            ${conf != null ? `<span class="hint">(${conf})</span>` : ''}</td>`;
         }
-        // Herkunft je Zelle (SPEC Baustein 3): errechnet/kopf kursiv +
-        // Tooltip "errechnet"/"kopf" statt eines Original-Lesewerts.
+        // Herkunft je Zelle (SPEC Baustein 3): errechnet/kopf kursiv
         const h = (it._herkunft || {})[c];
         const hcls = (h === 'errechnet' || h === 'kopf') ? h : '';
+        let v = it[c];
+        if (typeof v === 'number' && c !== 'menge' && c !== 'mwst_satz') v = fmtWert(v, 'amount');
         return `<td class="${typeof it[c] === 'number' ? 'num' : ''}"><input
-                  class="${hcls}" value="${esc(nz(it[c]))}" ${h ? `title="${esc(h)}"` : ''}
+                  class="${hcls}" value="${esc(nz(v))}" ${h ? `title="${esc(h)}"` : ''} ${fest ? 'readonly' : ''}
                   onchange="liSetCell(${ri}, '${esc(c)}', this.value)"></td>`;
       }).join('')}${stCell(pr[ri])}
-      <td><button class="danger" style="padding:0 4px" title="Zeile löschen" onclick="liDelRow(${ri})">×</button></td></tr>`).join('')}
-    </table>` + bar;
+      <td>${fest ? '' : `<button class="danger" style="padding:0 4px" title="Zeile löschen" onclick="liDelRow(${ri})">×</button>`}</td></tr>`).join('')}
+    </table></div>
+    ${items.length ? '' : '<div class="hint">Noch keine Position erkannt.</div>'}
+    ${fest ? '' : `<div style="margin-top:4px">
+      <button class="ghost mini" onclick="liAddRow()">Element 'Line Items' hinzufügen</button>
+      ${STATE.tabDirty.positionen ? `<button class="mini" onclick="saveTabelle('positionen')">Positionen übernehmen</button> <span class="hint">geändert – noch nicht übernommen</span>` : ''}
+      ${STATE.positionenKorrigiert ? `<button class="danger mini" title="Korrektur zurücknehmen" onclick="clearCorrection('_positionen')">↺</button>` : ''}
+    </div>`}`;
   return box;
 }
 function liRedraw() {
@@ -1010,7 +1244,7 @@ function liSetCell(ri, col, value) {
 function liDelRow(ri) { STATE.lineItems.splice(ri, 1); liTouched(); }
 function liAddRow() {
   const cols = liCols(STATE.lineItems).filter(c => !LI_NICHT_SPEICHERN.includes(c));
-  const row = {}; (cols.length ? cols : ['bezeichnung', 'menge', 'einzelpreis', 'gesamt']).forEach(c => row[c] = '');
+  const row = {}; (cols.length ? cols : LI_STD.map(([k]) => k)).forEach(c => row[c] = '');
   STATE.lineItems.push(row); liTouched();
 }
 function liAddCol() {
@@ -1088,35 +1322,42 @@ function taxSlots() {
   return slots.slice(0, 1).concat(slots.slice(1).sort((a, b) => (a.satz ?? 999) - (b.satz ?? 999)));
 }
 function renderTaxPreview() {
+  // Aufbau wie Abbyy "Weitere Beträge": Nettobetrag (steuerfrei, 0 %), dann
+  // Nettobetrag/Steuerbetrag/Steuersatz 1 und 2, weitere Sätze aufklappbar.
   const box = document.createElement('div'); box.id = 'tax-preview-box';
   const pr = (STATE.pruefung || {}).ust || [];
   const cur = STATE.current.ust_aufstellung || {};
-  const zelle = (sl, k) => {
-    const r = sl.ri >= 0 ? STATE.taxRows[sl.ri] : null;
-    const v = r ? r[k] : (k === 'satz' ? sl.satz : '');
-    const h = r && (r._herkunft || {})[k];
-    const hcls = (h === 'errechnet' || h === 'kopf') ? h : '';
-    const ro = sl.fest && k === 'satz' ? 'readonly tabindex="-1"' : '';
-    return `<td class="num"><input class="${hcls}" value="${esc(nz(v))}" ${ro}
-              ${h ? `title="${esc(h)}"` : ''} placeholder="${k === 'satz' ? '' : '–'}"
-              onchange="taxSetSlot(${sl.ri}, ${sl.satz ?? 'null'}, '${k}', this.value)"></td>`;
-  };
   const slots = taxSlots();
+  const zelle = (sl, k, label) => {
+    const r = sl.ri >= 0 ? STATE.taxRows[sl.ri] : null;
+    let v = r ? r[k] : (k === 'satz' ? sl.satz : '');
+    if (k !== 'satz' && typeof v === 'number') v = fmtWert(v, 'amount');
+    // grün nur, was so auf der Rechnung steht; aus Kopf/Positionen errechnete
+    // Zeilen sind ein Vorschlag (gelb) -- sie erben jeden Lesefehler der Positionen
+    const st = !r || v === '' || v === null || v === undefined ? ''
+      : (pr[sl.ri] && pr[sl.ri].ok === false) ? 'unsicher'
+      : (r._abgeleitet && !STATE.tabDirty.ust) ? 'vorschlag' : 'gut';
+    const h = r && (r._herkunft || {})[k];
+    const ro = sl.fest && k === 'satz' ? 'readonly tabindex="-1"' : '';
+    return `<div class="af"><label>${esc(label)}</label>
+      <input class="ab-in ${st} ${(h === 'errechnet' || h === 'kopf') ? h : ''}" value="${esc(nz(v))}" ${ro}
+             ${h ? `title="${esc(h)}"` : ''} onchange="taxSetSlot(${sl.ri}, ${sl.satz ?? 'null'}, '${k}', this.value)"></div>`;
+  };
+  const satzZeile = (sl, n) => `<div class="ab-row3">${zelle(sl, 'netto', 'Nettobetrag ' + n)}${zelle(sl, 'ust', 'Steuerbetrag ' + n)}${zelle(sl, 'satz', 'Steuersatz ' + n)}</div>`;
+  const weitere = slots.slice(3);
   box.innerHTML = `
-    <table class="edit steuer"><tr><th>Steuersatz</th><th class="num">Netto</th><th class="num">MwSt-Betrag</th><th class="num">MwSt %</th><th>Prüfung</th><th></th></tr>
-      ${slots.map(sl => `<tr class="${sl.ri >= 0 ? rowCls(pr[sl.ri]) : 'leer'}">
-        <td>${sl.fest ? '0 % (steuerfrei)' : (sl.satz != null ? esc(String(sl.satz)) + ' %' : 'weiterer Satz')}</td>
-        ${zelle(sl, 'netto')}${zelle(sl, 'ust')}${zelle(sl, 'satz')}
-        ${sl.ri >= 0 ? stCell(pr[sl.ri]) : '<td></td>'}
-        <td>${sl.ri >= 0 ? `<button class="danger" style="padding:0 4px" title="Werte dieser Zeile löschen" onclick="taxDelRow(${sl.ri})">×</button>` : ''}</td>
-      </tr>`).join('')}
-    </table>
-    <div style="margin-top:6px">
-      <button class="ghost" onclick="taxAddRow()">+ weiterer Satz</button>
-      <button onclick="saveTabelle('ust')" ${STATE.tabDirty.ust ? '' : 'class="ghost"'}>Aufschlüsselung übernehmen</button>
-      ${cur.source === 'manual' ? `<button class="danger" title="Korrektur zurücknehmen" onclick="clearCorrection('ust_aufstellung')">↺</button>` : ''}
-      <span class="hint">${STATE.tabDirty.ust ? 'geändert – noch nicht übernommen' : 'Leere Zeilen kommen auf dieser Rechnung nicht vor.'}</span>
-    </div>`;
+    <div class="ab-row3">${zelle(slots[0], 'netto', 'Nettobetrag')}</div>
+    ${slots[1] ? satzZeile(slots[1], 1) : ''}
+    ${slots[2] ? satzZeile(slots[2], 2) : ''}
+    <div class="ab-grp ${weitere.length ? '' : 'zu'}">
+      <div class="ab-gh" onclick="this.parentNode.classList.toggle('zu')"><span class="pf"></span> Weitere Steuerbeträge</div>
+      <div class="ab-body">${weitere.map((sl, i) => satzZeile(sl, i + 3)).join('')}
+        <button class="ghost mini" onclick="taxAddRow()">+ Steuersatz</button></div>
+    </div>
+    ${STATE.tabDirty.ust || cur.source === 'manual' ? `<div style="margin:4px 0">
+      ${STATE.tabDirty.ust ? `<button onclick="saveTabelle('ust')">Beträge übernehmen</button> <span class="hint">geändert – noch nicht übernommen</span>` : ''}
+      ${cur.source === 'manual' ? `<button class="danger mini" title="Korrektur zurücknehmen" onclick="clearCorrection('ust_aufstellung')">↺ Korrektur zurücknehmen</button>` : ''}
+    </div>` : ''}`;
   return box;
 }
 function taxSetSlot(ri, satz, k, v) {
@@ -1238,7 +1479,7 @@ function paint() {
     const wds = wraps[a.page].querySelectorAll('.w');
     if (a.anchor != null && wds[a.anchor]) wds[a.anchor].classList.add('anchor');
     a.values.forEach(i => wds[i] && wds[i].classList.add('value'));
-    const cell = document.querySelector(`#fields tr[data-field="${f}"] .ass`);
+    const cell = document.querySelector(`#fields [data-field="${f}"] .ass`);
     if (!cell) continue;
     const text = (a.anchor != null ? '⚓ ' : '') + a.values.map(i => wds[i] && wds[i].title).join(' ');
     if (!text.trim()) continue;

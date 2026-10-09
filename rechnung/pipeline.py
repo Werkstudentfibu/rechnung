@@ -986,6 +986,7 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
     # relative Frist ein vom Menschen eingetragenes Rechnungsdatum nutzt
     zahlung.apply(res.fields, doc.text, res.hinweise)
     belegart.apply(res.fields, doc, hinweise=res.hinweise)
+    belegart.reverse_charge(res.fields, doc.text)
     waehrung.apply(res.fields, doc.text, res.hinweise)
     swissqr.apply(res.fields, qr, res.hinweise)
     swissqr.parteien(res.ki_lieferant, res.ki_empfaenger, qr)
@@ -1225,6 +1226,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
     # Faelligkeit/Skonto: was Vorlage/Mensch nicht liefern, per Regel aus dem Text
     zahlung.apply(res.fields, doc.text, res.hinweise)
     belegart.apply(res.fields, doc, hinweise=res.hinweise)
+    belegart.reverse_charge(res.fields, doc.text)
     waehrung.apply(res.fields, doc.text, res.hinweise)
     swissqr.apply(res.fields, qr_obj, res.hinweise)
 

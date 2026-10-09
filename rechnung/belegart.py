@@ -273,3 +273,26 @@ def signed(values: dict) -> dict:
         if isinstance(v, (int, float)):
             out[k] = -abs(v)
     return out
+
+
+# ---- Reverse Charge (Steuerschuldnerschaft des Leistungsempfaengers) --------
+# Checkbox "Reversed Charge" der Abbyy-Maske (Aaron 09.10.2026). Reine
+# Textregel -- der Vermerk ist auf der Rechnung Pflicht (§ 14a Abs. 5 UStG,
+# Art. 196 MwStSystRL), also steht er im Text, wenn es so ist.
+_RC_RE = re.compile(
+    r"(?i)reverse[\s-]*charge|steuerschuldnerschaft\s+des\s+leistungsempf|"
+    r"§\s*13\s*b\s+ustg|autoliquidation|inversione\s+contabile|"
+    r"bezugsteuer|verlagerung\s+der\s+steuerschuld")
+
+
+def reverse_charge(fields: dict, text: str) -> None:
+    """Feld ``reverse_charge`` = "ja", wenn der Vermerk im Text steht.
+    Eine Korrektur des Menschen (Haken gesetzt/entfernt) bleibt."""
+    from .template import FieldResult
+
+    cur = fields.get("reverse_charge")
+    if cur is not None and cur.source == "manual":
+        return
+    m = _RC_RE.search(text or "")
+    if m:
+        fields["reverse_charge"] = FieldResult("reverse_charge", "ja", m.group(0), 0.9, SOURCE)
