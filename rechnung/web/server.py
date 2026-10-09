@@ -10,6 +10,7 @@ import hashlib
 import io
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -370,7 +371,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                 "width": pg.width,
                 "height": pg.height,
                 "scale": RENDER_SCALE,
-                "image": f"/api/page.png?file={path.name}&page={pg.index}",
+                "image": f"/api/page.png?file={quote(path.name)}&page={pg.index}",
                 "words": [
                     {"i": i, "text": w.text, "x0": w.x0, "x1": w.x1,
                      "top": w.top, "bottom": w.bottom}
@@ -594,11 +595,13 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         res = _process(path)
         pages = []
         doc = None
-        if readable and path.suffix.lower() == ".pdf":
+        if path.suffix.lower() == ".pdf":
+            # Auch ein Scan ohne Texterkennung (readable=False) wird als
+            # Seitenbild gezeigt -- der Mensch muss sehen, was er bearbeitet.
             doc = pdfmod.load(path)
             pages = [{"index": pg.index, "width": pg.width, "height": pg.height,
                       "scale": RENDER_SCALE,
-                      "image": f"/api/page.png?file={path.name}&page={pg.index}",
+                      "image": f"/api/page.png?file={quote(path.name)}&page={pg.index}",
                       "words": []}
                      for pg in doc.pages]
         supplier_obj = store.supplier(res.supplier_id) if res.supplier_id else None
@@ -623,7 +626,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "extraction": EXTRACT_EINVOICE if readable else res.extraction,
             # ZUGFeRD: auch die XML-Werte im Seitenbild umrahmen (11b)
             "markierungen": (learn.markierungen(doc, current, res.line_items, tax_rows)
-                             if doc is not None else None),
+                             if doc is not None and readable else None),
             "pruefung_live": rechen_pruefungen(res.fields, res.line_items),
             "einvoice": inv,
             "status": res.status,
@@ -659,9 +662,11 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             # Scan/Bild: die OCR-Arbeitskopie zeigen -- deren Woerter sind es,
             # die angeklickt werden.
             _doc, o = load_document(path, store)
-            if o is None or o.pdf is None:
+            if o is not None and o.pdf is not None:
+                path = o.pdf
+            elif path.suffix.lower() != ".pdf":
                 raise HTTPException(409, (o.error if o else "") or "OCR nicht verfuegbar")
-            path = o.pdf
+            # sonst: Scan-PDF ohne Texterkennung -> das Original zeigen
         return Response(_render_png(path, page), media_type="image/png")
 
     @app.post("/api/line-items/preview")
