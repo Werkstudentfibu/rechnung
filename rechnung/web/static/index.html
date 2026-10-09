@@ -1066,7 +1066,11 @@ async function saveCategoryCorrection(text, kategorie) {
    MwSt-Satz. Leere Platzhalter-Zeilen werden erst beim Eintippen zu echten
    Zeilen der USt-Aufstellung (STATE.taxRows) -- daraus lernt das Programm beim
    Bestaetigen den Steuerblock wie bisher. */
-const STD_SAETZE = [7, 19];
+// Standard-Saetze je Waehrung: Schweiz (CHF) 2,6 % / 8,1 %, sonst 7 % / 19 %
+function stdSaetze() {
+  const w = ((STATE.current || {}).waehrung || {}).value;
+  return String(w || '').toUpperCase() === 'CHF' ? [2.6, 8.1] : [7, 19];
+}
 function taxSlots() {
   const rows = STATE.taxRows || [];
   const num = v => { const x = parseFloat(String(v ?? '').replace(',', '.')); return isNaN(x) ? null : x; };
@@ -1077,7 +1081,7 @@ function taxSlots() {
     .sort((a, b) => (a.satz ?? 999) - (b.satz ?? 999));
   for (const a of andere) slots.push({ ri: a.ri, satz: a.satz });
   const belegt = new Set(andere.map(a => a.satz));
-  for (const std of STD_SAETZE) {
+  for (const std of stdSaetze()) {
     if (slots.length >= 3) break;
     if (!belegt.has(std)) slots.push({ ri: -1, satz: std });
   }

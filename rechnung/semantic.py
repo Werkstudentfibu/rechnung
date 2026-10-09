@@ -527,13 +527,14 @@ class FullExtraction:
     rejected: dict[str, str] = field(default_factory=dict)  # Feld -> Grund
 
 
-_PROMPT_FULL = """Du liest den Text einer deutschen Geschaeftsrechnung und gibst NUR ein JSON-Objekt zurueck, keinen Fliesstext.
+_PROMPT_FULL = """Du liest den Text einer Geschaeftsrechnung (Deutschland, Schweiz oder EU) und gibst NUR ein JSON-Objekt zurueck, keinen Fliesstext.
 
 Gib jeden Wert GENAU so wieder, wie er im Text steht (gleiche Schreibweise, keine Umrechnung) -- jeder Wert wird anschliessend im Text gesucht und verworfen, wenn er dort nicht vorkommt. Nichts raten oder erfinden; unbekannte Felder auf null setzen.
 
 Felder:
 - rechnungsnummer, rechnungsdatum, netto, ust_betrag, ust_satz (Prozent), brutto, bestellnummer, kostenstelle
-- lieferant_name, lieferant_iban, lieferant_ustid: Rechnungssteller (NICHT der Rechnungsempfaenger)
+- lieferant_name, lieferant_iban, lieferant_ustid: Rechnungssteller (NICHT der Rechnungsempfaenger). Der Rechnungssteller steht im Briefkopf/Logo, in der Fusszeile und bei der Bankverbindung ("Zahlbar an", "Konto"); der Empfaenger steht im Adressfeld ("Zahlbar durch").
+- Steuersaetze stehen auf der Rechnung (Deutschland z.B. 19/7, Schweiz MWST 8,1/2,6/3,8) -- nie einen Satz annehmen, der nicht im Text steht.
 - lieferant_anschrift (Strasse, PLZ Ort, Land mit Komma getrennt), lieferant_bank (Name der Bank), lieferant_bic, lieferant_steuernummer, lieferant_kontakt (Telefon/E-Mail): ebenfalls vom Rechnungssteller
 - empfaenger_name, empfaenger_anschrift: Rechnungsempfaenger (an wen die Rechnung adressiert ist); Anschrift als Strasse, PLZ Ort mit Komma getrennt
 {lines}
@@ -701,4 +702,18 @@ def extract_full(text: str) -> FullExtraction:
             res.line_items = retry.line_items
         for n, why in retry.rejected.items():
             res.rejected.setdefault(n, why)
+    _absender_nicht_empfaenger(res)
     return res
+
+
+def _absender_nicht_empfaenger(res: "FullExtraction") -> None:
+    """Kleine Modelle verwechseln auf Scans gern Rechnungssteller und
+    -empfaenger (Befund 09.10.2026: als Lieferant stand das Hotel selbst).
+    Ist der gelesene Lieferantenname derselbe wie der Empfaenger, ist einer
+    von beiden falsch -- dann lieber keinen Lieferantennamen als den falschen."""
+    lief = norm(str(res.supplier.get("name") or ""))
+    empf = norm(str(res.empfaenger.get("name") or ""))
+    if lief and empf and (lief == empf or lief in empf or empf in lief):
+        res.supplier.pop("name", None)
+        res.rejected["lieferant_name"] = ("gleich dem Rechnungsempfaenger -- Aussteller "
+                                          "und Empfaenger vermutlich verwechselt")

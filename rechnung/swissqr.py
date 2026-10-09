@@ -187,7 +187,7 @@ def read(path: str | Path, pages: int = 2) -> SwissQR | None:
     return None
 
 
-def apply(fields: dict, qr: SwissQR | None) -> None:
+def apply(fields: dict, qr: SwissQR | None, hinweise: list[str] | None = None) -> None:
     """Zahlungsreferenz (QRR/SCOR) und -- falls aus dem Text noch nichts
     bekannt ist -- die Waehrung ergaenzen. Der sichtbare Rechnungstext
     (waehrung.py) und jede Korrektur haben Vorrang; der QR-Zahlteil ergaenzt,
@@ -199,9 +199,40 @@ def apply(fields: dict, qr: SwissQR | None) -> None:
         if cur is None or cur.source == "missing" or not cur.value:
             fields["zahlungsreferenz"] = FieldResult(
                 "zahlungsreferenz", qr.referenz, f"{qr.referenz_typ} {qr.referenz}", 0.95, SOURCE)
+    # Waehrung und Betrag stehen im QR-Zahlteil strukturiert vom Aussteller --
+    # sie gewinnen gegen Textregel/KI (Befund Aaron 09.10.2026: Zuercher
+    # QR-Rechnung lief als EUR mit deutscher MwSt, Brutto = Netto). Nur eine
+    # Korrektur des Menschen ("manual") hat Vorrang.
     cur_w = fields.get("waehrung")
-    if qr.waehrung and (cur_w is None or cur_w.source == "missing" or not cur_w.value):
+    if qr.waehrung and (cur_w is None or cur_w.source != "manual"):
         fields["waehrung"] = FieldResult("waehrung", qr.waehrung, qr.waehrung, 0.95, SOURCE)
+    cur_b = fields.get("brutto")
+    if qr.betrag is not None and (cur_b is None or cur_b.source != "manual"):
+        if cur_b is not None and cur_b.source != "missing" and cur_b.value not in (None, "") \
+                and hinweise is not None:
+            try:
+                abw = abs(float(cur_b.value) - qr.betrag) > 0.005
+            except (TypeError, ValueError):
+                abw = True
+            if abw:
+                hinweise.append(f"Brutto aus dem QR-Zahlteil ({qr.betrag:.2f}) statt "
+                                f"gelesenem Wert {cur_b.value}")
+        fields["brutto"] = FieldResult("brutto", qr.betrag, f"QR-Zahlteil {qr.betrag:.2f}", 0.95, SOURCE)
+
+
+def parteien(ki_lieferant: dict, ki_empfaenger: dict, qr: "SwissQR | None") -> None:
+    """Zahlungsempfaenger (= Rechnungssteller) und Zahlungspflichtiger
+    (= Rechnungsempfaenger) aus dem QR-Zahlteil -- strukturiert vom Aussteller,
+    gewinnen gegen die KI-Lesung (die auf Scans gern Absender und Empfaenger
+    verwechselt, Befund 09.10.2026)."""
+    if qr is None:
+        return
+    if qr.creditor_name:
+        ki_lieferant["name"] = qr.creditor_name
+    if qr.iban:
+        ki_lieferant["iban"] = qr.iban
+    if qr.debtor_name:
+        ki_empfaenger["name"] = qr.debtor_name
 
 
 def checks(fields: dict, qr: SwissQR | None, supplier=None) -> list[Check]:

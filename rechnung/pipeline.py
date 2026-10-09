@@ -987,7 +987,8 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
     zahlung.apply(res.fields, doc.text, res.hinweise)
     belegart.apply(res.fields, doc, hinweise=res.hinweise)
     waehrung.apply(res.fields, doc.text, res.hinweise)
-    swissqr.apply(res.fields, qr)
+    swissqr.apply(res.fields, qr, res.hinweise)
+    swissqr.parteien(res.ki_lieferant, res.ki_empfaenger, qr)
     with timer.stage("pruefungen"):
         res.shadow = shadow.decide(machine, _all_checks(machine, supplier, store, machine_items,
                                                         doc, extra, qr), new_supplier=True)
@@ -1225,7 +1226,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
     zahlung.apply(res.fields, doc.text, res.hinweise)
     belegart.apply(res.fields, doc, hinweise=res.hinweise)
     waehrung.apply(res.fields, doc.text, res.hinweise)
-    swissqr.apply(res.fields, qr_obj)
+    swissqr.apply(res.fields, qr_obj, res.hinweise)
 
     if tpl.line_items and o is not None and o.partial:
         # Langer Scan, Positionsseiten noch ohne Texterkennung: keine halbe
