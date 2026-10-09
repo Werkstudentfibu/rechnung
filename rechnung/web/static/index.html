@@ -564,6 +564,7 @@ function renderInvoice(d) {
     ${canConfirm() ? `<button class="ghost" onclick="confirmTpl()">Extraktion bestätigen (b)</button>` : ''}
     <button class="ghost" onclick="addCustomField()">+ eigenes Feld</button>
     <button class="ghost" onclick="toggleLi()">Positionstabelle ${STATE.li.active ? 'ausblenden' : 'anlernen'}</button>
+    <button class="ghost danger" onclick="ausEingangEntfernen()" title="Z.B. Testmail oder Spam – wird nicht gelöscht, sondern nach data\\entfernt verschoben">Aus Eingang entfernen</button>
     <div class="hint">Feld-Zeile wählen · Klick = Wert · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = bestätigen + nächste' : ''}</div>
     <div id="msg" class="hint"></div>`;
   fbox.appendChild(bar);
@@ -1384,6 +1385,16 @@ async function holeUpdate() {
     alert('Update fehlgeschlagen: ' + err);
   }
   b.disabled = false; b.textContent = 'Update holen';
+}
+
+async function ausEingangEntfernen() {
+  if (!STATE.file) return;
+  if (!confirm(`„${STATE.file}“ aus dem Eingang entfernen?\n\nDie Datei wird nicht gelöscht, sondern in den Ordner data\\entfernt verschoben.`)) return;
+  const r = await fetch('/api/entfernen?file=' + encodeURIComponent(STATE.file), { method: 'POST' });
+  if (!r.ok) { alert('Entfernen nicht möglich: ' + ((await r.json()).detail || r.status)); return; }
+  STATE.file = null;
+  $('#work').innerHTML = '<p class="hint">Entfernt. Links eine Rechnung wählen.</p>';
+  loadList();
 }
 
 /* ================= Postfach-Abholung (abholung.py) ================= */

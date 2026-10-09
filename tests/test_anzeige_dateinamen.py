@@ -45,3 +45,22 @@ def test_scan_without_ocr_is_still_shown(tmp_path: Path, monkeypatch):
     assert d["pages"], "Scan ohne OCR muss trotzdem als Seite erscheinen"
     r = c.get(d["pages"][0]["image"])
     assert r.status_code == 200 and r.headers["content-type"] == "image/png"
+
+
+def test_aus_eingang_entfernen_verschiebt_statt_loeschen(tmp_path: Path):
+    eingang = tmp_path / "eingang"; eingang.mkdir()
+    make_invoice(eingang / "Test #1.pdf")
+    store = Store(tmp_path / "data")
+    c = TestClient(create_app(store, eingang))
+    assert c.post("/api/entfernen?file=" + quote("Test #1.pdf")).status_code == 200
+    assert not (eingang / "Test #1.pdf").exists()
+    assert [p.name.endswith("_Test #1.pdf") for p in (store.root / "entfernt").iterdir()] == [True]
+    assert c.get("/api/scan").json()["results"] == []
+
+
+def test_entfernen_nur_im_eingang(tmp_path: Path):
+    eingang = tmp_path / "eingang"; eingang.mkdir()
+    (tmp_path / "geheim.pdf").write_bytes(b"x")
+    c = TestClient(create_app(Store(tmp_path / "data"), eingang))
+    assert c.post("/api/entfernen?file=" + quote("../geheim.pdf")).status_code == 404
+    assert (tmp_path / "geheim.pdf").exists()

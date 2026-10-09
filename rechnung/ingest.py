@@ -436,8 +436,25 @@ def text_pdf(title: str, text: str) -> bytes:
     return buf.getvalue()
 
 
-def _save(att: Attachment, dest: Path) -> Path:
+def _schon_vorhanden(content: bytes, dest: Path) -> bool:
+    """Gleicher Inhalt liegt schon im Eingang oder im Archiv (bereits
+    verarbeitet) -> nicht ein zweites Mal ablegen. Noetig, seit auch
+    gelesene Mails abgeholt werden (``fetch``, 09.10.2026)."""
+    sha = hashlib.sha256(content).hexdigest()
+    archiv = data_dir() / "archive"
+    if archiv.is_dir() and any(archiv.glob(sha + ".*")):
+        return True
+    if dest.is_dir():
+        for p in dest.iterdir():
+            if p.is_file() and p.stat().st_size == len(content) and p.read_bytes() == content:
+                return True
+    return False
+
+
+def _save(att: Attachment, dest: Path) -> Path | None:
     dest.mkdir(parents=True, exist_ok=True)
+    if _schon_vorhanden(att.content, dest):
+        return None
     target = dest / att.filename
     if target.exists():
         stem, suf = target.stem, target.suffix
@@ -475,7 +492,10 @@ def handle_mail(raw: bytes, cfg: ImapConfig, dest: Path, store=None,
             saved.append(f"(dry) {att.filename} <- {att.from_addr}"
                         + (f" (+{len(out.anlagen)} Anlage(n))" if out.anlagen else ""))
             continue
-        saved.append(str(_save(att, dest)))
+        gespeichert = _save(att, dest)
+        if gespeichert is None:   # identische Rechnung schon da
+            continue
+        saved.append(str(gespeichert))
         if out.anlagen:
             store = store or Store(data_dir())
             anlagen_mod.save(store, hashlib.sha256(att.content).hexdigest(), out.anlagen)
@@ -532,6 +552,44 @@ def _raw_from_fetch(msg_data) -> bytes | None:
     return None
 
 
+# Wie viele Tage zurueck auch GELESENE Mails beruecksichtigt werden
+# (09.10.2026: wer eine Mail im Webmail oeffnet, macht sie "gelesen" --
+# die reine UNSEEN-Suche hat sie dann nie abgeholt).
+LESEFENSTER_TAGE = 7
+ABGEHOLT_NAME = "abgeholt.json"
+
+
+def _bekannte_laden() -> set[str]:
+    import json
+    p = data_dir() / ABGEHOLT_NAME
+    try:
+        return set(json.loads(p.read_text("utf-8")))
+    except (OSError, ValueError):
+        return set()
+
+
+def _bekannte_speichern(ids: set[str]) -> None:
+    import json
+    p = data_dir() / ABGEHOLT_NAME
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".part")
+    tmp.write_text(json.dumps(sorted(ids)), "utf-8")
+    tmp.replace(p)
+
+
+def _message_id(M, num) -> str:
+    typ, data = M.fetch(num, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+    raw = _raw_from_fetch(data) if typ == "OK" else None
+    if not raw:
+        return ""
+    return (email.message_from_bytes(raw).get("Message-ID") or "").strip()
+
+
+def _ids(M, crit: str) -> list[bytes]:
+    typ, data = M.search(None, crit)
+    return data[0].split() if typ == "OK" and data and data[0] else []
+
+
 def fetch(cfg: ImapConfig | None = None, dest: Path | None = None,
           dry_run: bool = False, limit: int = 0, store=None) -> FetchResult:
     cfg = cfg or ImapConfig()
@@ -550,11 +608,19 @@ def fetch(cfg: ImapConfig | None = None, dest: Path | None = None,
     try:
         M.login(cfg.user, cfg.password)
         M.select(cfg.source_folder)
-        typ, data = M.search(None, "UNSEEN")
-        ids = data[0].split() if data and data[0] else []
+        # Ungelesene Mails wie bisher -- dazu auch GELESENE der letzten
+        # Tage, sofern ihre Message-ID noch nicht abgeholt wurde (im Webmail
+        # geoeffnet = gelesen, war vorher unsichtbar).
+        ungelesen = _ids(M, "UNSEEN")
+        seit = time.strftime("%d-%b-%Y", time.gmtime(time.time() - LESEFENSTER_TAGE * 86400))
+        ids = list(ungelesen) + [n for n in _ids(M, f"SINCE {seit}") if n not in ungelesen]
+        bekannte = _bekannte_laden()
         if limit:
             ids = ids[:limit]
         for num in ids:
+            mid = _message_id(M, num)
+            if num not in ungelesen and (not mid or mid in bekannte):
+                continue   # gelesen und schon abgeholt (bzw. nicht zuzuordnen)
             # BODY.PEEK[] statt RFC822: Abholen allein markiert NICHT als gelesen
             typ, msg_data = M.fetch(num, "(BODY.PEEK[])")
             raw = _raw_from_fetch(msg_data) if typ == "OK" else None
@@ -568,6 +634,9 @@ def fetch(cfg: ImapConfig | None = None, dest: Path | None = None,
                 errors.append(f"Mail {num!r}: {type(e).__name__}: {e}")
                 continue
             mails += 1
+            if mid and not dry_run:
+                bekannte.add(mid)
+                _bekannte_speichern(bekannte)   # sofort: Abbruch danach verliert nichts
             saved += r["saved"]
             to_human += r["human"]
             if not dry_run:

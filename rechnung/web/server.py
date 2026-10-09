@@ -320,6 +320,22 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                                  "fehler": "Postfach nicht eingerichtet (rechnung.env)"})
         return JSONResponse(dict(abholer.einmal(), eingerichtet=True))
 
+    @app.post("/api/entfernen")
+    def entfernen(file: str) -> JSONResponse:
+        """Rechnung aus dem Eingang nehmen (Testmail, Spam ...; Wunsch Aaron
+        09.10.2026). Nicht loeschen, sondern nach ``data/entfernt`` schieben
+        -- wiederherstellbar. Nur Dateien direkt im Eingang."""
+        import time as _time
+
+        name = human.file_name(file)
+        p = (samples / name).resolve()
+        if not (p.is_file() and p.parent == samples.resolve()):
+            raise HTTPException(404, "Datei nicht im Eingang")
+        ziel = store.root / "entfernt"
+        ziel.mkdir(parents=True, exist_ok=True)
+        p.replace(ziel / f"{_time.strftime('%Y%m%d-%H%M%S')}_{p.name}")
+        return JSONResponse({"ok": True})
+
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
         # no-store: nach einem Update soll das Fenster nie die alte Oberflaeche zeigen
