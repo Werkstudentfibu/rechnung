@@ -6,7 +6,7 @@ name: texterkennung-windows
 on:
   push:
     branches: [release, "emmy/**"]
-    paths: ["windows/texterkennung-einrichten.ps1", "windows/tessdata/**", "rechnung/ocr.py",
+    paths: ["windows/texterkennung-einrichten.ps1", "windows/tessdata/**", "rechnung/ocr.py", "tools/ocr_smoke.py",
             ".github/workflows/texterkennung-windows.yml"]
   workflow_dispatch:
 
