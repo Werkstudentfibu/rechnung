@@ -31,6 +31,8 @@ def test_tesseract_windows_standard_path_fallback(monkeypatch, tmp_path: Path):
     monkeypatch.delenv("RECHNUNG_TESSERACT", raising=False)
     monkeypatch.setattr(ocr.shutil, "which", lambda _n: None)
     monkeypatch.setattr(ocr, "_on_windows", lambda: True)
+    # eine echte portable Einrichtung (<Basis>\tesseract) haette Vorrang
+    monkeypatch.setattr(ocr, "portable_tesseract", lambda: tmp_path / "fehlt.exe")
     monkeypatch.setenv("TESTPROGRAMS", str(tmp_path))
     monkeypatch.setattr(ocr, "_WINDOWS_CANDIDATES",
                         ("%NICHT_GESETZT%/Tesseract-OCR/tesseract.exe",
@@ -213,3 +215,13 @@ def test_laptop_starter_run_from_temp_copy():
     src = (ROOT / "laptop-einrichten.ps1").read_text("ascii")
     for name in ("laptop-start.cmd", "laptop-nachtlauf.cmd"):
         assert f"app\\windows\\{name}`\" `\"%TEMP%" in src
+
+
+def test_portable_tesseract_hat_vorrang(monkeypatch, tmp_path: Path):
+    exe = tmp_path / "tesseract.exe"
+    exe.write_bytes(b"")
+    monkeypatch.delenv("RECHNUNG_TESSERACT", raising=False)
+    monkeypatch.setattr(ocr.shutil, "which", lambda _n: None)
+    monkeypatch.setattr(ocr, "_on_windows", lambda: True)
+    monkeypatch.setattr(ocr, "portable_tesseract", lambda: exe)
+    assert ocr.tesseract_cmd() == str(exe)
