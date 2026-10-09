@@ -95,7 +95,7 @@ def test_mail_mit_zip_und_passwort_pdf(tmp_path, monkeypatch):
     monkeypatch.delenv("RECHNUNG_MENSCHLICH", raising=False)
     store = Store(tmp_path / "data")
     raw = _mail(attachments=[
-        ("rechnungen.zip", _zip({"RE-10.pdf": _pdf(), "RE-11.pdf": _pdf()}), "application/zip"),
+        ("rechnungen.zip", _zip({"RE-10.pdf": _pdf("Rechnung 10"), "RE-11.pdf": _pdf("Rechnung 11")}), "application/zip"),
         ("RE-12.pdf", _pdf(password="geheim"), "application/pdf"),
     ])
     fake = FakeImap({b"1": raw})
