@@ -15,7 +15,6 @@ setlocal
 set "BASIS=%~f1"
 if "%~1"=="" for %%I in ("%~dp0..\..") do set "BASIS=%%~fI"
 cd /d "%BASIS%"
-call :env
 set "PY=%BASIS%\app\.venv\Scripts\python.exe"
 if not exist "%PY%" (
   echo FEHLER: %PY% fehlt. Bitte laptop-einrichten.ps1 erneut ausfuehren.
@@ -24,6 +23,8 @@ if not exist "%PY%" (
 )
 
 :start
+rem rechnung.env bei jedem (Neu-)Start frisch lesen -- auch nach "Update holen"
+call :env
 echo Suche nach Updates ...
 "%PY%" -m rechnung.cli --data "%RECHNUNG_DATA%" update
 echo Starte Rechnung ...

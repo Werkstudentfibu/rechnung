@@ -225,3 +225,11 @@ def test_portable_tesseract_hat_vorrang(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(ocr, "_on_windows", lambda: True)
     monkeypatch.setattr(ocr, "portable_tesseract", lambda: exe)
     assert ocr.tesseract_cmd() == str(exe)
+
+
+def test_laptop_start_liest_env_bei_jedem_neustart():
+    """Nach "Update holen" (Code 42) springt der Starter zu :start -- dort muss
+    rechnung.env neu gelesen werden, sonst wirkt eine geaenderte Einstellung
+    (z.B. RECHNUNG_OCR_ENABLED=1) erst nach Schliessen des Fensters."""
+    src = (ROOT / "windows" / "laptop-start.cmd").read_text("ascii")
+    assert src.index(":start") < src.index("call :env") < src.index(" update")
