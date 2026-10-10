@@ -39,6 +39,7 @@ rechnung vorlernen                   # Vorlernen-Gruppen auflisten
 rechnung vorlernen --bestaetigen GRUPPE --operator NAME   # Vorlage einer Gruppe aktivieren
 rechnung testsatz [--json] [--lieferant X] [--variante A] [--ohne-ki]   # bestaetigte Rechnungen neu lesen + messen
 rechnung e-rechnung-kandidaten [--json]   # wer schickt noch PDF/Scan statt E-Rechnung?
+rechnung fehlerstatistik [--json]          # welche Felder bei welchen Lieferanten wie oft korrigiert werden
 rechnung e-rechnung-kandidaten --anschreiben LIEFERANT_ID [--an ADRESSE]   # Anschreiben-Text (nichts wird versendet)
 ```
 
@@ -700,6 +701,20 @@ Mit freundlichen Grüßen
 {ANSPRECHPARTNER}
 {FIRMA}
 ```
+
+### 5. Fehlerstatistik je Lieferant und Feld
+
+`eventlog.fehlerstatistik()` (CLI `rechnung fehlerstatistik`, Reiter
+„Qualität“, Nachtlauf-Bericht unter `fehlerstatistik`) baut auf denselben
+Korrektur-Ereignissen auf wie der Fehlerbericht, zählt aber je Lieferant ×
+Feld den **Anteil der Rechnungen**, an denen das Feld korrigiert wurde
+(mehrere Klicks an einer Rechnung zählen einmal) -- gesamt, letzte 4 Wochen
+und davor, mit Trend. Darüber die Liste „lohnendste Verbesserung“ (ab 2
+korrigierten Rechnungen und ≥ 50 %), z.B. „Lieferant X: rechnungsnummer in 6
+von 8 Rechnungen korrigiert → Vorlage anlernen“ (mit Vorlage: „nachtrainieren
+(Anker prüfen)“, Positionen: „Positionstabelle anlernen bzw. Positionsmodus
+prüfen“, IBAN/USt-IdNr/…: „Stammdaten pflegen“). Der Nachtlauf druckt die
+fünf lohnendsten Punkte mit aus.
 
 ## Härtung (v1.3)
 

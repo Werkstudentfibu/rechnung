@@ -195,6 +195,8 @@ def run_nightly(store, samples: str | Path | None = None,
             "layoutwechsel": {"veraltete_vorlagen": stale},
             "ocr_rest": ocr_rest,
             "fehlerbericht": eventlog.report(store),
+            # je Lieferant x Feld + lohnendste Verbesserung (Aaron 10.10.2026)
+            "fehlerstatistik": eventlog.fehlerstatistik(store),
             "tagesbericht": tagesbericht(store, samples),
             "betrieb": betrieb(store),
             "gesundheit": health_checks(store),

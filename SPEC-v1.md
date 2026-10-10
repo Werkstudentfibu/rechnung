@@ -1346,6 +1346,13 @@ Entscheidung Aaron 10.10.2026 ("alle 5 Punkte"). Reiter "Qualität" im UI.
    (Empfangspflicht seit 1.1.2025, Versand-Übergang bis Ende 2026 bzw. 2027
    bei Vorjahresumsatz ≤ 800.000 €); `anschreiben()` füllt nur Bekanntes.
 
+5. **Fehlerstatistik** (`eventlog.fehlerstatistik`): je (Lieferant, Feld)
+   die Menge korrigierter sha256 / Rechnungen des Lieferanten (bestätigte
+   plus korrigierte, damit ≤ 100 %), Zeitpunkt je Rechnung = Bestätigung bzw.
+   frühestes Ereignis, Trend letzte 28 Tage vs. davor. "Lohnend": ≥ 2
+   Rechnungen und Anteil ≥ 0,5, Empfehlung je Feldart. Im Nachtlauf-Bericht
+   (`fehlerstatistik`) und in `rechnung nacht` (Top 5).
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).

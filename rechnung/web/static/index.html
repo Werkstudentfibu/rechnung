@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Rechnung – Training & Bibliothek</title>
+<link rel="icon" href="data:,">
 <style>
   * { box-sizing: border-box; }
   body { margin: 0; font: 14px/1.45 system-ui, sans-serif; color: #1a1a1a; }
@@ -241,6 +242,13 @@
       <p><button id="q-testsatz-btn" onclick="testsatzStart()">Testsatz jetzt prüfen</button>
         <span id="q-testsatz-status" class="hint"></span></p>
       <div id="q-testsatz"></div>
+    </div>
+    <div class="box sect">
+      <h4>Fehlerstatistik je Lieferant und Feld</h4>
+      <p class="hint">Anteil der Rechnungen eines Lieferanten, bei denen ein Feld von Hand
+        korrigiert wurde – gesamt, in den letzten 4 Wochen und davor. Oben die lohnendsten
+        Verbesserungen.</p>
+      <div id="q-fehler"></div>
     </div>
     <div class="box sect">
       <h4>Lieferanten-Gedächtnis</h4>
@@ -2207,6 +2215,19 @@ async function loadQualitaet() {
         <td>${esc(m.beispiel || '')}${m.geruest ? ` <span class="hint">(${esc(m.geruest)}${m.fortlaufend ? ', fortlaufend' : ''})</span>` : ''}</td>
         <td class="num">${p.zahlungsziel_tage == null ? '' : p.zahlungsziel_tage + ' Tage'}</td></tr>`; }).join('') +
     '</table>';
+  const fs = d.fehlerstatistik || { zeilen: [], lohnend: [] };
+  const anteil = v => v == null ? '–' : Math.round(100 * v) + ' %';
+  const trendHtml = t => t === 'besser' ? '<span class="chk ok">↓ besser</span>'
+    : t === 'schlechter' ? '<span class="chk bad">↑ schlechter</span>' : esc(t || '');
+  $('#q-fehler').innerHTML = !fs.zeilen.length ? '<p class="hint">Noch keine Korrekturen.</p>' :
+    (fs.lohnend.length ? '<p><b>Lohnendste Verbesserungen</b></p><ul>' +
+      fs.lohnend.map(r => `<li>${esc(r.text)}</li>`).join('') + '</ul>' : '') +
+    '<table><tr><th>Lieferant</th><th>Feld</th><th class="num">korrigiert</th><th class="num">Anteil</th>' +
+    `<th class="num">letzte ${fs.trend_tage / 7} Wochen</th><th class="num">davor</th><th>Trend</th></tr>` +
+    fs.zeilen.map(r => `<tr><td>${esc(r.lieferant_name || r.lieferant)}</td><td>${esc(r.feld_label)}</td>
+      <td class="num">${r.korrigiert} von ${r.rechnungen}</td><td class="num">${anteil(r.anteil)}</td>
+      <td class="num">${anteil(r.anteil_4_wochen)}</td><td class="num">${anteil(r.anteil_davor)}</td>
+      <td>${trendHtml(r.trend)}</td></tr>`).join('') + '</table>';
   const ek = d.e_rechnung_kandidaten || [];
   $('#q-erechnung').innerHTML = !ek.length ? '<p class="hint">Keine Lieferanten mit bestätigten PDF-/Scan-Rechnungen.</p>' :
     '<table><tr><th>Lieferant</th><th class="num">PDF</th><th class="num">Scan</th><th class="num">E-Rechnung</th>' +

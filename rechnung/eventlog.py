@@ -25,6 +25,7 @@ denselben Ergebnissen.
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta
 
 from .human import file_name
 
@@ -281,3 +282,118 @@ def report(store, since: str | None = None) -> dict:
         # an den Menschen gegeben (Ordner "Menschliche Bearbeitung") je Art+Lieferant
         "menschlich": sorted_rows(human),
     }
+
+
+# ---- Fehlerstatistik je Lieferant und Feld (Aaron 10.10.2026) -------------
+# Baut auf denselben Korrektur-Ereignissen auf wie ``report()``, zaehlt aber
+# je Lieferant x Feld den ANTEIL der Rechnungen, an denen das Feld korrigiert
+# wurde (nicht die Zahl der Klicks), mit Trend der letzten 4 Wochen -- und
+# leitet daraus die "lohnendste Verbesserung" ab.
+
+TREND_TAGE = 28
+# ab hier lohnt sich ein Eingriff (Top-Liste): mindestens so viele
+# korrigierte Rechnungen und mindestens dieser Anteil
+LOHNEND_MIN_RECHNUNGEN = 2
+LOHNEND_MIN_ANTEIL = 0.5
+_STAMMDATEN_FELDER = ("iban", "ustid", "steuernummer", "adresse", "bic")
+
+
+def _ts(s: str | None) -> datetime | None:
+    """Zeitstempel der Ereignisse ("2026-10-10T13:12:13+0200") -> lokale
+    Zeit ohne Zone (fuer den 4-Wochen-Vergleich genau genug)."""
+    try:
+        return datetime.fromisoformat((s or "")[:19]) if s else None
+    except ValueError:
+        return None
+
+
+def _empfehlung(feld: str, hat_vorlage: bool) -> str:
+    from .pipeline import POSITIONEN_KEY
+
+    if feld == POSITIONEN_KEY:
+        return "Positionstabelle anlernen bzw. Positionsmodus prüfen"
+    if feld == "ust_aufstellung":
+        return "USt-Block anlernen"
+    if feld in _STAMMDATEN_FELDER:
+        return "Stammdaten des Lieferanten pflegen"
+    return "Vorlage nachtrainieren (Anker prüfen)" if hat_vorlage else "Vorlage anlernen"
+
+
+def _feld_label(feld: str) -> str:
+    from .pipeline import POSITIONEN_KEY
+
+    return "Positionen" if feld == POSITIONEN_KEY else feld
+
+
+def fehlerstatistik(store, heute: datetime | None = None) -> dict:
+    """Je Lieferant x Feld: Anteil korrigierter Rechnungen (gesamt, letzte 4
+    Wochen, davor) und Top-Liste "lohnendste Verbesserung"."""
+    from .testsatz import bestaetigte
+
+    heute = heute or datetime.now()
+    grenze = heute - timedelta(days=TREND_TAGE)
+    events = store.events()
+
+    # Zeitpunkt je Rechnung: Bestaetigung, sonst fruehestes Ereignis
+    zeit: dict[str, datetime] = {}
+    for e in events:
+        sha, t = e.get("sha256"), _ts(e.get("ts"))
+        if sha and t and (sha not in zeit or t < zeit[sha]):
+            zeit[sha] = t
+    rechnungen: dict[str, set[str]] = {}
+    namen: dict[str, str] = {}
+    for rec in bestaetigte(store):
+        sid, sha = rec.get("supplier_id"), rec.get("sha256")
+        if not sid or not sha:
+            continue
+        rechnungen.setdefault(sid, set()).add(sha)
+        namen[sid] = namen.get(sid) or rec.get("supplier_name") or ""
+        if (t := _ts(rec.get("bestaetigt"))):
+            zeit[sha] = t
+    korrigiert: dict[tuple[str, str], set[str]] = {}
+    for e in events:
+        if e.get("type") != TYPE_CORRECTION or not e.get("supplier_id") or not e.get("sha256"):
+            continue
+        sid = e["supplier_id"]
+        korrigiert.setdefault((sid, e.get("field") or "?"), set()).add(e["sha256"])
+        # korrigiert, aber (noch) nicht bestaetigt -- zaehlt trotzdem als
+        # Rechnung dieses Lieferanten, sonst laege der Anteil ueber 100 %
+        rechnungen.setdefault(sid, set()).add(e["sha256"])
+        namen[sid] = namen.get(sid) or e.get("supplier_name") or ""
+
+    def anteil(k: int, n: int) -> float | None:
+        return round(k / n, 2) if n else None
+
+    zeilen = []
+    for (sid, feld), shas in korrigiert.items():
+        alle = rechnungen.get(sid, set())
+        neu = {s for s in alle if zeit.get(s) and zeit[s] >= grenze}
+        alt = alle - neu
+        a4, a0 = anteil(len(shas & neu), len(neu)), anteil(len(shas & alt), len(alt))
+        trend = None
+        if a4 is not None and a0 is not None:
+            trend = "besser" if a4 < a0 else ("schlechter" if a4 > a0 else "gleich")
+        sup = store.supplier(sid)
+        zeilen.append({
+            "lieferant": sid,
+            "lieferant_name": (sup.name if sup else "") or namen.get(sid, ""),
+            "feld": feld, "feld_label": _feld_label(feld),
+            "korrigiert": len(shas), "rechnungen": len(alle),
+            "anteil": anteil(len(shas), len(alle)),
+            "anteil_4_wochen": a4, "rechnungen_4_wochen": len(neu),
+            "anteil_davor": a0, "trend": trend,
+        })
+    zeilen.sort(key=lambda r: (-r["korrigiert"], -(r["anteil"] or 0), r["lieferant"], r["feld"]))
+
+    top = []
+    for r in zeilen:
+        if r["korrigiert"] < LOHNEND_MIN_RECHNUNGEN or (r["anteil"] or 0) < LOHNEND_MIN_ANTEIL:
+            continue
+        hat_vorlage = any(not t.stale for t in store.templates_for(r["lieferant"]))
+        tipp = _empfehlung(r["feld"], hat_vorlage)
+        who = r["lieferant_name"] or r["lieferant"]
+        top.append(dict(r, empfehlung=tipp,
+                        text=f"{who}: {r['feld_label']} in {r['korrigiert']} von "
+                             f"{r['rechnungen']} Rechnungen korrigiert → {tipp}"))
+    return {"stand": heute.strftime("%Y-%m-%d"), "trend_tage": TREND_TAGE,
+            "zeilen": zeilen, "lohnend": top[:10]}

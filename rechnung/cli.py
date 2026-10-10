@@ -388,6 +388,34 @@ def _cmd_e_rechnung_kandidaten(args) -> int:
     return 0
 
 
+def _cmd_fehlerstatistik(args) -> int:
+    """Je Lieferant x Feld: Anteil korrigierter Rechnungen, Trend 4 Wochen,
+    lohnendste Verbesserungen (eventlog.fehlerstatistik)."""
+    from .eventlog import fehlerstatistik
+
+    data = fehlerstatistik(Store(args.data))
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return 0
+    if not data["zeilen"]:
+        print("Noch keine Korrekturen.")
+        return 0
+    if data["lohnend"]:
+        print("Lohnendste Verbesserungen:")
+        for r in data["lohnend"]:
+            print(f"  {r['text']}")
+        print()
+    pct = lambda v: "-" if v is None else f"{100 * v:.0f} %"  # noqa: E731
+    print(f"{'Lieferant':28s} {'Feld':18s} {'korr.':>9s} {'Anteil':>7s} "
+          f"{'4 Wochen':>8s} {'davor':>7s}  Trend")
+    for r in data["zeilen"]:
+        who = r["lieferant_name"] or r["lieferant"]
+        print(f"{who:28.28s} {r['feld_label']:18.18s} {r['korrigiert']:4d}/{r['rechnungen']:<4d} "
+              f"{pct(r['anteil']):>7s} {pct(r['anteil_4_wochen']):>8s} {pct(r['anteil_davor']):>7s}"
+              f"  {r['trend'] or ''}")
+    return 0
+
+
 def _cmd_modus(args) -> int:
     """Betriebsmodus anzeigen bzw. ausdruecklich umschalten (Audit)."""
     from . import modus
@@ -479,6 +507,8 @@ def _cmd_nacht(args) -> int:
     print(f"  {bericht['betrieb']['text']}")
     print(f"  Ordner Menschliche Bearbeitung: {bericht['betrieb']['menschlich_offen']} offen")
     print(f"  veraltete Vorlagen: {len(bericht['layoutwechsel']['veraltete_vorlagen'])}")
+    for r in (bericht.get("fehlerstatistik") or {}).get("lohnend", [])[:5]:
+        print(f"  lohnend: {r['text']}")
     for name, h in bericht["gesundheit"].items():
         mark = {True: "ok", False: "FAIL", None: "-"}[h["ok"]]
         print(f"  [{mark:4s}] {name}: {h['detail']}")
@@ -682,6 +712,12 @@ def main(argv=None) -> int:
     ek.add_argument("--an", help="Empfangsadresse fuer E-Rechnungen im Anschreiben")
     ek.add_argument("--json", action="store_true")
     ek.set_defaults(func=_cmd_e_rechnung_kandidaten)
+
+    fs = sub.add_parser("fehlerstatistik",
+                        help="Welche Felder werden bei welchen Lieferanten wie oft korrigiert "
+                             "(Anteil, Trend 4 Wochen, lohnendste Verbesserung)")
+    fs.add_argument("--json", action="store_true")
+    fs.set_defaults(func=_cmd_fehlerstatistik)
 
     mo = sub.add_parser("modus",
                         help="Betriebsmodus (testphase/autonom) anzeigen oder umschalten")
