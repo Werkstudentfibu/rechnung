@@ -32,6 +32,41 @@ EXPECTED_RATES: dict[str, list[float]] = {
 }
 DEFAULT_CURRENCY = "EUR"
 
+
+def valid_rates(currency: str | None) -> list[float]:
+    """Gueltige USt-/MwSt-Saetze einer Waehrung -- gemeinsame Grundlage fuer
+    ``rechnen.py`` (Kopf/Positionen ergaenzen) UND ``summen.py`` (Beträge aus
+    dem Kontext herleiten, Teil A)."""
+    return EXPECTED_RATES.get(currency or DEFAULT_CURRENCY, EXPECTED_RATES[DEFAULT_CURRENCY])
+
+
+def nearest_valid_rate(satz: float, currency: str | None, tol: float = 0.5) -> float | None:
+    """Naechster gueltiger Satz der Waehrung, wenn ``satz`` (z.B. aus USt/Netto
+    zurueckgerechnet oder im Fliesstext gefunden) innerhalb der Rundungstoleranz
+    ``tol`` (Prozentpunkte) liegt -- sonst ``None`` (kein gueltiger Satz, nicht
+    raten)."""
+    best, best_d = None, None
+    for r in valid_rates(currency):
+        d = abs(r - satz)
+        if d <= tol and (best_d is None or d < best_d):
+            best, best_d = r, d
+    return best
+
+
+# ---- Positionsmodus je Lieferant (Teil B, Entscheidung Aaron 10.10.2026) --
+# Wie in Abbyy FlexiCapture entscheidet die bearbeitende Person beim Pruefen
+# einer Rechnung, wie die Positionstabelle dieses Lieferanten zu lesen ist --
+# der Modus haengt am Lieferanten (Supplier.positionsmodus), nicht an der
+# einzelnen Rechnung, und bleibt stabil, bis ihn jemand aendert. Normalfall
+# ist "einzeln" (unveraendertes Verhalten); nur wenige Lieferanten brauchen
+# einen der anderen beiden Modi. Verschiedene MwSt-Saetze werden in KEINEM
+# Modus zusammengefasst (immer eine Positionszeile je Steuersatz).
+POSITIONSMODUS_EINZELN = "einzeln"
+POSITIONSMODUS_ZUSAMMENFASSUNG = "zusammenfassung"
+POSITIONSMODUS_EINE_POSITION = "eine_position"
+POSITIONSMODI = (POSITIONSMODUS_EINZELN, POSITIONSMODUS_ZUSAMMENFASSUNG,
+                 POSITIONSMODUS_EINE_POSITION)
+
 # Pruefungs-Grund, wenn auf der Rechnung eine andere IBAN steht als im
 # Lieferanten-Stammdatensatz -- klassisches Betrugsmuster (geaenderte
 # Bankverbindung). Wortgleich in Pruefung, Rueckstellgrund und Fehlerbericht.
@@ -88,6 +123,17 @@ class Supplier:
     currency: str = DEFAULT_CURRENCY
     # Feld -> fester Wert, gilt fuer alle Rechnungen dieses Lieferanten
     fixed_fields: dict[str, str] = field(default_factory=dict)
+    # Positionsmodus (Teil B, Entscheidung Aaron 10.10.2026) -- Standard
+    # "einzeln" (unveraendertes Verhalten); altes suppliers.json ohne dieses
+    # Feld laedt ebenfalls als "einzeln" (siehe from_dict). "eine_position"
+    # braucht zusaetzlich eine Bezeichnung (z.B. "Strom").
+    positionsmodus: str = POSITIONSMODUS_EINZELN
+    positionsbezeichnung: str = ""
+    # War der Modus schon einmal eine bewusste menschliche Entscheidung
+    # (POST .../positionsmodus, siehe pipeline.set_positionsmodus)? Nur dann
+    # unterbleibt der "Langer Beleg"-Hinweis (pipeline._positionsmodus_hint)
+    # -- unterscheidet "noch nie entschieden" vom Standardwert "einzeln".
+    positionsmodus_gesetzt: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -104,6 +150,9 @@ class Supplier:
             "fixed_fields": self.fixed_fields, "currency": self.currency,
             "bestaetigt": self.bestaetigt, "entwurf_quelle": self.entwurf_quelle,
             "entwurf_am": self.entwurf_am,
+            "positionsmodus": self.positionsmodus,
+            "positionsbezeichnung": self.positionsbezeichnung,
+            "positionsmodus_gesetzt": self.positionsmodus_gesetzt,
         }
 
     @classmethod
@@ -128,6 +177,12 @@ class Supplier:
             bestaetigt=d.get("bestaetigt", True),
             entwurf_quelle=d.get("entwurf_quelle", ""),
             entwurf_am=d.get("entwurf_am", ""),
+            # Fehlt in altem suppliers.json (vor dieser Aenderung) --
+            # "einzeln"/unentschieden als Standard (siehe Positionsmodus-Doku
+            # oben).
+            positionsmodus=d.get("positionsmodus") or POSITIONSMODUS_EINZELN,
+            positionsbezeichnung=d.get("positionsbezeichnung", ""),
+            positionsmodus_gesetzt=d.get("positionsmodus_gesetzt", False),
         )
 
 

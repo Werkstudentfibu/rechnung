@@ -540,8 +540,13 @@ def confirmed_values(fields: dict[str, FieldResult]) -> dict[str, object]:
         vtype = STANDARD_FIELDS.get(name, ("",))[0]
         # "text": per Regel aus dem Text gelesen (zahlung.py) -- die Regel
         # findet den Wert auch kuenftig selbst; gelernt wird, was der Mensch
-        # korrigiert hat bzw. was Vorlage/KI geliefert haben.
-        if vtype not in LEARNABLE_TYPES or fr.source in ("missing", "library", "text"):
+        # korrigiert hat bzw. was Vorlage/KI geliefert haben. "errechnet"
+        # (rechnen.py, Teil A/B Selbstlernen 2 inkl. summen.py) steht an
+        # KEINER festen Stelle im PDF -- ein zufaelliger Textfund waere kein
+        # verlaesslicher Anker, nur ein Nebenprodukt der Formel/des
+        # Kontexts; die Rechenstufe ergaenzt den Wert ohnehin bei jeder
+        # kuenftigen Rechnung von selbst (Befund 10.10.2026).
+        if vtype not in LEARNABLE_TYPES or fr.source in ("missing", "library", "text", rechnen.ERRECHNET):
             continue
         if fr.value is None or fr.value == "":
             continue
