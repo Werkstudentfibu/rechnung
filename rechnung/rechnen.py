@@ -153,7 +153,7 @@ def _ergaenze_kopf(fields: dict, currency: str | None, gruende: list[str],
     Kopf-Werte herleiten (SPEC 2b) -- nur wenn ein dabei verwendeter Satz
     fuer die Waehrung gueltig ist (DE 0/7/19, CH 0/2,6/3,8/8,1 inkl. der
     alten CHF-Saetze, siehe identify.EXPECTED_RATES)."""
-    _, netto = _feldwert(fields, "netto")
+    netto_fr, netto = _feldwert(fields, "netto")
     _, ust = _feldwert(fields, "ust_betrag")
     _, brutto = _feldwert(fields, "brutto")
     _, satz = _feldwert(fields, "ust_satz")
@@ -161,6 +161,25 @@ def _ergaenze_kopf(fields: dict, currency: str | None, gruende: list[str],
     def setze(name: str, value: float, formel: str) -> None:
         fields[name] = FieldResult(name, round(value, 2), formel, 1.0, ERRECHNET)
         ergaenzt.append(f"{name} errechnet ({formel})")
+
+    # Netto = Brutto bei Steuer > 0 kann nicht stimmen (Befund Aaron 09.10.2026:
+    # Schweizer Rechnung "Total inkl. MWST" -- die KI las den Endbetrag auch als
+    # Netto). Der Endbetrag ist das Brutto (bei QR-Rechnungen sogar vom
+    # Aussteller strukturiert); Netto wird verworfen und unten aus Brutto und
+    # Steuer bzw. Satz neu errechnet. Eine Korrektur des Menschen bleibt.
+    steuer = (ust is not None and abs(ust) > 0.005) or (satz is not None and satz > 0)
+    if (netto is not None and brutto is not None and abs(netto - brutto) < 0.005
+            and netto != 0 and steuer and netto_fr is not None and netto_fr.source != "manual"):
+        fields.pop("netto", None)
+        netto = None
+        if ust is not None and abs(ust) <= 0.005:   # "0,00 Steuer" bei Satz > 0 ebenso falsch
+            fields.pop("ust_betrag", None)
+            ust = None
+        gruende.append("Netto gleich Brutto trotz Steuer -- gelesenes Netto verworfen, "
+                       "aus Brutto neu errechnet")
+        if ust is not None and abs(ust) > 0.005:
+            setze("netto", brutto - ust, f"{brutto:.2f} - {ust:.2f} (Brutto - Steuer)")
+            netto = round(brutto - ust, 2)
 
     if brutto is not None and netto is None and ust is None:
         if satz is not None and _nearest_valid_rate(satz, currency) is not None:

@@ -230,6 +230,13 @@ def _live_fields(values: dict) -> dict[str, FieldResult]:
     return out
 
 
+def _ki_positionen() -> bool:
+    """Liest die KI bei unbekannten Lieferanten auch die Positionen?"""
+    from ..config import llm
+    c = llm()
+    return bool(c.enabled and c.line_items)
+
+
 def _render_png(path: Path, page_index: int) -> bytes:
     import pypdfium2 as pdfium
 
@@ -648,6 +655,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "standard_fields": {k: {"value_type": v[0], "required": v[1]}
                                 for k, v in sichtbare_felder().items()},
             "hidden_fields": sorted(ausgeblendet()),
+            "ki_positionen": _ki_positionen(),
             "fixed_field_types": FIXED_FIELD_TYPES,
             "supplier": supplier_obj.to_dict() if supplier_obj else None,
             "addresses": [a.to_dict() for a in store.addresses()],
@@ -723,6 +731,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "standard_fields": {k: {"value_type": v[0], "required": v[1]}
                                 for k, v in sichtbare_felder().items()},
             "hidden_fields": sorted(ausgeblendet()),
+            "ki_positionen": _ki_positionen(),
             "fixed_field_types": FIXED_FIELD_TYPES,
             "supplier": supplier_obj.to_dict() if supplier_obj else None,
             "addresses": [a.to_dict() for a in store.addresses()],

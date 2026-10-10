@@ -348,6 +348,7 @@ function applyInvoiceData(d) {
     detectedAddress: d.detected_address || null,
     holdReasons: d.hold_reasons || [], statusLabel: d.status_label || '',
     llmRejected: d.llm_rejected || {},
+    kiPositionen: d.ki_positionen,
     lineItems: (d.line_items || []).map(it => ({ ...it })),
     // Herkunft je Zeile aus der vollstaendig ergaenzten Aufstellung
     // (``tax_breakdown``, SPEC Baustein 2/3) in die editierbaren Zeilen
@@ -1220,7 +1221,9 @@ function renderLiPreviewBox(items) {
       }).join('')}${stCell(pr[ri])}
       <td>${fest ? '' : `<button class="danger" style="padding:0 4px" title="Zeile löschen" onclick="liDelRow(${ri})">×</button>`}</td></tr>`).join('')}
     </table></div>
-    ${items.length ? '' : '<div class="hint">Noch keine Position erkannt.</div>'}
+    ${items.length ? '' : STATE.kiPositionen === false
+      ? '<div class="hint">Noch keine Position erkannt – das Auslesen der Positionen per KI ist ausgeschaltet (<code>RECHNUNG_LLM_LINE_ITEMS=0</code> in rechnung.env). Einschalten oder die Positionstabelle für diesen Lieferanten anlernen.</div>'
+      : '<div class="hint">Noch keine Position erkannt.</div>'}
     ${fest ? '' : `<div style="margin-top:4px">
       <button class="ghost mini" onclick="liAddRow()">Element 'Line Items' hinzufügen</button>
       ${STATE.tabDirty.positionen ? `<button class="mini" onclick="saveTabelle('positionen')">Positionen übernehmen</button> <span class="hint">geändert – noch nicht übernommen</span>` : ''}
