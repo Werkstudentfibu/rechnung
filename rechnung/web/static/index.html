@@ -241,6 +241,14 @@
         <span id="q-testsatz-status" class="hint"></span></p>
       <div id="q-testsatz"></div>
     </div>
+    <div class="box sect">
+      <h4>Lieferanten-Gedächtnis</h4>
+      <p class="hint">Aus den bestätigten Rechnungen je Lieferant abgeleitet (nicht von Hand
+        gepflegt), aktiv ab <span id="q-prof-min">3</span> Rechnungen: übliche Steuersätze,
+        Währung, Betragsspanne, Muster der Rechnungsnummer, Zahlungsziel. Weicht eine neue
+        Rechnung ab, wird das Feld rot (Lesefehler) bzw. ein Hinweis angezeigt.</p>
+      <div id="q-profile"></div>
+    </div>
   </div>
 
   <div id="v-vorlernen" class="view pane">
@@ -371,6 +379,8 @@ function applyInvoiceData(d) {
     detectedAddress: d.detected_address || null,
     holdReasons: d.hold_reasons || [], statusLabel: d.status_label || '',
     hinweise: d.hinweise || [],
+    // rote Pruefungen (Plausibilitaet, Datum, Lieferanten-Gedaechtnis, ...)
+    checks: d.checks || [], roteFelder: d.rote_felder || {},
     // Dezenter Positionsmodus-Vorschlag bei langem Beleg (Teil B) -- eigens
     // herausgefiltert, damit er gezielt bei "Positionsdaten" erscheint statt
     // nur in der allgemeinen Hinweis-Liste.
@@ -544,7 +554,9 @@ function fBox(name, label, cls = '') {
   const cur = STATE.current[name] || {};
   const val = fmtWert(cur.value, def.value_type);
   const da = cur.source && cur.source !== 'missing' && val !== '';
-  const st = !da ? '' : (cur.source === 'manual' || cur.confidence == null || cur.confidence >= 0.7) ? 'gut' : 'unsicher';
+  const rot = (STATE.roteFelder || {})[name] || [];
+  const st = rot.length ? 'unsicher'
+    : !da ? '' : (cur.source === 'manual' || cur.confidence == null || cur.confidence >= 0.7) ? 'gut' : 'unsicher';
   const raw = da && cur.raw && String(cur.raw).trim() !== val && cur.source !== 'manual'
     ? `<div class="raw" title="gelesen (${esc(cur.source)})">${esc(String(cur.raw).slice(0, 60))}</div>` : '';
   return `<div class="af ${cls}" data-field="${esc(name)}" onclick="selectField('${esc(name)}', this)">
@@ -552,7 +564,7 @@ function fBox(name, label, cls = '') {
     <input class="ab-in val-input ${st}" data-field="${esc(name)}" value="${esc(val)}"
            title="${esc(name)}${cur.source ? ' · ' + esc(cur.source) : ''}${cur.confidence ? ' · ' + cur.confidence : ''}"
            onchange="saveCorrection('${esc(name)}', this.value)">
-    ${raw}<div class="ass"></div></div>`;
+    ${raw}${rot.map(g => `<div class="chk bad">✗ ${esc(g)}</div>`).join('')}<div class="ass"></div></div>`;
 }
 
 /* Anschrift-Zeilen <-> Straße/PLZ/Ort/Land */
@@ -731,6 +743,15 @@ function renderInvoice(d) {
   if (sonstigeHinweise.length) {
     const h = document.createElement('div'); h.className = 'box';
     h.innerHTML = `<div class="hint">${sonstigeHinweise.map(esc).join('<br>')}</div>`;
+    fbox.appendChild(h);
+  }
+  // Rote Pruefungen mit Grund (Plausibilitaet/Datum/Lieferanten-Gedaechtnis,
+  // Aaron 10.10.2026) -- die betroffenen Felder stehen zusaetzlich rot.
+  const rote = (d.checks || STATE.checks || []).filter(c => c.ok === false);
+  if (rote.length) {
+    const h = document.createElement('div'); h.className = 'box';
+    h.innerHTML = '<h4>Prüfungen rot</h4>' + rote.map(c =>
+      `<div class="chk bad">✗ ${esc(c.name)}${c.detail ? ': ' + esc(c.detail) : ''}</div>`).join('');
     fbox.appendChild(h);
   }
 
@@ -2145,6 +2166,22 @@ let TESTSATZ_TIMER = null;
 
 async function loadQualitaet() {
   loadTestsatz();
+  const d = await api('/api/qualitaet');
+  $('#q-prof-min').textContent = d.min_rechnungen;
+  const geld = v => v == null ? '' : Number(v).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  $('#q-profile').innerHTML = !d.profile.length ? '<p class="hint">Noch keine bestätigten Rechnungen.</p>' :
+    '<table><tr><th>Lieferant</th><th class="num">Rechnungen</th><th>aktiv</th><th>Steuersätze</th>' +
+    '<th>Währung</th><th class="num">Brutto Median</th><th class="num">min</th><th class="num">max</th>' +
+    '<th>Rechnungsnummer</th><th class="num">Zahlungsziel</th></tr>' +
+    d.profile.map(p => { const m = p.rechnungsnummer || {}, b = p.brutto || {};
+      return `<tr><td>${esc(p.lieferant_name || p.lieferant)}</td><td class="num">${p.rechnungen}</td>
+        <td>${p.aktiv ? '✓' : '<span class="hint">noch nicht</span>'}</td>
+        <td>${esc((p.steuersaetze || []).map(x => String(x).replace('.', ',') + ' %').join(', '))}</td>
+        <td>${esc((p.waehrungen || []).join(', '))}</td>
+        <td class="num">${geld(b.median)}</td><td class="num">${geld(b.min)}</td><td class="num">${geld(b.max)}</td>
+        <td>${esc(m.beispiel || '')}${m.geruest ? ` <span class="hint">(${esc(m.geruest)}${m.fortlaufend ? ', fortlaufend' : ''})</span>` : ''}</td>
+        <td class="num">${p.zahlungsziel_tage == null ? '' : p.zahlungsziel_tage + ' Tage'}</td></tr>`; }).join('') +
+    '</table>';
 }
 
 async function loadTestsatz() {

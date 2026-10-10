@@ -18,6 +18,7 @@ from . import einvoice
 from . import jobrouter
 from . import ocr
 from . import pdf as pdfmod
+from . import plausi
 from . import positionen
 from . import rechnen
 from . import semantic
@@ -807,6 +808,9 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
                 cs = _replace_check(cs, bc)
             for wc in waehrung.checks(fields, pdf_text):
                 cs = _replace_check(cs, wc)
+            for pc in plausi.checks(fields, supplier.id if supplier is not None else None,
+                                    store, res.sha256):
+                cs = _replace_check(cs, pc)
             return _replace_check(cs, _iban_master_check(supplier, invoice_ibans, fields)) + [addr_check]
 
         res.checks = checks_for(res.fields)
@@ -1074,6 +1078,9 @@ def _all_checks(fields, supplier, store: Store, line_items, doc,
         checks = _replace_check(checks, wc)
     for qc in swissqr.checks(fields, qr, supplier):
         checks = _replace_check(checks, qc)
+    for pc in plausi.checks(fields, supplier.id if supplier is not None else None, store,
+                            doc.sha256):
+        checks = _replace_check(checks, pc)
     checks = [_credit_check(c, fields) for c in checks]
     return checks + list(extra or [])
 
@@ -1160,9 +1167,31 @@ def _positionsmodus_hinweis(res: "Result", supplier: Supplier | None) -> None:
             res.hinweise.append(_LANGER_BELEG_HINWEIS)
 
 
+def _qualitaet(res: Result, store: Store) -> None:
+    """Gelbe Hinweise aus dem Lieferanten-Gedaechtnis/Datum (plausi.py) an
+    jedes Ergebnis haengen -- blockieren nichts (Aaron 10.10.2026)."""
+    if res.aborted:
+        return
+    for h in plausi.hinweise(res.fields, res.line_items, res.supplier_id, store, res.sha256):
+        if h not in res.hinweise:
+            res.hinweise.append(h)
+
+
 def process(path: str | Path, store: Store, use_llm: bool = True,
-           create_draft_supplier: bool = False,
-           variante: str = semantic.VARIANTE_A) -> Result:
+            create_draft_supplier: bool = False,
+            variante: str = semantic.VARIANTE_A) -> Result:
+    """Eine Rechnung verarbeiten (``_process``) und danach die Qualitaets-
+    Hinweise anhaengen (Lieferanten-Gedaechtnis, Datum) -- an einer Stelle
+    statt an jedem der vielen Ausgaenge von ``_process``."""
+    res = _process(path, store, use_llm=use_llm, create_draft_supplier=create_draft_supplier,
+                   variante=variante)
+    _qualitaet(res, store)
+    return res
+
+
+def _process(path: str | Path, store: Store, use_llm: bool = True,
+             create_draft_supplier: bool = False,
+             variante: str = semantic.VARIANTE_A) -> Result:
     """``create_draft_supplier`` (Standard ``False``): legt bei einem nicht
     erkannten Lieferanten einen Entwurf an (``Supplier.bestaetigt=False``,
     Entscheidung Aaron 09.10.2026) -- nur in der echten Verarbeitung

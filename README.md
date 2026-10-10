@@ -597,6 +597,31 @@ letzten gespeicherten Lauf um mehr als 2 Prozentpunkte → zurückgerollt mit
 Grund. `RECHNUNG_UPDATE_TESTSATZ=0` schaltet ab; Standard sind nur Testfälle
 ohne KI (Vorlage/E-Rechnung), `=voll` nimmt alle.
 
+### 2. Lieferanten-Gedächtnis + Plausibilität (inkl. Datum)
+
+`plausi.py` leitet je Lieferant aus den bestätigten Rechnungen (dieselben
+Soll-Werte wie der Testsatz) ein Profil ab -- übliche Steuersätze, Währung,
+Brutto-Spanne (Median/min/max), Muster der Rechnungsnummer (Gerüst aus
+Buchstaben-/Ziffernblöcken, Präfix, Stellen je Block, fortlaufend?),
+Zahlungsziel. Aktiv ab 3 bestätigten Rechnungen; die Rechnung selbst zählt
+nie zu ihrem eigenen Profil. Anzeige im Reiter „Qualität“.
+
+| Prüfung | Ergebnis |
+|---|---|
+| Brutto > 3× Maximum / < ⅓ Minimum | Hinweis |
+| Brutto > 10× Maximum / < 1/10 Minimum (Komma/Stelle) | **rot** `betrag-ueblich` |
+| Rechnungsnummer passt nicht zum Muster (O statt 0, Stelle fehlt, anderes Präfix) | **rot** `rechnungsnummer-muster` |
+| Rechnungsnummer ≤ einer bestätigten bei fortlaufendem Muster | Hinweis |
+| Steuersatz/Währung, die der Lieferant nie verwendet | Hinweis |
+| Rechnungsdatum > 1 Tag in der Zukunft (mit Verdacht „Jahreszahl-Dreher 2062 statt 2026“) | **rot** `rechnungsdatum-plausibel` (vorher 14 Tage Toleranz) |
+| Rechnungsdatum älter als 1 Jahr | Hinweis (älter als 10 Jahre weiterhin rot) |
+| Fälligkeit vor Rechnungsdatum | **rot** `faelligkeit-plausibel` |
+
+Rote Prüfungen schicken die Rechnung wie alle anderen roten Prüfungen zum
+Menschen (auch im Schattenbetrieb); in der Prüfmaske steht das betroffene
+Feld rot mit Grund darunter, oben eine Box „Prüfungen rot“. Gutschriften
+werden bei der Betragsspanne nicht bewertet.
+
 ## Härtung (v1.3)
 
 Nach einer Risiko-Durchsicht ergänzt: mehrdeutige Lieferanten-/Anker-Treffer

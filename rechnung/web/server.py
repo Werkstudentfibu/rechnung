@@ -696,6 +696,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             # ``hold_reasons`` ohne "ACHTUNG".
             "hinweise": res.hinweise,
             "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in res.checks],
+            "rote_felder": human.rote_felder(res.checks),
             "ocr": res.ocr,
         })
 
@@ -745,6 +746,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "status_label": STATUS_LABELS.get(res.status, res.status),
             "hold_reasons": res.hold_reasons,
             "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in res.checks],
+            "rote_felder": human.rote_felder(res.checks),
             "pages": pages,
             "match": ({"id": res.supplier_id, "name": res.supplier_name,
                        "score": res.match_score} if res.supplier_id else None),
@@ -1346,6 +1348,14 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         letzter = testsatz.letzter_bericht(store.root)
         return JSONResponse({"lauf": dict(testsatz_lauf), "letzter": letzter,
                              "faelle": len(testsatz.faelle(store)[0])})
+
+    @app.get("/api/qualitaet")
+    def qualitaet_ep() -> JSONResponse:
+        """Reiter "Qualitaet": Lieferanten-Gedaechtnis (plausi.py)."""
+        from .. import plausi
+
+        return JSONResponse({"profile": plausi.profile(store),
+                             "min_rechnungen": plausi.MIN_RECHNUNGEN})
 
     @app.post("/api/testsatz")
     def testsatz_start() -> JSONResponse:

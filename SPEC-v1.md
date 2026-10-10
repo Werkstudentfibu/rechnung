@@ -1318,6 +1318,17 @@ Entscheidung Aaron 10.10.2026 ("alle 5 Punkte"). Reiter "Qualität" im UI.
    Rückgang > 2 Prozentpunkte → zurückrollen; neuer Bezug wird erst nach
    bestandenem Vergleich gespeichert. `RECHNUNG_UPDATE_TESTSATZ=0|voll`.
 
+2. **Lieferanten-Gedächtnis** (`plausi.py`): Profil aus `testsatz.bestaetigte`
+   je Lieferant (ab 3 Rechnungen, eigene sha ausgenommen, gecacht über
+   Dateistand von `data/testsatz/`, `processed.jsonl`, `confirmations.jsonl`).
+   Rote Checks `betrag-ueblich` (Faktor 10), `rechnungsnummer-muster`,
+   `faelligkeit-plausibel` in `pipeline._all_checks` bzw. E-Rechnungs-
+   `checks_for` (wirken damit auf `human.gruende` und `shadow.decide`);
+   Hinweise (Faktor 3, fortlaufend, Satz, Währung, Datum > 1 Jahr) über
+   `pipeline._qualitaet` (Wrapper um `_process`). `validate.check_date`:
+   Zukunftstoleranz 1 Tag statt 14, Jahreszahl-Dreher im Grund. UI: rote
+   Felder mit Grund (`human.rote_felder`, `/api/invoice` → `rote_felder`).
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).

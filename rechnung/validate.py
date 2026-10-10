@@ -99,8 +99,30 @@ def check_date(fields: dict, today: date | None = None) -> Check:
     if d is None:
         return Check("rechnungsdatum-plausibel", False, "nicht parsebar")
     today = today or date.today()
-    ok = (today - timedelta(days=3650)) <= d <= (today + timedelta(days=14))
-    return Check("rechnungsdatum-plausibel", ok, d.isoformat())
+    # Zukunft: hoechstens 1 Tag Toleranz (Zeitzone/Ausstellung am Abend
+    # vorher) -- frueher 14 Tage, Aaron 10.10.2026: ein Datum in der Zukunft
+    # ist fast immer falsch gelesen, oft ein Jahreszahl-Dreher (2062/2026).
+    if d > today + timedelta(days=1):
+        grund = f"{d.isoformat()} liegt in der Zukunft"
+        dreher = _jahres_dreher(d.year, today.year)
+        if dreher:
+            grund += f" -- Jahreszahl-Dreher? {d.year} statt {dreher}"
+        return Check("rechnungsdatum-plausibel", False, grund)
+    if d < today - timedelta(days=3650):
+        return Check("rechnungsdatum-plausibel", False,
+                     f"{d.isoformat()} aelter als 10 Jahre")
+    # aelter als 1 Jahr: nur Hinweis (plausi.datum_hinweise), nicht rot
+    return Check("rechnungsdatum-plausibel", True, d.isoformat())
+
+
+def _jahres_dreher(jahr: int, heute: int) -> int | None:
+    """2062 -> 2026 (letzte zwei Ziffern vertauscht), wenn das Ergebnis ein
+    plausibles Jahr (dieses oder letztes) ist."""
+    s = str(jahr)
+    if len(s) != 4:
+        return None
+    t = int(s[:2] + s[3] + s[2])
+    return t if t != jahr and heute - 1 <= t <= heute else None
 
 
 def check_duplicate(fields: dict, supplier_id: str | None, seen) -> Check:

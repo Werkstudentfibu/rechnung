@@ -71,6 +71,10 @@ _CHECK_FIELDS = {
     "iban-stammdaten": ("iban",),
     "ustid-stammdaten": ("ustid",),
     "rechnungsdatum-plausibel": ("rechnungsdatum",),
+    # Lieferanten-Gedaechtnis/Plausibilitaet (plausi.py, Aaron 10.10.2026)
+    "betrag-ueblich": ("brutto",),
+    "rechnungsnummer-muster": ("rechnungsnummer",),
+    "faelligkeit-plausibel": ("faelligkeit",),
     "keine-dublette": ("rechnungsnummer",),
     "ust-aufstellung-summe": ("ust_aufstellung",),
     "positionen-summe": ("netto",),
@@ -177,6 +181,18 @@ def gruende(res) -> list[dict]:
         out.append({"art": ART_UNSICHER,
                     "grund": f"Wert unsicher (Konfidenz < {CONF_MIN:g}): " + ", ".join(unsure),
                     "felder": unsure})
+    return out
+
+
+def rote_felder(checks) -> dict[str, list[str]]:
+    """Feld -> Gruende roter Pruefungen (Anzeige: Feld rot + Grund in der
+    Pruefmaske, Aaron 10.10.2026)."""
+    out: dict[str, list[str]] = {}
+    for c in checks or []:
+        if c.ok is not False:
+            continue
+        for f in _CHECK_FIELDS.get(c.name, ()):
+            out.setdefault(f, []).append(f"{c.name}: {c.detail}" if c.detail else c.name)
     return out
 
 
