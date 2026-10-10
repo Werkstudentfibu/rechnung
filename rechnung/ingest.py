@@ -245,6 +245,11 @@ class MailOutcome:
     # kein eigener Beleg, sondern an jeden Beleg dieser Mail gehaengt
     # (Postfach-Baustein 8): (Dateiname, Inhalt, Anlagenart)
     anlagen: list[tuple[str, bytes, str]] = field(default_factory=list)
+    # Herkunft fuer den Lieferanten-Hinweis (mailherkunft.py, Effizienz-
+    # Baustein 1): urspruenglicher Absender (bei Weiterleitung aus dem
+    # zitierten Kopf/der angehaengten Mail), Domain, Datum
+    ursprung: dict = field(default_factory=dict)
+    datum: str = ""
 
 
 def _classify_attachment(att: Attachment) -> tuple[str, str | None, str]:
@@ -280,7 +285,8 @@ def analyse_mail(raw: bytes, extensions: tuple[str, ...] = (".pdf",)) -> MailOut
     msg = email.message_from_bytes(raw)
     out = MailOutcome(from_addr=_decoded_header(msg, "From"),
                       subject=_decoded_header(msg, "Subject"),
-                      message_id=msg.get("Message-ID", "").strip())
+                      message_id=msg.get("Message-ID", "").strip(),
+                      datum=(msg.get("Date") or "").strip())
     if _is_encrypted(msg):
         out.human_reason = MAIL_VERSCHLUESSELT
         return out
@@ -334,6 +340,7 @@ def analyse_mail(raw: bytes, extensions: tuple[str, ...] = (".pdf",)) -> MailOut
             out.human_items.append((att.filename, att.content, grund))
 
     if out.attachments or out.human_items:
+        out.ursprung = _ursprung(msg, out.from_addr)
         return out
     out.ignored = [_safe_name(f) for _p, f, is_att in _parts(msg)
                    if is_att and f and not f.lower().endswith(exts)]
@@ -349,6 +356,39 @@ def analyse_mail(raw: bytes, extensions: tuple[str, ...] = (".pdf",)) -> MailOut
     if out.ignored:
         out.human_reason += " (nicht verwertbare Anhaenge: " + ", ".join(out.ignored) + ")"
     return out
+
+
+def _ursprung(msg: Message, von: str) -> dict:
+    """Urspruenglicher Absender (mailherkunft.ursprung) -- den Mailtext nur
+    lesen, wenn die Mail von einer eigenen Domain kommt (Weiterleitung)."""
+    from . import mailherkunft
+
+    if not mailherkunft.eigen(mailherkunft.domain_von(von)):
+        return mailherkunft.ursprung(msg, von, "")
+    try:
+        body, _links = mail_body(msg)
+    except Exception:  # noqa: BLE001 -- Herkunft ist nur ein Hinweis
+        body = ""
+    return mailherkunft.ursprung(msg, von, body)
+
+
+def _herkunft_merken(store, content: bytes, out: MailOutcome) -> None:
+    """Herkunft je gespeichertem Anhang festhalten (``data/herkunft/<sha>.
+    json``) -- auch beim Duplikat, falls fuer diesen Inhalt noch keine
+    vorliegt; eine vorhandene wird nie ueberschrieben. Fehler hier halten
+    die Abholung nicht auf (nur ein Hinweis)."""
+    from . import mailherkunft
+
+    u = out.ursprung or {}
+    rec = {"von": u.get("von") or out.from_addr, "domain": u.get("domain", ""),
+           "weitergeleitet_von": u.get("weitergeleitet_von", ""),
+           "grund": u.get("grund", ""), "betreff": out.subject,
+           "message_id": out.message_id, "datum": out.datum,
+           "abgeholt": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    try:
+        mailherkunft.merken(store.root, hashlib.sha256(content).hexdigest(), rec)
+    except OSError:
+        pass
 
 
 def _pdf_locked(content: bytes) -> bool:
@@ -501,6 +541,8 @@ def handle_mail(raw: bytes, cfg: ImapConfig, dest: Path, store=None,
                         + (f" (+{len(out.anlagen)} Anlage(n))" if out.anlagen else ""))
             continue
         gespeichert = _save(att, dest)
+        store = store or Store(data_dir())
+        _herkunft_merken(store, att.content, out)
         if gespeichert is None:   # identische Rechnung schon da
             continue
         saved.append(str(gespeichert))

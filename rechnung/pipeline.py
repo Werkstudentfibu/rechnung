@@ -16,6 +16,7 @@ from . import billing
 from . import dubletten
 from . import einvoice
 from . import jobrouter
+from . import mailherkunft
 from . import ocr
 from . import pdf as pdfmod
 from . import pflicht
@@ -34,7 +35,8 @@ from .config import operator as _operator
 from .identify import (DEFAULT_CURRENCY, EXPECTED_RATES, FIXED_FIELD_TYPES, IBAN_DEVIATES,
                        NEW_SUPPLIER_HOLD, POSITIONSMODI, POSITIONSMODUS_EINE_POSITION,
                        POSITIONSMODUS_EINZELN, POSITIONSMODUS_ZUSAMMENFASSUNG, Supplier,
-                       _address_scope_reason, _detect_currency, cross_check,
+                       _address_scope_reason, _detect_currency, build_identifier_index,
+                       cross_check,
                        extract_identifiers, identify_einvoice, identify_with_reason, kandidaten)
 from .store import Store
 from .suggest import suggest_category
@@ -163,6 +165,14 @@ class Result:
     # Pflichtangaben-Pruefung (pflicht.py, Aaron 10.10.2026): reine
     # Hinweis-Gruppe {regelwerk, punkte, fehlt}, nie ein Rueckstellgrund
     pflichtangaben: dict | None = None
+    # Herkunft aus dem Postfach (mailherkunft.py, Effizienz-Baustein 1):
+    # {von, domain, betreff, datum, weitergeleitet_von, hinweis} -- nur
+    # Anzeige/Hinweis, nie Identitaet; None, wenn nicht aus dem Postfach
+    absender: dict | None = None
+    # Absender-Domain passt zu genau einem Lieferanten, die Rechnung selbst
+    # aber zu keinem: Vorschlag {id, name, grund} fuer den Menschen (die
+    # Rechnung bleibt zurueckgestellt, es wird nichts zugeordnet)
+    lieferant_vorschlag: dict | None = None
     # Rechnungstext fuer die Nachlauf-Pruefungen in ``process`` -- wird dort
     # wieder geleert (nicht mit dem Ergebnis herumtragen)
     _pruef_text: str = field(default="", repr=False)
@@ -193,6 +203,8 @@ class Result:
             "qr": self.qr,
             "anlagen": self.anlagen,
             "pflichtangaben": self.pflichtangaben,
+            "absender": self.absender,
+            "lieferant_vorschlag": self.lieferant_vorschlag,
             "duration_s": self.duration_s,
             "aborted": self.aborted,
             "stufenzeiten": self.stufenzeiten,
@@ -424,6 +436,78 @@ def _billing_check(text: str, store: Store, res: "Result") -> Check:
     res.billing_address_id = hit[0].id
     res.billing_address_name = hit[0].name
     return Check("rechnungsadresse", True, hit[0].name)
+
+
+# ---- Absender der Mail als Lieferanten-Hinweis (Effizienz-Baustein 1,
+# Entscheidung Aaron 10.10.2026) --------------------------------------------
+
+ABSENDER_WIDERSPRUCH = "Absender-Domain passt zu einem anderen Lieferanten"
+
+
+def _absender(res: "Result", store: Store) -> str:
+    """Herkunft aus dem Postfach an das Ergebnis haengen -> verwendbare
+    Absender-Domain fuer den Abgleich ('' = kein Hinweis)."""
+    rec = mailherkunft.fuer_beleg(store, res.sha256, res.sammel)
+    res.absender = mailherkunft.anzeige(rec)
+    return mailherkunft.hinweis_domain(rec)
+
+
+def _absender_abgleich(res: "Result", store: Store, dom: str, supplier,
+                       ustids: set[str], ibans: set[str], why: str = "") -> None:
+    """Absender-Domain gegen die Lieferanten unter der erkannten
+    Rechnungsadresse (``identify.kandidaten``). Nie Identitaet:
+
+    - Lieferant erkannt, Domain gehoert aber genau einem ANDEREN Lieferanten
+      -> deutliche Warnung (Widerspruch Domain <-> USt-IdNr/IBAN; geht wie
+      jede Warnung bis nach JobRouter, im Schattenbetrieb nie "wuerde
+      durchlassen").
+    - Kein Lieferant erkannt, Domain passt zu genau einem und keine Kennung
+      der Rechnung gehoert einem anderen (Betrugsschutz) -> Vorschlag fuer
+      den Menschen, die Rechnung bleibt zurueckgestellt."""
+    if not dom:
+        return
+    from .textnorm import norm_ustid
+
+    cands = kandidaten(store.suppliers(), res.billing_address_id, bool(store.addresses()))
+    hits = [s for s in cands if mailherkunft.passt(dom, s)]
+    if len(hits) != 1:
+        return
+    hit = hits[0]
+    if supplier is not None:
+        if hit.id != supplier.id and not mailherkunft.passt(dom, supplier):
+            warn = (f"ACHTUNG {ABSENDER_WIDERSPRUCH}: Mail von {dom} ({hit.name}), "
+                    f"Rechnung (USt-IdNr/IBAN) von {supplier.name} -- vor Zahlung pruefen!")
+            if warn not in res.warnings:
+                res.warnings.append(warn)
+            res.absender = dict(res.absender or {}, widerspruch=hit.id)
+        return
+    if why.startswith("mehrdeutig"):
+        return
+    fremd = set()
+    idx = build_identifier_index(store.suppliers())
+    for u in ustids:
+        fremd |= idx.get(("ustid", norm_ustid(u)), set())
+    for i in ibans:
+        fremd |= idx.get(("iban", compact(i).upper()), set())
+    if fremd - {hit.id}:
+        return
+    res.lieferant_vorschlag = {"id": hit.id, "name": hit.name,
+                               "grund": f"Absender-Domain {dom}"}
+    h = (f"Absender {dom} passt zu Lieferant {hit.name} ({hit.id}) -- nur Vorschlag, "
+         f"bitte pruefen und zuordnen")
+    if h not in res.hinweise:
+        res.hinweise.append(h)
+
+
+def _absender_schatten(res: "Result") -> None:
+    """Widerspruch Absender <-> Rechnung: im Schattenbetrieb nie "wuerde
+    durchlassen" (reine Messung, aendert den Status nicht)."""
+    if not (res.absender or {}).get("widerspruch") or res.shadow is None:
+        return
+    res.shadow["would_pass"] = False
+    grund = ABSENDER_WIDERSPRUCH
+    if grund not in (res.shadow.get("reasons") or []):
+        res.shadow["reasons"] = list(res.shadow.get("reasons") or []) + [grund]
 
 
 def _apply_hold(res: "Result") -> None:
@@ -735,6 +819,7 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
         has_addr = bool(store.addresses())
         candidates = kandidaten(store.suppliers(), res.billing_address_id, has_addr)
         match = identify_einvoice(inv, candidates)
+        dom = _absender(res, store)
         if not match and create_draft_supplier:
             match = _auto_draft_einvoice(res, inv, store)
         supplier = None
@@ -754,6 +839,9 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
                                           "kein Lieferant aus der Bibliothek passt")
             res.hold_reasons.append(f"Lieferant: {grund}{named}")
         invoice_ibans = set(inv.verkaeufer_iban) | find_ibans(pdf_text)
+        _absender_abgleich(res, store, dom, supplier,
+                           {inv.verkaeufer_ustid} if inv.verkaeufer_ustid else set(),
+                           invoice_ibans)
 
     def put(name: str, value, raw: str | None = None) -> None:
         if value is None or value == "" or value == []:
@@ -1203,6 +1291,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
     statt an jedem der vielen Ausgaenge von ``_process``."""
     res = _process(path, store, use_llm=use_llm, create_draft_supplier=create_draft_supplier,
                    variante=variante)
+    _absender_schatten(res)
     _qualitaet(res, store)
     return res
 
@@ -1293,11 +1382,18 @@ def _process(path: str | Path, store: Store, use_llm: bool = True,
     with timer.stage("lieferant"):
         addr_check = _billing_check(doc.text, store, res)
         has_addr = bool(store.addresses())
+        dom = _absender(res, store)
         match, why = identify_with_reason(
             doc, store.suppliers(), index=store.supplier_index(res.billing_address_id),
             address_id=res.billing_address_id, has_addresses=has_addr,
-            address_name=res.billing_address_name or "")
-        if not match and create_draft_supplier:
+            address_name=res.billing_address_name or "", absender_domain=dom)
+        if dom:
+            ids = extract_identifiers(doc)
+            _absender_abgleich(res, store, dom, match[0] if match else None,
+                               ids["ustids"], ids["ibans"] | find_ibans(doc.text), why)
+        # Absender passt eindeutig zu einem bekannten Lieferanten: Vorschlag
+        # statt eines zweiten (Entwurfs-)Lieferanten fuer dieselbe Firma
+        if not match and create_draft_supplier and res.lieferant_vorschlag is None:
             match = _auto_draft_pdf(res, doc, store, use_llm, timer)
     if not match:
         res.hold_reasons.insert(0, f"Lieferant: {why}")
@@ -1758,6 +1854,11 @@ def confirm_supplier(store: Store, supplier_id: str, operator: str = "") -> Supp
         op = operator or _op()
         store.audit("lieferant_bestaetigt", {"id": supplier_id, "name": sup.name}, op)
         eventlog.record_supplier(store, supplier_id, sup.name, "bestaetigt", op)
+        # Absender-Domain der Rechnung, aus der der Entwurf entstand, lernen
+        # (Effizienz-Baustein 1; nur nicht-eigene, nicht-Freemail/Portal)
+        if sup.entwurf_quelle and mailherkunft.lerne_domain(store, supplier_id,
+                                                            sup.entwurf_quelle, op):
+            sup = store.supplier(supplier_id) or sup
     return sup
 
 

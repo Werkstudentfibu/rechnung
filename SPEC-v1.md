@@ -1353,6 +1353,30 @@ Entscheidung Aaron 10.10.2026 ("alle 5 Punkte"). Reiter "Qualität" im UI.
    Rechnungen und Anteil ≥ 0,5, Empfehlung je Feldart. Im Nachtlauf-Bericht
    (`fehlerstatistik`) und in `rechnung nacht` (Top 5).
 
+## 7ad. Effizienz: schneller bei gleich niedriger Fehlerquote (2026-10-10)
+
+Entscheidung Aaron 10.10.2026. Leitlinie: die Fehlerquote darf nicht steigen;
+jeder Baustein ist per `RECHNUNG_…` abschaltbar und mit dem Testsatz (§7ac)
+vorher/nachher gemessen (`tools/effizienz_messung.py`: synthetischer
+Testsatz, Zeit, Trefferquote je Feld, KI-/Tesseract-Aufrufe).
+
+1. **Absender als Lieferanten-Hinweis** (`mailherkunft.py`): Registry
+   `data/herkunft/<sha>.json` beim Abholen (`ingest.handle_mail`, auch im
+   Duplikat-Fall, nie überschreiben). Weiterleitung von
+   `RECHNUNG_EIGENE_DOMAINS` → ursprünglicher Absender aus message/rfc822 bzw.
+   zitiertem "Von:/From:", nur bei genau einem fremden Absender. Freemail/
+   Portale (`PORTALE` + `RECHNUNG_PORTAL_DOMAINS`) nie. `identify_with_reason
+   (absender_domain=…)`: zählt wie eine Domain im Text (+0,3, Schwelle 0,5)
+   → nie allein Identität. `pipeline._absender_abgleich`: Kandidaten über
+   `identify.kandidaten`; Treffer ≠ Domain-Lieferant → Warnung in
+   `res.warnings` + Schatten nie "würde durchlassen"; kein Treffer, Domain
+   eindeutig, keine Kennung eines anderen Lieferanten (globaler Index) →
+   `res.lieferant_vorschlag` + Hinweis, kein Entwurf. Lernen
+   (`mailherkunft.lerne_domain`) in `confirm_supplier` (Entwurfsquelle) und
+   beim Bestätigen einer Rechnung, nur wenn die Domain keinem anderen
+   Lieferanten gehört (Audit `lieferant_domain_gelernt`). Schalter
+   `RECHNUNG_ABSENDER_HINWEIS` (Standard 1). Ergebnis/UI: `absender`.
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).

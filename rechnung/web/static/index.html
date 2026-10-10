@@ -396,6 +396,9 @@ function applyInvoiceData(d) {
     detectedAddress: d.detected_address || null,
     holdReasons: d.hold_reasons || [], statusLabel: d.status_label || '',
     hinweise: d.hinweise || [],
+    // Absender der Mail (Effizienz-Baustein 1) + ggf. Lieferanten-Vorschlag
+    absender: d.absender || null, lieferantVorschlag: d.lieferant_vorschlag || null,
+    warnungen: d.warnungen || [],
     pflichtangaben: d.pflichtangaben || null,
     // rote Pruefungen (Plausibilitaet, Datum, Lieferanten-Gedaechtnis, ...)
     checks: d.checks || [], roteFelder: d.rote_felder || {},
@@ -754,6 +757,14 @@ function renderInvoice(d) {
     h.innerHTML = `<b>${esc(holdLabel || 'zurückgestellt – menschlich bearbeiten')}</b><br>${holdReasons.map(esc).join('<br>')}`;
     fbox.appendChild(h);
   }
+  // Warnungen (z.B. Absender-Domain gehoert zu einem anderen Lieferanten,
+  // IBAN-Abweichung im Modus "warnen") -- gehen bis nach JobRouter
+  const warnungen = d.warnungen || STATE.warnungen || [];
+  if (warnungen.length) {
+    const h = document.createElement('div'); h.className = 'holdbox';
+    h.innerHTML = warnungen.map(esc).join('<br>');
+    fbox.appendChild(h);
+  }
   // Hinweise (blockieren nichts, z.B. Skonto gestaffelt, Gegencheck
   // uebersprungen) -- der "Langer Beleg"-Vorschlag steht gezielt bei
   // "Positionsdaten" (renderPositionsmodusAuswahl), hier nicht doppelt.
@@ -811,6 +822,14 @@ function renderInvoice(d) {
 
   // Lieferant
   const supO = d.supplier || null;
+  // Absender der Mail -- dezent, nur Hinweis (nie Identitaet)
+  const abs = d.absender !== undefined ? d.absender : STATE.absender;
+  const absVorschlag = d.lieferant_vorschlag !== undefined ? d.lieferant_vorschlag : STATE.lieferantVorschlag;
+  const absZeile = abs && abs.von ? `<div class="hint">Absender: ${esc(abs.von)}`
+      + (abs.weitergeleitet_von ? ` (weitergeleitet von ${esc(abs.weitergeleitet_von)})` : '')
+      + (abs.betreff ? ` – „${esc(abs.betreff)}“` : '')
+      + (absVorschlag && !supO ? `<br>passt zu <b>${esc(absVorschlag.name)}</b> (${esc(absVorschlag.id)}) – nur Vorschlag, über „Suchen...“ zuordnen` : '')
+      + '</div>' : '';
   const lA = supO && (supO.address_lines || []).length ? splitAdresse(supO.address_lines)
            : splitAdresse(kiL.address_lines || []);
   const lName = supO && !/^Unbekannt\b/.test(supO.name || '') ? supO.name : (kiL.name || (supO ? supO.name : '') || '');
@@ -831,6 +850,7 @@ function renderInvoice(d) {
     <div class="ab-row2">${abFeld('Bankkonto', 'ls-konto', supO ? (supO.bank_account || '') : '', lCls, lRO)}${abFeld('Bankleitzahl', 'ls-blz', supO ? (supO.bank_code || supO.bic || kiL.bic || '') : (kiL.bic || ''), lCls, lRO)}</div>
     <div class="hint">${supO && !isDraft ? (d.match && d.match.score != null ? `erkannt (${d.match.score})` : 'gewählt') + ' – Stammdaten ändern im Reiter „Lieferanten“'
       : (lName || lIban || lUst) ? 'Von der Rechnung gelesen (teils KI) – bitte prüfen.' : 'Kein Lieferant erkannt – über „Suchen...“ wählen.'}</div>
+    ${absZeile}
     ${isDraft ? `<button onclick="lieferantSpeichern(true)">✓ Lieferant bestätigen</button>
                  <button class="danger" onclick="discardDraftSupplier()">Entwurf verwerfen</button>`
       : !supO && (lName || lIban || lUst) ? `<button onclick="lieferantSpeichern(false)">✓ Als Lieferant anlegen</button>` : ''}`);

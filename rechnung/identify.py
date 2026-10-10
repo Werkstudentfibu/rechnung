@@ -287,16 +287,29 @@ def _address_scope_reason(has_addresses: bool, address_id: str | None,
 def identify(doc: Document, suppliers: list[Supplier], threshold: float = 0.5,
             min_margin: float = 0.15, index: dict | None = None,
             address_id: str | None = None, has_addresses: bool = False,
-            address_name: str = ""):
+            address_name: str = "", absender_domain: str = ""):
     """-> (Supplier, score) oder None. Kurzform von ``identify_with_reason``."""
     return identify_with_reason(doc, suppliers, threshold, min_margin, index,
-                                address_id, has_addresses, address_name)[0]
+                                address_id, has_addresses, address_name,
+                                absender_domain)[0]
+
+
+def _domain_passt(ids: dict, s: Supplier, absender_domain: str) -> bool:
+    """Mail-Domain auf der Rechnung ODER Absender-Domain der Mail
+    (mailherkunft.py, Effizienz-Baustein 1) gehoert zum Lieferanten --
+    zaehlt einmal, nicht doppelt."""
+    if ids["domains"] & set(s.domains):
+        return True
+    if not absender_domain:
+        return False
+    from .mailherkunft import passt
+    return passt(absender_domain, s)
 
 
 def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: float = 0.5,
                          min_margin: float = 0.15, index: dict | None = None,
                          address_id: str | None = None, has_addresses: bool = False,
-                         address_name: str = ""):
+                         address_name: str = "", absender_domain: str = ""):
     """-> ((Supplier, score) oder None, Grund).
 
     Die Lieferanten-Identitaet kommt ausschliesslich aus der Bibliothek
@@ -335,6 +348,12 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
     sicherer Treffer" als eine mehrdeutige Zuordnung zu raten (verhindert
     eine stille Verwechslung zwischen zwei Lieferanten mit aehnlichem
     Kopf-Layout, z.B. derselben Buchhaltungssoftware).
+
+    ``absender_domain`` (Effizienz-Baustein 1, Aaron 10.10.2026): Domain des
+    Mail-Absenders (nur eine verwendbare, ``mailherkunft.hinweis_domain``)
+    zaehlt im Scoring wie eine auf der Rechnung gedruckte Mail-Domain (0,3 <
+    Schwelle 0,5) -- nie allein die Identitaet, es braucht immer noch ein
+    weiteres Indiz (Name, Kopf-Layout, Kennung).
     """
     suppliers = kandidaten(suppliers, address_id, has_addresses)
     if not suppliers:
@@ -362,7 +381,7 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
             score += 0.6
         if ids["ibans"] & set(s.ibans):
             score += 0.5
-        if ids["domains"] & set(s.domains):
+        if _domain_passt(ids, s, absender_domain):
             score += 0.3
         if s.name and norm(s.name) in text_n:
             score += 0.2
@@ -373,7 +392,7 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
     scored: list[tuple[Supplier, float]] = []
     for s in suppliers:
         score = 0.0
-        if ids["domains"] & set(s.domains):
+        if _domain_passt(ids, s, absender_domain):
             score += 0.3
         if s.name and norm(s.name) in text_n:
             score += 0.2

@@ -22,6 +22,7 @@ from .. import einvoice
 from .. import eventlog
 from .. import human
 from .. import learn
+from .. import mailherkunft
 from .. import pdf as pdfmod
 from .. import positionen
 from .. import rechnen
@@ -478,8 +479,12 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         ]
         suggestion = supplier_from_doc(doc, "", "").to_dict()
         addr_match, address_id, has_addr = _address_scope(doc, override=address)
+        # Absender der Mail als Hinweis wie in der Pipeline (Effizienz-Baustein 1)
+        absender_dom = mailherkunft.hinweis_domain(
+            mailherkunft.fuer_beleg(store, doc.sha256, split.part_info(store, doc.sha256)))
         match = identify(doc, store.suppliers(), index=store.supplier_index(address_id),
-                         address_id=address_id, has_addresses=has_addr)
+                         address_id=address_id, has_addresses=has_addr,
+                         absender_domain=absender_dom)
         current = {}
         tid = None
         # Vorbelegt mit der erkannten/uebersteuerten Adresse, damit das
@@ -698,6 +703,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in res.checks],
             "rote_felder": human.rote_felder(res.checks),
             "pflichtangaben": res.pflichtangaben,
+            "absender": res.absender,
+            "lieferant_vorschlag": res.lieferant_vorschlag,
+            "warnungen": res.warnings,
             "ocr": res.ocr,
         })
 
@@ -749,6 +757,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in res.checks],
             "rote_felder": human.rote_felder(res.checks),
             "pflichtangaben": res.pflichtangaben,
+            "absender": res.absender,
+            "warnungen": res.warnings,
             "pages": pages,
             "match": ({"id": res.supplier_id, "name": res.supplier_name,
                        "score": res.match_score} if res.supplier_id else None),
@@ -957,6 +967,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         # Stufe 1: aus den eben bestaetigten Werten das Template ergaenzen/
         # praezisieren (gesicherte Templates werden nur ergaenzt).
         learned = learn.learn_from_confirmed(store, res, doc, _operator())
+        # Absender-Domain zum bestaetigten Lieferanten lernen (Effizienz-Baustein 1)
+        mailherkunft.lerne_domain(store, res.supplier_id, res.sha256, _operator(), res.sammel)
         # Lag die Rechnung im Ordner "Menschliche Bearbeitung", verlaesst sie
         # ihn jetzt (erst NACH dem Lernen -- die Arbeitskopie wird entfernt).
         human.erledigt(store, res, _operator())
@@ -983,6 +995,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         shadow.record(store, res, operator)
         eventlog.record(store, res, operator)
         learned = learn.learn_from_confirmed(store, res, _load(path), operator)
+        mailherkunft.lerne_domain(store, res.supplier_id, res.sha256, operator, res.sammel)
         human.erledigt(store, res, operator)
         return JSONResponse({"confirmed": True, "status": res.status,
                              "confirmations": 0, "secured": False,

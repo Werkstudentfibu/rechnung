@@ -758,6 +758,44 @@ Modell, ≤ 120 s je Rechnung, ~60 Rechnungen/Tag (Details SPEC §7x).
   der Schattenstatistik (Ablage `data/vorlernen/`, Audit
   `vorlernen_bestaetigt`).
 
+## Effizienz 10.10.2026 (Entscheidung Aaron: schneller bei gleich niedriger Fehlerquote)
+
+Jeder Baustein ist einzeln abschaltbar; gemessen wird mit dem Testsatz
+(`rechnung testsatz`) bzw. reproduzierbar mit
+`python tools/effizienz_messung.py aufbauen|messen` (synthetischer Testsatz
+mit Text-PDFs und Scans, zählt Zeit, Trefferquote je Feld, KI- und
+Tesseract-Aufrufe).
+
+| Schalter | Standard | Wirkung |
+|---|---|---|
+| `RECHNUNG_ABSENDER_HINWEIS` | `1` | Absender-Domain der Mail als Lieferanten-Hinweis |
+| `RECHNUNG_EIGENE_DOMAINS` | `althoffhotels.com` | eigene Domains (Weiterleitungen) -- nie ein Lieferant |
+| `RECHNUNG_PORTAL_DOMAINS` | leer | weitere Rechnungsportale/Versanddienste (zusätzlich zur eingebauten Liste) |
+
+### 1. Absender der Mail als Lieferanten-Hinweis
+
+Beim Abholen hält `ingest.py` je gespeichertem Anhang die Herkunft fest:
+`data/herkunft/<sha256>.json` (von, Domain, Betreff, Message-ID, Datum; die
+erste Mail gewinnt, ein Duplikat überschreibt nichts). Kommt die Mail von
+einer eigenen Domain (Weiterleitung aus dem Firmen-Outlook), gilt der
+ursprüngliche Absender aus dem zitierten Kopf („Von:“/„From:“) bzw. aus einer
+angehängten Mail -- nur wenn er eindeutig ist. Freemail-Adressen (gmail, gmx,
+web.de, outlook, t-online, …) und Rechnungsportale sind nie ein Hinweis.
+
+Die Domain zählt im Lieferanten-Abgleich wie eine auf der Rechnung gedruckte
+Mail-Domain -- **nie allein die Identität** (es braucht noch Name, Kopf-Layout
+oder Kennung). Passt sie zu genau einem Lieferanten unter der erkannten
+Rechnungsadresse, die Rechnung aber zu keinem, steht ein **Vorschlag** in der
+Prüfmaske (kein Entwurf für dieselbe Firma, die Rechnung bleibt beim
+Menschen) -- außer eine USt-IdNr/IBAN der Rechnung gehört einem anderen
+Lieferanten (Betrugsschutz). Gehört die Domain zu einem anderen Lieferanten
+als USt-IdNr/IBAN, gibt es eine **Warnung** („ACHTUNG Absender-Domain passt
+zu einem anderen Lieferanten …“, geht mit nach JobRouter). Beim Bestätigen
+einer Rechnung bzw. eines Lieferanten-Entwurfs wird die Absender-Domain zu
+den Domains des Lieferanten gelernt (nur verwendbare und nur, wenn sie noch
+keinem anderen Lieferanten gehört). Prüfmaske: dezent „Absender: …“ unter
+dem Lieferanten.
+
 ## KI-Extraktion konfigurieren (optional)
 
 Standardmäßig aus. Einschalten über `RECHNUNG_LLM_ENABLED=1` (siehe
