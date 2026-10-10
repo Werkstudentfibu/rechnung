@@ -103,6 +103,10 @@ def payload_from_result(res: dict, cfg: JobRouterConfig | None = None) -> dict:
            if res.get("supplier_external_id") else {}),
         "billingAddress": res.get("billing_address_name"),
         "billingAddressId": res.get("billing_address_id"),
+        # Stammdaten aus der Bibliothek wie im Abbyy-Kopf (stammdaten.py) --
+        # Geschaeftsbereich + Lieferant mit ID, USt-ID, Anschrift, Bank
+        "geschaeftsbereich": (res.get("stammdaten") or {}).get("geschaeftsbereich"),
+        "lieferantStammdaten": (res.get("stammdaten") or {}).get("lieferant"),
         "confidence": res.get("overall_confidence"),
         "fields": _map_fields(flat_fields, cfg),
         "herkunft": herkunft,
