@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import llm as _llm_cfg
-from .template import STANDARD_FIELDS, FieldResult, sichtbare_felder
+from .template import STANDARD_FIELDS, FieldResult, ki_felder
 from .textnorm import coerce, compact, find_ustids, iban_valid, norm, value_in_text
 
 # Typen, die als einfacher String zurueckkommen -- taxblock/Positionen sind
@@ -450,7 +450,7 @@ def extract(text: str, field_names: list[str], hints: dict[str, str],
     belegt wird trotzdem immer gegen den vollen ``text`` (siehe
     ``_check_value``)."""
     cfg = _llm_cfg()
-    sichtbar = sichtbare_felder()
+    sichtbar = ki_felder()
     field_names = [n for n in field_names if sichtbar.get(n, ("",))[0] in _SIMPLE_TYPES]
     if not cfg.enabled or not field_names or not available():
         return {}
@@ -506,7 +506,7 @@ def _schema(with_lines: bool) -> dict:
     """JSON-Schema der erwarteten Antwort -- geht als Vorgabe in den Prompt und
     ist Grundlage der Pruefung in ``_validate``."""
     scalar = {"type": ["string", "number", "null"]}
-    props = {n: scalar for n, (t, _r) in sichtbare_felder().items() if t in _SIMPLE_TYPES}
+    props = {n: scalar for n, (t, _r) in ki_felder().items() if t in _SIMPLE_TYPES}
     props.update({k: {"type": ["string", "null"]} for k in _SUPPLIER_KEYS})
     props.update({k: {"type": ["string", "null"]} for k in _RECIPIENT_KEYS})
     props.update({k: {"type": ["string", "null"]} for k in _SUPPLIER_DETAIL_KEYS})
@@ -646,7 +646,7 @@ def _extract_full_once(prompt_text: str, verify_text: str, cfg, schema: dict,
     data = _validate(parsed, schema, res.rejected)
     conf = round(min(cfg.max_confidence, 0.6), 2)
 
-    for name, (vtype, _req) in sichtbare_felder().items():
+    for name, (vtype, _req) in ki_felder().items():
         val = data.get(name)
         if vtype not in _SIMPLE_TYPES or val in (None, ""):
             continue
@@ -721,11 +721,11 @@ def extract_full(text: str, want_line_items: bool | None = None) -> FullExtracti
     line_items = cfg.line_items if want_line_items is None else (want_line_items and cfg.line_items)
     schema = _schema(line_items)
     extra = _BANK_KEYWORDS + (_LINE_KEYWORDS if line_items else ())
-    excerpt = _targeted_excerpt(text, list(sichtbare_felder()), extra_keywords=extra,
+    excerpt = _targeted_excerpt(text, list(ki_felder()), extra_keywords=extra,
                                budget=_FULL_EXCERPT_BUDGET)
     res = _extract_full_once(excerpt, text, cfg, schema, line_items)
 
-    missing_required = [n for n, (vtype, req) in sichtbare_felder().items()
+    missing_required = [n for n, (vtype, req) in ki_felder().items()
                         if req and vtype in _SIMPLE_TYPES
                         and n not in res.fields and n not in res.rejected]
     if missing_required and excerpt != text:

@@ -622,6 +622,32 @@ Menschen (auch im Schattenbetrieb); in der Prüfmaske steht das betroffene
 Feld rot mit Grund darunter, oben eine Box „Prüfungen rot“. Gutschriften
 werden bei der Betragsspanne nicht bewertet.
 
+### 3. Pflichtangaben nach § 14 Abs. 4 UStG (Hinweis-Prüfung)
+
+`pflicht.py` prüft per Text und Feldern (keine KI) die Pflichtangaben und
+zeigt sie in der Prüfmaske als eigene, gelbe Gruppe „Pflichtangaben (…)“ --
+**nur Hinweis**, kein Rückstellgrund. Fehlt etwas, steht zusätzlich ein
+begründeter Hinweis in `hinweise` (geht mit nach JobRouter), z.B.
+„Pflichtangaben (§ 14 Abs. 4 UStG) fehlt: Zeitpunkt/Zeitraum der Leistung“.
+
+- **§ 14 Abs. 4 UStG**: Name/Anschrift Leistender und Empfänger, Steuernummer
+  oder USt-IdNr des Leistenden, Ausstellungsdatum, Rechnungsnummer,
+  Menge/Art (Positionen oder Bezeichnung), Leistungsdatum/-zeitraum (oder
+  Hinweis „Leistungsdatum = Rechnungsdatum“), Entgelt je Steuersatz,
+  Steuersatz + Steuerbetrag bzw. Hinweis auf Steuerbefreiung/Reverse Charge.
+- **Kleinbetragsrechnung** (≤ 250 € brutto, § 33 UStDV): nur Leistender,
+  Datum, Menge/Art, Entgelt+Steuer in einer Summe, Steuersatz.
+- **Schweiz** (CHF oder UID mit „MWST“, Art. 26 MWSTG, vereinfacht): Name/Ort
+  Leistungserbringer mit MWST-Nummer, Empfänger (entfällt bis CHF 400),
+  Leistungsdatum (fehlt es, gilt das Rechnungsdatum), Art/Umfang, Entgelt,
+  Steuersatz.
+
+Neues Feld **`leistungsdatum`** (Datum, optional) in „Sonstige Daten“ der
+Prüfmaske: lernbar wie jedes Feld, ohne Vorlage per Textregel hinter einem
+eindeutigen Label („Leistungsdatum:“, „Lieferdatum“, …) -- nie per KI
+(`template.NIE_KI`, der KI-Prompt bleibt unverändert). Die Erkennung ist
+textbasiert und vereinfacht (z.B. Anschriften über PLZ/Ort) und kann irren.
+
 ## Härtung (v1.3)
 
 Nach einer Risiko-Durchsicht ergänzt: mehrdeutige Lieferanten-/Anker-Treffer

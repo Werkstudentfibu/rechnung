@@ -697,6 +697,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "hinweise": res.hinweise,
             "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in res.checks],
             "rote_felder": human.rote_felder(res.checks),
+            "pflichtangaben": res.pflichtangaben,
             "ocr": res.ocr,
         })
 
@@ -747,6 +748,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "hold_reasons": res.hold_reasons,
             "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in res.checks],
             "rote_felder": human.rote_felder(res.checks),
+            "pflichtangaben": res.pflichtangaben,
             "pages": pages,
             "match": ({"id": res.supplier_id, "name": res.supplier_name,
                        "score": res.match_score} if res.supplier_id else None),

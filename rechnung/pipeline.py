@@ -18,6 +18,7 @@ from . import einvoice
 from . import jobrouter
 from . import ocr
 from . import pdf as pdfmod
+from . import pflicht
 from . import plausi
 from . import positionen
 from . import rechnen
@@ -159,6 +160,12 @@ class Result:
     # Andere beschriftete Mail-Anhaenge derselben Mail, die an diesen Beleg
     # gehaengt sind (anlagen.py, Postfach-Baustein 8): [{dateiname, art}]
     anlagen: list[dict] = field(default_factory=list)
+    # Pflichtangaben-Pruefung (pflicht.py, Aaron 10.10.2026): reine
+    # Hinweis-Gruppe {regelwerk, punkte, fehlt}, nie ein Rueckstellgrund
+    pflichtangaben: dict | None = None
+    # Rechnungstext fuer die Nachlauf-Pruefungen in ``process`` -- wird dort
+    # wieder geleert (nicht mit dem Ergebnis herumtragen)
+    _pruef_text: str = field(default="", repr=False)
 
     def to_dict(self) -> dict:
         return {
@@ -185,6 +192,7 @@ class Result:
             "dublette": self.dublette,
             "qr": self.qr,
             "anlagen": self.anlagen,
+            "pflichtangaben": self.pflichtangaben,
             "duration_s": self.duration_s,
             "aborted": self.aborted,
             "stufenzeiten": self.stufenzeiten,
@@ -713,7 +721,8 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
     muss wie jede andere Rechnung auch (§7b)."""
     timer = timer or StageTimer()
     res = Result(file=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                 extraction=EXTRACT_EINVOICE, einvoice=inv.to_dict())
+                 extraction=EXTRACT_EINVOICE, einvoice=inv.to_dict(),
+                 _pruef_text=_einvoice_pdf_text(path, inv))
     res.anlagen = anlagen.info(store, res.sha256)
 
     with timer.stage("lieferant"):
@@ -1168,11 +1177,20 @@ def _positionsmodus_hinweis(res: "Result", supplier: Supplier | None) -> None:
 
 
 def _qualitaet(res: Result, store: Store) -> None:
-    """Gelbe Hinweise aus dem Lieferanten-Gedaechtnis/Datum (plausi.py) an
-    jedes Ergebnis haengen -- blockieren nichts (Aaron 10.10.2026)."""
+    """Nachlauf fuer jedes Ergebnis (Aaron 10.10.2026), blockiert nichts:
+    Leistungsdatum per Textregel, gelbe Hinweise aus dem Lieferanten-
+    Gedaechtnis/Datum (plausi.py) und die Pflichtangaben-Gruppe
+    (pflicht.py)."""
+    text, res._pruef_text = res._pruef_text, ""
     if res.aborted:
         return
-    for h in plausi.hinweise(res.fields, res.line_items, res.supplier_id, store, res.sha256):
+    if res.fields:
+        pflicht.apply_leistungsdatum(res.fields, text)
+    neu = plausi.hinweise(res.fields, res.line_items, res.supplier_id, store, res.sha256)
+    res.pflichtangaben = pflicht.pruefen(res, text, store)
+    if (h := pflicht.hinweis_text(res.pflichtangaben)):
+        neu.append(h)
+    for h in neu:
         if h not in res.hinweise:
             res.hinweise.append(h)
 
@@ -1239,7 +1257,7 @@ def _process(path: str | Path, store: Store, use_llm: bool = True,
         _apply_hold(res)
         res.stufenzeiten = timer.times
         return res
-    res = Result(file=str(path), sha256=doc.sha256, seiten=len(doc.pages))
+    res = Result(file=str(path), sha256=doc.sha256, seiten=len(doc.pages), _pruef_text=doc.text)
 
     # Swiss QR-Rechnung (Postfach-Baustein 7): nur rendern/dekodieren, wenn
     # der Text ueberhaupt danach aussieht (Label "Zahlteil"/"QR-IBAN" etc.)

@@ -49,7 +49,16 @@ STANDARD_FIELDS: dict[str, tuple[str, bool]] = {
     "zahlungsreferenz": ("text", False),
     # Einkaeufer/Besteller auf Kundenseite ("Sonstige Daten" der Abbyy-Maske)
     "einkaeufer": ("text", False),
+    # Zeitpunkt der Lieferung/Leistung (Pflichtangabe § 14 Abs. 4 Nr. 6 UStG,
+    # pflicht.py, Aaron 10.10.2026) -- lernbar wie jedes Feld; ohne Vorlage
+    # per Textregel ("Leistungsdatum: ...", "Lieferdatum ..."), nie per KI.
+    "leistungsdatum": ("date", False),
 }
+
+# Felder, die nie die KI gefragt werden (kein zusaetzlicher Prompt-Umfang
+# fuer das kleine Modell, keine neuen KI-Aufrufe) -- nur Vorlage/Textregel/
+# Mensch (Aaron 10.10.2026).
+NIE_KI = frozenset({"leistungsdatum"})
 
 # In diesem Einsatz nicht gebraucht (Aaron, 08.10.2026): nicht angezeigt, nicht
 # per KI gefragt, nicht gelernt, nicht exportiert. Intern bleiben sie nutzbar
@@ -70,6 +79,11 @@ def sichtbare_felder() -> dict[str, tuple[str, bool]]:
     die KI gefragt wird oder gelernt/exportiert wird."""
     aus = ausgeblendet()
     return {k: v for k, v in STANDARD_FIELDS.items() if k not in aus}
+
+
+def ki_felder() -> dict[str, tuple[str, bool]]:
+    """Sichtbare Felder, nach denen die KI gefragt werden darf."""
+    return {k: v for k, v in sichtbare_felder().items() if k not in NIE_KI}
 
 
 @dataclass

@@ -1329,6 +1329,15 @@ Entscheidung Aaron 10.10.2026 ("alle 5 Punkte"). Reiter "Qualität" im UI.
    Zukunftstoleranz 1 Tag statt 14, Jahreszahl-Dreher im Grund. UI: rote
    Felder mit Grund (`human.rote_felder`, `/api/invoice` → `rote_felder`).
 
+3. **Pflichtangaben** (`pflicht.py`): `Result.pflichtangaben = {regelwerk,
+   punkte[{name, ok, detail}], fehlt}` im Nachlauf `pipeline._qualitaet` (Text
+   über `Result._pruef_text`, danach geleert); Regelwerk § 14 Abs. 4 UStG,
+   § 33 UStDV (≤ 250 € brutto, EUR) oder Art. 26 MWSTG (CHF/UID MWST). Nur
+   Hinweis (`res.hinweise` + Gruppe in der Maske), kein Check, kein
+   Rückstellgrund. Feld `leistungsdatum` (date, optional) in
+   `STANDARD_FIELDS`, in `NIE_KI` (nicht im KI-Schema), Textregel
+   `pflicht.apply_leistungsdatum` nur bei eindeutigem Fund.
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).
