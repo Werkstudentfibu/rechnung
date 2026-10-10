@@ -1422,6 +1422,9 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
     op = operator or _operator()
     payload = res.to_dict()
     payload["freigabe"] = freigabe
+    # Unveraenderliche Stammdaten aus der Bibliothek mitgeben (stammdaten.py)
+    from . import stammdaten
+    payload["stammdaten"] = stammdaten.fuer_rechnung(store, res)
     already = store.seen_sha_template(res.sha256, res.template_id)
 
     store.archive_pdf(res.file, res.sha256)
