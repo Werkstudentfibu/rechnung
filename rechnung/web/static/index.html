@@ -55,7 +55,7 @@
      .val-input style="font-style:italic" bzw. die Positions-/USt-Tabellen). */
   .badge.herkunft-errechnet { background: #fff3b0; border: 1px solid #d4b106; color: #614700; }
   .badge.herkunft-kopf { background: #e6f4ff; border: 1px solid #91caff; color: #0958d9; }
-  .errechnet, .kopf { font-style: italic; }
+  .errechnet, .kopf, .eine_position { font-style: italic; }
 
   table { border-collapse: collapse; width: 100%; }
   td, th { border: 1px solid #e0e0e0; padding: 4px 6px; text-align: left; font-size: 13px; vertical-align: top; }
@@ -252,6 +252,14 @@ const api = (u, opt) => fetch(u, opt).then(r => r.json());
 // automatisch aus den Lieferanten-Stammdaten (siehe Formularfelder oben),
 // sobald der Lieferant erkannt ist -- kein Duplikat als "fester Wert" noetig.
 const FIXED_FIELDS = ['bestellnummer', 'ust_satz'];
+// Positionsmodus je Lieferant (Teil B, Entscheidung Aaron 10.10.2026):
+// Normalfall "einzeln" -- nur wenige Lieferanten brauchen einen der beiden
+// anderen Modi (rechnung/identify.py POSITIONSMODI).
+const POSITIONSMODUS_LABEL = {
+  einzeln: 'einzeln',
+  zusammenfassung: 'Zusammenfassung',
+  eine_position: 'eine Position je Steuersatz',
+};
 const LI_TYPES = ['text', 'amount', 'number', 'date'];
 // Standard-Spaltennamen der Positionstabelle (SPEC Baustein 1,
 // rechnung/positionen.py STANDARD_COLUMNS) -- als Auswahlliste statt
@@ -347,6 +355,11 @@ function applyInvoiceData(d) {
     match: d.match,
     detectedAddress: d.detected_address || null,
     holdReasons: d.hold_reasons || [], statusLabel: d.status_label || '',
+    hinweise: d.hinweise || [],
+    // Dezenter Positionsmodus-Vorschlag bei langem Beleg (Teil B) -- eigens
+    // herausgefiltert, damit er gezielt bei "Positionsdaten" erscheint statt
+    // nur in der allgemeinen Hinweis-Liste.
+    langerBelegHinweis: (d.hinweise || []).find(h => h.startsWith('Langer Beleg')) || null,
     llmRejected: d.llm_rejected || {},
     kiPositionen: d.ki_positionen,
     lineItems: (d.line_items || []).map(it => ({ ...it })),
@@ -696,6 +709,15 @@ function renderInvoice(d) {
     h.innerHTML = `<b>${esc(holdLabel || 'zurückgestellt – menschlich bearbeiten')}</b><br>${holdReasons.map(esc).join('<br>')}`;
     fbox.appendChild(h);
   }
+  // Hinweise (blockieren nichts, z.B. Skonto gestaffelt, Gegencheck
+  // uebersprungen) -- der "Langer Beleg"-Vorschlag steht gezielt bei
+  // "Positionsdaten" (renderPositionsmodusAuswahl), hier nicht doppelt.
+  const sonstigeHinweise = (d.hinweise || STATE.hinweise || []).filter(h => !h.startsWith('Langer Beleg'));
+  if (sonstigeHinweise.length) {
+    const h = document.createElement('div'); h.className = 'box';
+    h.innerHTML = `<div class="hint">${sonstigeHinweise.map(esc).join('<br>')}</div>`;
+    fbox.appendChild(h);
+  }
 
   // ===== Prüfmaske wie Abbyy FlexiCapture "European Invoice" (Vorlage Aaron, 09.10.2026) =====
   const isDraft = !!(d.supplier && d.supplier.bestaetigt === false);
@@ -799,6 +821,7 @@ function renderInvoice(d) {
 
   // Positionsdaten
   const pd = gruppe('Positionsdaten', '');
+  pd.querySelector('.ab-body').appendChild(renderPositionsmodusAuswahl(supO));
   if (STATE.li.active) pd.querySelector('.ab-body').appendChild(renderLiPanel());
   pd.querySelector('.ab-body').appendChild(renderLiPreviewBox(STATE.lineItems));
   fbox.appendChild(pd);
@@ -1185,6 +1208,62 @@ function stCell(st) {
 }
 function rowCls(st) { return st && st.ok === false ? 'bad' : st && st.ok ? 'ok' : ''; }
 
+// Positionsmodus-Auswahl in der Pruefmaske (Teil B, Entscheidung Aaron
+// 10.10.2026) -- wie in Abbyy entscheidet die bearbeitende Person beim
+// Pruefen, keine Stammdaten-Rechte noetig. Bei einem bekannten (bestaetigten)
+// Lieferanten speichert die Auswahl sofort am Lieferanten (eigener
+// API-Weg, Audit) und laedt die Rechnung neu; ohne bekannten Lieferanten
+// gilt sie nur fuer diese Rechnung (STATE.supplier) und geht beim
+// Anlegen/Bestaetigen mit (lieferantSpeichern spreadet ``...sup``).
+function renderPositionsmodusAuswahl(supO) {
+  const box = document.createElement('div'); box.id = 'positionsmodus-box';
+  const bekannt = !!(supO && supO.bestaetigt !== false);
+  const modus = bekannt ? (supO.positionsmodus || 'einzeln')
+    : ((STATE.supplier || {}).positionsmodus || 'einzeln');
+  const bez = bekannt ? (supO.positionsbezeichnung || '')
+    : ((STATE.supplier || {}).positionsbezeichnung || '');
+  box.innerHTML = `
+    <div class="ab-row2">
+      <div class="af"><label>Positionen</label>
+        <select id="inv-pm-modus" onchange="invPositionsmodusChanged(${bekannt ? `'${esc(supO.id)}'` : 'null'})">
+          ${Object.entries(POSITIONSMODUS_LABEL).map(([k, label]) =>
+            `<option value="${k}" ${k === modus ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+        </select></div>
+      <div class="af" id="inv-pm-bez-wrap" style="${modus === 'eine_position' ? '' : 'display:none'}">
+        <label>Bezeichnung</label>
+        <input id="inv-pm-bezeichnung" class="ab-in" value="${esc(bez)}" placeholder="z.B. Strom"
+               onchange="invPositionsmodusBezeichnungChanged(${bekannt ? `'${esc(supO.id)}'` : 'null'})"></div>
+    </div>
+    ${!bekannt ? '<div class="hint">Kein bekannter Lieferant -- gilt erst einmal nur für diese Rechnung, wird beim Anlegen/Bestätigen des Lieferanten mitgespeichert.</div>' : ''}
+    ${(STATE.langerBelegHinweis) ? `<div class="hint">${esc(STATE.langerBelegHinweis)}</div>` : ''}`;
+  return box;
+}
+function invPositionsmodusChanged(supplierId) {
+  const modus = $('#inv-pm-modus').value;
+  $('#inv-pm-bez-wrap').style.display = modus === 'eine_position' ? '' : 'none';
+  if (supplierId) {
+    api('/api/suppliers/' + encodeURIComponent(supplierId) + '/positionsmodus', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ modus, bezeichnung: $('#inv-pm-bezeichnung').value.trim() }),
+    }).then(() => openInvoice(STATE.file, null));
+    return;
+  }
+  STATE.supplier = { ...(STATE.supplier || {}), positionsmodus: modus,
+    positionsbezeichnung: modus === 'eine_position' ? $('#inv-pm-bezeichnung').value.trim() : '' };
+}
+function invPositionsmodusBezeichnungChanged(supplierId) {
+  const bezeichnung = $('#inv-pm-bezeichnung').value.trim();
+  if (supplierId) {
+    api('/api/suppliers/' + encodeURIComponent(supplierId) + '/positionsmodus', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ modus: $('#inv-pm-modus').value, bezeichnung }),
+    }).then(() => openInvoice(STATE.file, null));
+    return;
+  }
+  STATE.supplier = { ...(STATE.supplier || {}), positionsmodus: $('#inv-pm-modus').value,
+    positionsbezeichnung: bezeichnung };
+}
+
 // Spalten wie die Abbyy-Positionsdaten (Vorlage Aaron, 09.10.2026)
 const LI_STD = [['beschreibung', 'Description'], ['menge', 'Quantity'],
                 ['einzelpreis_netto', 'Unit price'], ['gesamt_netto', 'Total price netto'],
@@ -1210,9 +1289,11 @@ function renderLiPreviewBox(items) {
                    onchange="saveCategoryCorrection('${esc((it._kategorie_text || '').replace(/'/g, "\\'"))}', this.value)">
             ${conf != null ? `<span class="hint">(${conf})</span>` : ''}</td>`;
         }
-        // Herkunft je Zelle (SPEC Baustein 3): errechnet/kopf kursiv
+        // Herkunft je Zelle (SPEC Baustein 3): errechnet/kopf kursiv;
+        // "eine_position" ebenso (Positionsmodus, Teil B) -- aus den Summen
+        // gebildet, kein Original-Lesewert.
         const h = (it._herkunft || {})[c];
-        const hcls = (h === 'errechnet' || h === 'kopf') ? h : '';
+        const hcls = (h === 'errechnet' || h === 'kopf' || h === 'eine_position') ? h : '';
         let v = it[c];
         if (typeof v === 'number' && c !== 'menge' && c !== 'mwst_satz') v = fmtWert(v, 'amount');
         return `<td class="${typeof it[c] === 'number' ? 'num' : ''}"><input
@@ -1774,7 +1855,7 @@ async function loadSuppliers() {
   const sorted = [...rows].sort((a, b) =>
     (a.bestaetigt === false ? 0 : 1) - (b.bestaetigt === false ? 0 : 1));
   const t = document.createElement('table');
-  t.innerHTML = '<tr><th></th><th>ID</th><th>Name</th><th>Lieferantennr.</th><th>Rechnungsadressen</th><th>Währung</th><th>USt-IdNr</th><th>IBAN</th><th>feste Werte</th><th>Templates</th><th></th></tr>';
+  t.innerHTML = '<tr><th></th><th>ID</th><th>Name</th><th>Lieferantennr.</th><th>Rechnungsadressen</th><th>Währung</th><th>Positionen</th><th>USt-IdNr</th><th>IBAN</th><th>feste Werte</th><th>Templates</th><th></th></tr>';
   for (const s of sorted) {
     if (onlyUnconfirmed && s.bestaetigt !== false) continue;
     const tr = document.createElement('tr'); tr.className = 'clickable';
@@ -1783,6 +1864,7 @@ async function loadSuppliers() {
       <td>${esc(s.external_id || '')}</td>
       <td>${(s.addresses || []).length ? (s.addresses || []).map(a => esc(addrName(a))).join('<br>') : '<span class="hint">alle</span>'}</td>
       <td>${esc(s.currency || 'EUR')}</td>
+      <td>${esc(POSITIONSMODUS_LABEL[s.positionsmodus] || s.positionsmodus || 'einzeln')}${s.positionsmodus === 'eine_position' && s.positionsbezeichnung ? `<br><span class="hint">${esc(s.positionsbezeichnung)}</span>` : ''}</td>
       <td>${(s.ustids || []).map(esc).join('<br>')}</td>
       <td>${(s.ibans || []).map(esc).join('<br>')}</td>
       <td>${Object.entries(s.fixed_fields || {}).map(([k, v]) => `${esc(k)}=${esc(v)}`).join('<br>')}</td>
@@ -1856,7 +1938,46 @@ function editSupplier(s) {
         ${FIXED_FIELDS.map(k => `<label>${k}</label><input id="ff-${k}" value="${esc(ff[k] || '')}">`).join('')}
       </div>
     </div>
+    ${s.id ? renderPositionsmodusBox(s) : ''}
     <button onclick="submitSupplier()">Speichern</button>`;
+}
+
+/* Positionsmodus (Teil B, Entscheidung Aaron 10.10.2026): eigener Speichern-
+   Knopf -- eigener API-Weg (POST .../positionsmodus) mit Audit-Eintrag,
+   unabhaengig vom allgemeinen Stammdaten-Speichern oben. */
+function renderPositionsmodusBox(s) {
+  const modus = s.positionsmodus || 'einzeln';
+  return `
+    <div class="box">
+      <h4>Positionen</h4>
+      <div class="hint">Wie Positionen dieses Lieferanten gelesen werden -- Normalfall "einzeln" (unveraendert).
+        Verschiedene MwSt-Sätze werden nie zusammengefasst.</div>
+      <div class="form-grid">
+        <label>Modus</label>
+        <select id="pm-modus" onchange="pmModusChanged()">
+          ${Object.entries(POSITIONSMODUS_LABEL).map(([k, label]) =>
+            `<option value="${k}" ${k === modus ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+        </select>
+        <label id="pm-bez-label" style="${modus === 'eine_position' ? '' : 'display:none'}">Bezeichnung</label>
+        <input id="pm-bezeichnung" style="${modus === 'eine_position' ? '' : 'display:none'}"
+               value="${esc(s.positionsbezeichnung || '')}" placeholder="z.B. Strom">
+      </div>
+      <button class="ghost mini" onclick="submitPositionsmodus('${esc(s.id)}')">Positionsmodus speichern</button>
+      <span id="pm-msg" class="hint"></span>
+    </div>`;
+}
+function pmModusChanged() {
+  const eine = $('#pm-modus').value === 'eine_position';
+  $('#pm-bez-label').style.display = eine ? '' : 'none';
+  $('#pm-bezeichnung').style.display = eine ? '' : 'none';
+}
+async function submitPositionsmodus(id) {
+  await api('/api/suppliers/' + encodeURIComponent(id) + '/positionsmodus', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ modus: $('#pm-modus').value, bezeichnung: $('#pm-bezeichnung').value.trim() }),
+  });
+  $('#pm-msg').textContent = 'gespeichert';
+  loadSuppliers();
 }
 
 const lines = id => ($('#' + id).value || '').split('\n').map(x => x.trim()).filter(Boolean);

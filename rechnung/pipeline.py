@@ -30,9 +30,10 @@ from .timing import StageTimer
 from .config import jobrouter as _jr_cfg
 from .config import operator as _operator
 from .identify import (DEFAULT_CURRENCY, EXPECTED_RATES, FIXED_FIELD_TYPES, IBAN_DEVIATES,
-                       NEW_SUPPLIER_HOLD, Supplier, _address_scope_reason, _detect_currency,
-                       cross_check, extract_identifiers, identify_einvoice,
-                       identify_with_reason, kandidaten)
+                       NEW_SUPPLIER_HOLD, POSITIONSMODI, POSITIONSMODUS_EINE_POSITION,
+                       POSITIONSMODUS_EINZELN, POSITIONSMODUS_ZUSAMMENFASSUNG, Supplier,
+                       _address_scope_reason, _detect_currency, cross_check,
+                       extract_identifiers, identify_einvoice, identify_with_reason, kandidaten)
 from .store import Store
 from .suggest import suggest_category
 from .template import (STANDARD_FIELDS, FieldResult, Template, apply_line_items,
@@ -218,6 +219,20 @@ def extraction_text(doc) -> str:
     idx = ocr.partial_pages(len(doc.pages))
     if idx is None:
         return doc.text
+    return "\n".join(" ".join(w.text for w in doc.pages[i].words) for i in idx)
+
+
+# Positionsmodus "zusammenfassung" ohne Vorlage (Teil B, Entscheidung Aaron
+# 10.10.2026): die Uebersichtstabelle steht am Rechnungsende -- die KI soll
+# nicht alle Einzelpositionsseiten lesen, nur um am Schluss die paar
+# Summenzeilen zu finden (spart Laptop-Zeit bei 10+ Seiten).
+_ZUSAMMENFASSUNG_SCHLUSSSEITEN = 2
+
+
+def _schlussseiten_text(doc, n: int = _ZUSAMMENFASSUNG_SCHLUSSSEITEN) -> str:
+    if len(doc.pages) <= n:
+        return doc.text
+    idx = range(len(doc.pages) - n, len(doc.pages))
     return "\n".join(" ".join(w.text for w in doc.pages[i].words) for i in idx)
 
 
@@ -775,9 +790,11 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
 
     with timer.stage("pruefungen"):
         res.line_items = positionen.normalize_columns([dict(p) for p in inv.positionen])
+        _positionsmodus_vorbereiten(res, supplier)
         rk = rechnen.rechne(res.fields, res.line_items, pdf_text)
         res.fields, res.line_items, res.tax_breakdown = rk.fields, rk.line_items, rk.tax_breakdown
         res.hinweise.extend(g for g in rk.gruende if g not in res.hinweise)
+        _positionsmodus_abschliessen(res, supplier)
         pdf_check = _check_pdf_matches_xml(path, inv)
 
         def checks_for(fields):
@@ -848,11 +865,20 @@ def _apply_line_item_correction(res: "Result", corrections: dict) -> None:
             [dict(it) for it in items if isinstance(it, dict)])
 
 
-def _llm_full(res: Result, doc) -> None:
+def _llm_full(res: Result, doc, positionsmodus: str = POSITIONSMODUS_EINZELN) -> None:
     """Stufe 2: komplette KI-Extraktion, wenn es (noch) kein Template gibt.
     Fuellt nur, was nicht schon da ist -- Stammdaten aus dem gepflegten
-    Lieferanten-Datensatz (``library``) gewinnen gegen das Modell."""
-    full = semantic.extract_full(extraction_text(doc))
+    Lieferanten-Datensatz (``library``) gewinnen gegen das Modell.
+
+    Positionsmodus (Teil B, Entscheidung Aaron 10.10.2026): 'eine_position'
+    -- die KI liest ueberhaupt keine Einzelpositionen (die Positionen werden
+    stattdessen aus der USt-Aufstellung gebildet, ``positionen.aus_summen``
+    in ``_positionsmodus_post``). 'zusammenfassung' -- die Uebersichts-
+    tabelle steht am Rechnungsende, die KI bekommt nur die Schlussseiten
+    statt der ganzen (ggf. langen) Rechnung."""
+    text = (_schlussseiten_text(doc) if positionsmodus == POSITIONSMODUS_ZUSAMMENFASSUNG
+            else extraction_text(doc))
+    full = semantic.extract_full(text, want_line_items=(positionsmodus != POSITIONSMODUS_EINE_POSITION))
     res.llm_rejected.update(full.rejected)
     res.ki_lieferant = {**(full.lieferant_details or {}), **(full.supplier or {})}
     res.ki_empfaenger = dict(full.empfaenger or {})
@@ -974,14 +1000,17 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
     gedeckelt)."""
     timer = timer or StageTimer()
     extra = list(extra_checks or [])
+    modus = _positionsmodus(supplier)
     if use_llm:
         with timer.stage("ki"):
-            _llm_full(res, doc)
+            _llm_full(res, doc, modus)
     machine = dict(res.fields)
     corrections = store.corrections(doc.sha256)
     _apply_corrections(res.fields, corrections)
     machine_items = res.line_items
     _apply_line_item_correction(res, corrections)
+    manuell_korrigiert = POSITIONEN_KEY in corrections
+    _positionsmodus_vorbereiten(res, supplier, manuell_korrigiert)
     # Faelligkeit/Skonto per Textregel -- nach den Korrekturen, damit eine
     # relative Frist ein vom Menschen eingetragenes Rechnungsdatum nutzt
     zahlung.apply(res.fields, doc.text, res.hinweise)
@@ -1006,6 +1035,7 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
         rk = rechnen.rechne(res.fields, res.line_items, doc.text)
         res.fields, res.line_items, res.tax_breakdown = rk.fields, rk.line_items, rk.tax_breakdown
         res.hinweise.extend(g for g in rk.gruende if g not in res.hinweise)
+        _positionsmodus_abschliessen(res, supplier, manuell_korrigiert)
         res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, extra, qr)
         _set_dublette(res, store, doc)
 
@@ -1056,6 +1086,70 @@ def _set_dublette(res: "Result", store: Store, doc=None, text: str = "") -> None
     if any(c.name == dubletten.CHECK_NAME and c.ok is False for c in res.checks):
         res.dublette = dubletten.check(res.fields, res.supplier_id, store, res.sha256,
                                        doc, text)[1]
+
+
+# ---- Positionsmodus je Lieferant (Teil B, Entscheidung Aaron 10.10.2026) --
+# Wie in Abbyy entscheidet die bearbeitende Person beim Pruefen einer
+# Rechnung, wie die Positionstabelle dieses Lieferanten zu lesen ist
+# (Supplier.positionsmodus) -- Normalfall "einzeln" (unveraendertes
+# Verhalten). "zusammenfassung": die ohnehin gelesene/gelernte
+# Positionstabelle IST die Uebersichtstabelle am Rechnungsende -- dafuer
+# muss hier nichts Besonderes passieren, nur die KI (ohne Vorlage) bekommt
+# gezielt nur die Schlussseiten (siehe ``_llm_full``). "eine_position":
+# die Positionen werden IMMER aus der USt-Aufstellung gebildet -- nie aus
+# gelesenen Einzelpositionen (weder Vorlage noch KI noch E-Rechnung).
+
+def _positionsmodus(supplier: Supplier | None) -> str:
+    return supplier.positionsmodus if supplier is not None else POSITIONSMODUS_EINZELN
+
+
+def _positionsmodus_vorbereiten(res: "Result", supplier: Supplier | None,
+                                manuell_korrigiert: bool = False) -> None:
+    """Vor ``rechnen.rechne``: im Modus 'eine_position' nie gelesene
+    Einzelpositionen verwenden -- die USt-Aufstellung wird dann aus den
+    Kopf-Feldern hergeleitet, nicht aus (in diesem Modus gar nicht erst
+    gelesenen bzw. u.U. veralteten) Positionszeilen. Eine manuelle
+    Korrektur der Positionstabelle fuer GENAU diese Rechnung gewinnt
+    trotzdem immer (wie jede andere Korrektur im Programm)."""
+    if not manuell_korrigiert and _positionsmodus(supplier) == POSITIONSMODUS_EINE_POSITION:
+        res.line_items = []
+
+
+def _positionsmodus_abschliessen(res: "Result", supplier: Supplier | None,
+                                 manuell_korrigiert: bool = False) -> None:
+    """Nach ``rechnen.rechne``: im Modus 'eine_position' die Positionen aus
+    der (jetzt vollstaendigen) USt-Aufstellung bilden -- eine Zeile je
+    Steuersatz, nie zusammengefasst (``positionen.aus_summen``,
+    Entscheidung Aaron 10.10.2026, Punkt 1)."""
+    if manuell_korrigiert or _positionsmodus(supplier) != POSITIONSMODUS_EINE_POSITION:
+        return
+    waehrung_fr = res.fields.get("waehrung")
+    currency = waehrung_fr.value if waehrung_fr and waehrung_fr.value else None
+    res.line_items = positionen.aus_summen(res.tax_breakdown, supplier.positionsbezeichnung,
+                                           currency)
+
+
+# Dezenter Vorschlag (nie automatisch umstellen, Normalfall bleibt
+# "einzeln"): ab wann gilt ein Beleg als "lang genug", um auf die anderen
+# Modi hinzuweisen.
+_LANGER_BELEG_SEITEN = 5
+_LANGER_BELEG_POSITIONEN = 20
+_LANGER_BELEG_HINWEIS = ('Langer Beleg -- evtl. Positionsmodus "eine Position je Steuersatz" '
+                         'oder "Zusammenfassung"? (Lieferanten-Reiter bzw. beim Pruefen oben '
+                         'bei "Positionsdaten")')
+
+
+def _positionsmodus_hinweis(res: "Result", supplier: Supplier | None) -> None:
+    """Nur ein Hinweis fuer den Menschen (Teil B) -- wenn der Lieferant den
+    Positionsmodus noch nie bewusst gesetzt hat (``positionsmodus_gesetzt``)
+    UND der Beleg sehr lang ist bzw. sehr viele Positionen hat. Niemals
+    automatisch umstellen."""
+    if supplier is not None and supplier.positionsmodus_gesetzt:
+        return
+    if (res.seiten >= _LANGER_BELEG_SEITEN
+            or len(res.line_items) >= _LANGER_BELEG_POSITIONEN):
+        if _LANGER_BELEG_HINWEIS not in res.hinweise:
+            res.hinweise.append(_LANGER_BELEG_HINWEIS)
 
 
 def process(path: str | Path, store: Store, use_llm: bool = True,
@@ -1149,6 +1243,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
         _finish_untemplated(res, doc, None, store, use_llm, [addr_check], timer, qr_obj)
         _ocr_adjust(res, o)
         _apply_hold(res)
+        _positionsmodus_hinweis(res, None)
         res.stufenzeiten = timer.times
         return res
 
@@ -1180,6 +1275,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
             _enrich_draft(res, supplier, store)
         _ocr_adjust(res, o)
         _apply_hold(res)
+        _positionsmodus_hinweis(res, supplier)
         res.stufenzeiten = timer.times
         return res
 
@@ -1230,7 +1326,13 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
     waehrung.apply(res.fields, doc.text, res.hinweise)
     swissqr.apply(res.fields, qr_obj, res.hinweise)
 
-    if tpl.line_items and o is not None and o.partial:
+    modus = _positionsmodus(supplier)
+    if modus == POSITIONSMODUS_EINE_POSITION:
+        # Positionen werden IMMER aus der USt-Aufstellung gebildet -- eine
+        # dafuer angelernte Vorlagen-Positionstabelle wird (sollte es
+        # ausnahmsweise eine geben) in diesem Modus nicht angewendet.
+        pass
+    elif tpl.line_items and o is not None and o.partial:
         # Langer Scan, Positionsseiten noch ohne Texterkennung: keine halbe
         # Tabelle lesen (die Positionssumme waere falsch rot) -- die Positionen
         # kommen, sobald complete_pending den Rest erkannt hat.
@@ -1242,6 +1344,8 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
         _suggest_categories(res.line_items, tpl, store)
     machine_items = res.line_items
     _apply_line_item_correction(res, corrections)
+    manuell_korrigiert = POSITIONEN_KEY in corrections
+    _positionsmodus_vorbereiten(res, supplier, manuell_korrigiert)
 
     _gegencheck(res, doc, tpl, store, timer, use_llm)
 
@@ -1249,6 +1353,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
         rk = rechnen.rechne(res.fields, res.line_items, doc.text)
         res.fields, res.line_items, res.tax_breakdown = rk.fields, rk.line_items, rk.tax_breakdown
         res.hinweise.extend(g for g in rk.gruende if g not in res.hinweise)
+        _positionsmodus_abschliessen(res, supplier, manuell_korrigiert)
 
         res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, [addr_check],
                                  qr_obj)
@@ -1269,6 +1374,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
     res.status = AUTO if (tpl.secured and checks_ok and conf_ok) else REVIEW
     _ocr_adjust(res, o)
     _apply_hold(res)
+    _positionsmodus_hinweis(res, supplier)
     res.stufenzeiten = timer.times
     return res
 
@@ -1606,3 +1712,33 @@ def discard_supplier(store: Store, supplier_id: str, operator: str = "") -> None
     op = operator or _op()
     store.audit("lieferant_verworfen", {"id": supplier_id, "name": sup.name}, op)
     eventlog.record_supplier(store, supplier_id, sup.name, "verworfen", op)
+
+
+# ---- Positionsmodus setzen (Training-UI, Gruppe "Positionsdaten" bzw.
+# Reiter "Lieferanten") -- Teil B, Entscheidung Aaron 10.10.2026 ----------
+def set_positionsmodus(store: Store, supplier_id: str, modus: str,
+                       bezeichnung: str = "", operator: str = "") -> Supplier:
+    """Positionsmodus eines Lieferanten setzen -- wie in Abbyy die
+    Entscheidung der bearbeitenden Person beim Pruefen einer Rechnung
+    (keine Stammdaten-Rechte noetig). Gilt danach fuer alle Rechnungen
+    dieses Lieferanten, bleibt aber jederzeit aenderbar. ``bezeichnung``
+    wird nur bei 'eine_position' gespeichert (sonst verworfen, damit ein
+    spaeterer Wechsel zurueck zu 'eine_position' nicht eine laengst
+    irrelevante alte Bezeichnung wieder auftauchen laesst)."""
+    from .config import operator as _op
+
+    if modus not in POSITIONSMODI:
+        raise ValueError(f"Unbekannter Positionsmodus {modus!r} (erlaubt: {', '.join(POSITIONSMODI)})")
+    sup = store.supplier(supplier_id)
+    if sup is None:
+        raise ValueError(f"Lieferant {supplier_id!r} nicht gefunden")
+    sup.positionsmodus = modus
+    sup.positionsbezeichnung = bezeichnung.strip() if modus == POSITIONSMODUS_EINE_POSITION else ""
+    sup.positionsmodus_gesetzt = True
+    store.save_supplier(sup)
+    op = operator or _op()
+    store.audit("lieferant_positionsmodus", {
+        "id": supplier_id, "name": sup.name, "modus": modus,
+        "bezeichnung": sup.positionsbezeichnung,
+    }, op)
+    return sup

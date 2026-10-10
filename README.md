@@ -521,6 +521,47 @@ als "errechnet" gekennzeichnet, oder fehlt mit Grund. Details siehe
   kompakte Herkunft-Spalte je Zeile; der JobRouter-Payload trägt ein
   eigenes `herkunft`-Objekt je Feld sowie je Position/USt-Zeile.
 
+## Beträge aus dem Kontext herleiten + Positionsmodus je Lieferant (10.10.2026)
+
+Befund Aaron 09.10.2026: das kleine lokale Modell (`qwen2.5:1.5b`, CPU) liest
+Beträge, versteht aber nicht sicher, welcher Brutto/Netto ist, wenn es nicht
+wörtlich dasteht (z.B. "Total inkl. MWST" ohne separates "Netto"-Label).
+
+- **Beträge aus dem Kontext** (`summen.py`, eigenes Modul, keine KI): sammelt
+  alle Geldbeträge im Volltext mit Kontextwörtern (de/en/fr/it: "Total",
+  "inkl.", "Rechnungsbetrag", "Netto", "MWST"/"USt"/"TVA"/"IVA", ...), sucht
+  ein rechnerisch stimmiges Tripel Netto/USt/Brutto bzw. Steuerzeilen je Satz
+  (Mischsätze) und bewertet die Kandidaten über Schlüsselwörter, Lage im Text
+  und den Schweizer QR-Zahlteil-Betrag (stärkstes Signal, falls vorhanden).
+  Nur ein eindeutiger Sieger (Mindestabstand zum Zweitbesten) wird
+  übernommen -- sonst bleibt alles leer (kein Raten). Eingebaut in
+  `rechnen.rechne()`: läuft nur, wenn die gelesenen Kopf-Beträge NICHT
+  aufgehen oder fehlen; ein bereits korrekt gelesenes Feld bleibt immer
+  unangetastet, auch wenn ein Geschwisterfeld fehlt. Eine menschliche
+  Korrektur und der QR-Zahlteil-Betrag gewinnen immer.
+- **Positionsmodus je Lieferant** (Entscheidung Aaron 10.10.2026,
+  `Supplier.positionsmodus`): wie in Abbyy FlexiCapture legt die bearbeitende
+  Person beim Prüfen einer Rechnung fest, wie die Positionstabelle dieses
+  Lieferanten gelesen wird -- Normalfall `einzeln` (unverändert). Nur wenige
+  Lieferanten brauchen:
+  - `zusammenfassung`: die Übersichtstabelle am Rechnungsende gilt als
+    Positionstabelle (über den vorhandenen Anlern-Mechanismus
+    `learn.learn_line_items`); ohne Vorlage bekommt die KI gezielt nur die
+    Schlussseiten statt der ganzen (ggf. langen) Rechnung.
+  - `eine_position` (mit `Supplier.positionsbezeichnung`, z.B. "Strom"): die
+    Positionen werden IMMER aus der USt-Aufstellung gebildet -- eine Zeile je
+    Steuersatz, nie zusammengefasst; die KI liest in diesem Modus gar keine
+    Einzelpositionen (Zeitersparnis bei 10+ Seiten).
+
+  Verschiedene MwSt-Sätze werden in KEINEM Modus zusammengefasst. Setzen
+  über `POST /api/suppliers/{id}/positionsmodus` (Audit-Eintrag, gilt danach
+  für alle Rechnungen dieses Lieferanten, jederzeit änderbar) bzw. in der
+  Prüfmaske bei "Positionsdaten" oder im Reiter "Lieferanten". Ohne bekannten
+  Lieferanten gilt die Auswahl erst für diese Rechnung und wird beim
+  Anlegen/Bestätigen mitgespeichert. Ist ein Beleg sehr lang (≥5 Seiten oder
+  ≥20 Positionen) und der Modus für diesen Lieferanten noch nie bewusst
+  gesetzt, erscheint ein dezenter Hinweis -- nie eine automatische Umstellung.
+
 ## Härtung (v1.3)
 
 Nach einer Risiko-Durchsicht ergänzt: mehrdeutige Lieferanten-/Anker-Treffer

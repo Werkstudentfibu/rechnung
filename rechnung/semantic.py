@@ -595,15 +595,20 @@ def _supplier_details(data: dict, verify_text: str, res: "FullExtraction") -> No
             res.rejected[key] = f"nicht im PDF gefunden: {val}"
 
 
-def _extract_full_once(prompt_text: str, verify_text: str, cfg, schema: dict) -> FullExtraction:
+def _extract_full_once(prompt_text: str, verify_text: str, cfg, schema: dict,
+                       want_lines: bool) -> FullExtraction:
     """Ein Modellaufruf: ``prompt_text`` geht an das Modell, belegt wird
     immer gegen ``verify_text`` (SPEC Effizienz-Baustein 1: bei der gezielten
     Variante ist das der VOLLE Rechnungstext, auch wenn nur ein Ausschnitt im
     Prompt stand -- ein Modellwert aus dem Ausschnitt muss trotzdem irgendwo
-    im ganzen Beleg stehen, sonst gilt er als nicht belegt)."""
+    im ganzen Beleg stehen, sonst gilt er als nicht belegt). ``want_lines``:
+    Positionen ueberhaupt erfragen -- bei Supplier.positionsmodus
+    'eine_position' (Teil B) immer ``False``: die Positionen werden dort
+    ausschliesslich aus der USt-Aufstellung gebildet, keine KI-Zeitersparnis
+    sonst bei 10+ Seiten Einzelpositionen."""
     res = FullExtraction()
     lines = ("- positionen: Liste der Rechnungspositionen mit beschreibung, menge, "
-             "einzelpreis, netto (Positionssumme), ust_satz\n" if cfg.line_items else "")
+             "einzelpreis, netto (Positionssumme), ust_satz\n" if want_lines else "")
     prompt = _PROMPT_FULL.format(lines=lines, schema=json.dumps(schema, ensure_ascii=False),
                                  text=prompt_text)
     parsed = _parse_json(_call(cfg, prompt, schema))
@@ -664,7 +669,7 @@ def _extract_full_once(prompt_text: str, verify_text: str, cfg, schema: dict) ->
     return res
 
 
-def extract_full(text: str) -> FullExtraction:
+def extract_full(text: str, want_line_items: bool | None = None) -> FullExtraction:
     """Komplette Rechnung strukturiert auslesen (Stufe 2). Leer, wenn aus,
     nicht erreichbar oder unbrauchbare Antwort. Jedes Feld ist im Text belegt
     -- alles andere steht mit Grund in ``rejected``.
@@ -674,22 +679,28 @@ def extract_full(text: str) -> FullExtraction:
     ``_targeted_excerpt``). Fehlt danach noch ein PFLICHTFELD (nicht nur ein
     optionales), fasst genau einmal mit dem vollen Text nach, statt zu raten
     -- der Ausschnitt kann ein Feld verpassen, das keinem der bekannten
-    Schluesselwoerter nahe steht."""
+    Schluesselwoerter nahe steht.
+
+    ``want_line_items``: ueberschreibt ``config.llm().line_items`` nach
+    unten (Teil B, Supplier.positionsmodus 'eine_position') -- die KI wird
+    dann gar nicht erst nach Positionen gefragt, egal was die Konfiguration
+    sagt. ``None`` (Standard) uebernimmt die Konfiguration unveraendert."""
     cfg = _llm_cfg()
     res = FullExtraction()
     if not cfg.enabled or not cfg.full_extraction or not available():
         return res
-    schema = _schema(cfg.line_items)
-    extra = _BANK_KEYWORDS + (_LINE_KEYWORDS if cfg.line_items else ())
+    line_items = cfg.line_items if want_line_items is None else (want_line_items and cfg.line_items)
+    schema = _schema(line_items)
+    extra = _BANK_KEYWORDS + (_LINE_KEYWORDS if line_items else ())
     excerpt = _targeted_excerpt(text, list(sichtbare_felder()), extra_keywords=extra,
                                budget=_FULL_EXCERPT_BUDGET)
-    res = _extract_full_once(excerpt, text, cfg, schema)
+    res = _extract_full_once(excerpt, text, cfg, schema, line_items)
 
     missing_required = [n for n, (vtype, req) in sichtbare_felder().items()
                         if req and vtype in _SIMPLE_TYPES
                         and n not in res.fields and n not in res.rejected]
     if missing_required and excerpt != text:
-        retry = _extract_full_once(text, text, cfg, schema)
+        retry = _extract_full_once(text, text, cfg, schema, line_items)
         for n, fr in retry.fields.items():
             res.fields.setdefault(n, fr)
         for kind, value in retry.supplier.items():

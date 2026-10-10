@@ -97,6 +97,42 @@ def normalize_columns(items: list[dict] | None) -> list[dict]:
     return out
 
 
+# Herkunfts-Markierung einer aus den Summen gebildeten Position (Supplier.
+# positionsmodus == "eine_position", Teil B, Entscheidung Aaron 10.10.2026)
+# -- wie "errechnet"/"kopf" in rechnen.py, damit Pruefungen (positionen-
+# summe, steuersatz-positionen) sie wie eine normale, aber abgeleitete
+# Position behandeln und das UI sie gelb ("Vorschlag") zeigt.
+HERKUNFT_EINE_POSITION = "eine_position"
+
+_SUMMEN_SPALTEN = ("beschreibung", "menge", "einzelpreis_netto", "gesamt_netto",
+                   "mwst_satz", "waehrung")
+
+
+def aus_summen(tax_breakdown: list[dict], bezeichnung: str, currency: str | None) -> list[dict]:
+    """Positionen aus der USt-Aufstellung bilden (Positionsmodus
+    'eine_position', Teil B): eine Zeile JE STEUERSATZ -- verschiedene
+    Saetze werden nie zusammengefasst (Entscheidung Aaron 10.10.2026,
+    Punkt 1). Zeilen ohne Nettobetrag (z.B. eine unvollstaendige
+    Steuerzeile) werden ausgelassen statt geraten."""
+    out: list[dict] = []
+    zeilen = sorted(
+        (r for r in (tax_breakdown or []) if isinstance(r, dict) and r.get("netto") is not None),
+        key=lambda r: r.get("satz") if r.get("satz") is not None else -1)
+    for i, row in enumerate(zeilen, start=1):
+        netto = row["netto"]
+        out.append({
+            "pos": i,
+            "beschreibung": bezeichnung or "",
+            "menge": 1,
+            "einzelpreis_netto": netto,
+            "gesamt_netto": netto,
+            "mwst_satz": row.get("satz"),
+            "waehrung": currency or "",
+            "_herkunft": {k: HERKUNFT_EINE_POSITION for k in _SUMMEN_SPALTEN},
+        })
+    return out
+
+
 def ordered_columns(items: list[dict]) -> list[str]:
     """Spaltenreihenfolge fuer CSV/UI: zuerst die Standardspalten (nur die,
     die tatsaechlich in mind. einer Position vorkommen), danach alle

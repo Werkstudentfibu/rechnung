@@ -32,11 +32,14 @@ from .. import vorlernen
 from ..billing import BillingAddress
 from ..guard import Guard
 from ..ocr import IMAGE_SUFFIXES
-from ..identify import FIXED_FIELD_TYPES, Supplier, identify, supplier_from_doc
+from ..identify import (FIXED_FIELD_TYPES, POSITIONSMODI, POSITIONSMODUS_EINZELN, Supplier,
+                        identify, supplier_from_doc)
 from ..pipeline import (CONF_MIN, EXTRACT_EINVOICE, EXTRACT_TEMPLATE, MASTER_FIELDS,
-                        POSITIONEN_KEY, STATUS_LABELS, confirm_supplier, discard_supplier,
-                        dispatch, invoice_files, journal_rows, journal_totals, load_document,
-                        origin)
+                        POSITIONEN_KEY, STATUS_LABELS, _positionsmodus_abschliessen,
+                        _positionsmodus_hinweis, _positionsmodus_vorbereiten,
+                        confirm_supplier, discard_supplier, dispatch, invoice_files,
+                        journal_rows, journal_totals, load_document, origin,
+                        set_positionsmodus)
 from ..store import Store
 from ..suggest import similar_suppliers
 from ..template import (STANDARD_FIELDS, ausgeblendet, sichtbare_felder, Anchor, Column, FieldResult, LineItemSpec,
@@ -173,6 +176,19 @@ class SupplierPost(BaseModel):
     notes: str = ""
     fixed_fields: dict[str, str] = {}
     currency: str = "EUR"
+    # Positionsmodus (Teil B, Entscheidung Aaron 10.10.2026) -- normalerweise
+    # ueber den eigenen Weg POST .../positionsmodus gesetzt (markiert
+    # ``positionsmodus_gesetzt``); hier nur mitgespeichert, damit ein beim
+    # Anlegen eines neuen Lieferanten bereits gewaehlter Modus nicht verloren
+    # geht ("ohne bekannten Lieferanten gilt die Auswahl fuer diese Rechnung
+    # und wird beim Anlegen mitgespeichert").
+    positionsmodus: str = "einzeln"
+    positionsbezeichnung: str = ""
+
+
+class PositionsmodusPost(BaseModel):
+    modus: str
+    bezeichnung: str = ""
 
 
 class AddressPost(BaseModel):
@@ -591,11 +607,16 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             line_items = positionen.normalize_columns(line_items)
             current_fr = {k: FieldResult(k, v["value"], v["raw"], v["confidence"], v["source"])
                          for k, v in current.items()}
-            rk = rechnen.rechne(current_fr, line_items, doc.text)
+            res.line_items = line_items
+            _positionsmodus_vorbereiten(res, supplier_obj)
+            rk = rechnen.rechne(current_fr, res.line_items, doc.text)
             current = {k: {"value": fr.value, "raw": fr.raw, "confidence": fr.confidence,
                            "source": fr.source} for k, fr in rk.fields.items()}
-            line_items = rk.line_items
-            tax_breakdown_view = rk.tax_breakdown
+            res.fields, res.line_items, res.tax_breakdown = rk.fields, rk.line_items, rk.tax_breakdown
+            _positionsmodus_abschliessen(res, supplier_obj)
+            line_items = res.line_items
+            tax_breakdown_view = res.tax_breakdown
+        _positionsmodus_hinweis(res, supplier_obj)
         for v in current.values():
             v["origin"] = origin(v["source"])
             # Vierstufige Herkunft (gelesen/errechnet/kopf/korrigiert, SPEC
@@ -669,6 +690,10 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "status": res.status,
             "status_label": STATUS_LABELS.get(res.status, res.status),
             "hold_reasons": res.hold_reasons,
+            # Hinweise, die nichts blockieren (z.B. der "Langer Beleg"-
+            # Vorschlag fuer den Positionsmodus, Teil B) -- anders als
+            # ``hold_reasons`` ohne "ACHTUNG".
+            "hinweise": res.hinweise,
             "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in res.checks],
             "ocr": res.ocr,
         })
@@ -1155,8 +1180,38 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             bestaetigt=existing.bestaetigt if existing else True,
             entwurf_quelle=existing.entwurf_quelle if existing else "",
             entwurf_am=existing.entwurf_am if existing else "",
+            # Positionsmodus (Teil B): ein vorhandener Lieferant aendert ihn
+            # ausschliesslich ueber POST .../positionsmodus -- hier bleibt er
+            # unberuehrt, damit ein einfaches Speichern der Stammdaten ihn
+            # nicht nebenbei zuruecksetzt. Nur beim ERSTEN Anlegen (kein
+            # ``existing``) uebernimmt dieser Endpunkt den beim Pruefen der
+            # Rechnung gewaehlten Modus mit ("ohne bekannten Lieferanten gilt
+            # die Auswahl fuer diese Rechnung und wird beim Anlegen mitgespeichert").
+            positionsmodus=(existing.positionsmodus if existing
+                           else (body.positionsmodus if body.positionsmodus in POSITIONSMODI
+                                 else POSITIONSMODUS_EINZELN)),
+            positionsbezeichnung=(existing.positionsbezeichnung if existing
+                                  else body.positionsbezeichnung.strip()),
+            positionsmodus_gesetzt=(existing.positionsmodus_gesetzt if existing
+                                    else body.positionsmodus != POSITIONSMODUS_EINZELN),
         ))
         return JSONResponse({"ok": True})
+
+    @app.post("/api/suppliers/{supplier_id}/positionsmodus")
+    def set_positionsmodus_ep(supplier_id: str, body: PositionsmodusPost) -> JSONResponse:
+        """Positionsmodus setzen (Gruppe "Positionsdaten" beim Pruefen bzw.
+        Reiter "Lieferanten", Teil B) -- gilt danach fuer alle Rechnungen
+        dieses Lieferanten, Audit-Eintrag mit Operator."""
+        from ..config import operator as _operator
+
+        if body.modus not in POSITIONSMODI:
+            raise HTTPException(400, f"Unbekannter Positionsmodus {body.modus!r}")
+        try:
+            sup = set_positionsmodus(store, supplier_id, body.modus, body.bezeichnung,
+                                     _operator())
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        return JSONResponse({"ok": True, "supplier": sup.to_dict()})
 
     @app.delete("/api/suppliers/{supplier_id}")
     def delete_supplier_ep(supplier_id: str) -> JSONResponse:

@@ -1209,6 +1209,99 @@ automatisch durch, was ein Mensch nicht bestaetigt hat.
    Mehrfachtreffer "mehrdeutig" -> Mensch -- keiner der beiden gewinnt
    stillschweigend.
 
+§7ac **Beträge aus dem Kontext herleiten** (Befund Aaron 09.10.2026, Modul
+`summen.py`): das kleine lokale Modell liest Beträge, versteht aber nicht
+sicher, welcher Brutto/Netto ist, wenn es nicht wörtlich dasteht ("Total
+inkl. MWST" ohne separates "Netto"-Label). `summen.summen_aus_kontext`
+sammelt alle Geldbeträge im Volltext mit Kontextwörtern (de/en/fr/it) und
+ihrer Position, bildet Kandidaten-Tripel (netto, ust, brutto) bzw.
+Steuerzeilen je Satz (Mischsätze, wiederverwendet `textnorm.
+parse_tax_summary`) und prüft sie auf rechnerische Stimmigkeit (Brutto =
+Netto + USt ± Rundungstoleranz, Satz gültig für die Währung,
+`identify.nearest_valid_rate`). Bewertet wird über Schlüsselwörter (stark:
+"Total"/"Rechnungsbetrag"/"Netto"/"MWST" usw., schwach: "Zwischensumme" --
+Rabatt/Versand/Skonto zählen nie als Netto/Brutto/USt), Lage im Text
+(Endbetrag meist zuletzt) und den Schweizer QR-Zahlteil-Betrag (stärkstes
+Signal, falls vorhanden). Nur bei einem eindeutigen Sieger (Mindestabstand
+`_MARGIN` zum Zweitbesten, zwei rechnerisch gleichwertige Kandidaten gelten
+nicht als Widerspruch) wird etwas übernommen -- sonst bleibt
+`SummenErgebnis` leer und `hinweis` nennt den Grund (kein Raten).
+
+Eingebaut in `rechnen.rechne()` (vor `_ergaenze_kopf`, `rechnen.
+_kopf_konsistent`): läuft nur, wenn die gelesenen Kopf-Beträge NICHT
+aufgehen (Netto=Brutto trotz Steuer, Summe geht nicht auf, Satz ungültig)
+oder zu wenige bekannt sind. `rechnen._uebernehme_summen` ersetzt dabei ein
+bereits gelesenes Feld NUR, wenn eine nachweisliche Widerspruch-Kombination
+vorliegt -- fehlt nur ein Geschwisterfeld, bleibt ein bereits korrektes
+gelesenes Feld unangetastet (sonst würde ein zufällig textlich passender
+"errechneter" Wert beim Anlernen fälschlich mitgelernt, siehe `learn.
+confirmed_values`, die Quelle `errechnet` jetzt grundsätzlich ausschließt).
+Eine manuelle Korrektur und der Schweizer QR-Zahlteil-Betrag
+(`FieldResult.source == "qr"`) gewinnen immer (`_SUMMEN_GESPERRTE_QUELLEN`).
+Herkunft im UI wie "errechnet" (gelbes "Vorschlag"-Feld).
+
+§7ad **Positionsmodus je Lieferant** (Entscheidung Aaron 10.10.2026):
+1. Verschiedene MwSt-Sätze werden in KEINEM Modus zusammengefasst -- immer
+   eine Positionszeile je Steuersatz.
+2. Der Modus (`Supplier.positionsmodus`, Standard `"einzeln"`; altes
+   `suppliers.json` ohne das Feld lädt als `"einzeln"`) hängt am
+   Lieferanten, nicht an der einzelnen Rechnung, und bleibt stabil.
+   Normalfall "einzeln" (unverändertes Verhalten); nur wenige Lieferanten
+   brauchen `"zusammenfassung"` oder `"eine_position"`.
+3. Festgelegt wird er -- wie in Abbyy FlexiCapture die Entscheidung der
+   bearbeitenden Person -- beim Prüfen einer Rechnung (keine
+   Stammdaten-Rechte nötig): `pipeline.set_positionsmodus`/
+   `POST /api/suppliers/{id}/positionsmodus` (Audit-Eintrag mit Operator,
+   markiert `Supplier.positionsmodus_gesetzt`). Ohne bekannten Lieferanten
+   gilt die Auswahl nur für diese Rechnung (`STATE.supplier` im UI) und wird
+   beim Anlegen/Bestätigen mitgespeichert (`POST /api/suppliers` übernimmt
+   `positionsmodus`/`positionsbezeichnung` NUR beim allerersten Anlegen,
+   ein bestehender Lieferant ändert seinen Modus ausschließlich über den
+   eigenen Weg).
+
+   Modi:
+   - `"einzeln"`: wie bisher (Vorlagen-/KI-Positionen).
+   - `"zusammenfassung"`: die Übersichtstabelle am Rechnungsende gilt als
+     Positionstabelle -- dafür ist am bestehenden Anlern-Mechanismus
+     (`learn.learn_line_items`/`LineItemSpec`) nichts zu ändern, sobald eine
+     Vorlage dafür gelernt ist, wendet sie sich wie jede andere an. Ohne
+     Vorlage bekommt die KI (`pipeline._llm_full`) gezielt nur die letzten
+     `_ZUSAMMENFASSUNG_SCHLUSSSEITEN` Seiten (`pipeline._schlussseiten_text`)
+     statt der ganzen (ggf. langen) Rechnung -- spart Laptop-Zeit.
+   - `"eine_position"` (mit `Supplier.positionsbezeichnung`, z.B. "Strom"):
+     die Positionen werden IMMER aus der USt-Aufstellung gebildet
+     (`positionen.aus_summen`, eine Zeile je Steuersatz, nie
+     zusammengefasst) -- nie aus gelesenen Einzelpositionen (weder Vorlage
+     noch KI noch E-Rechnung). `pipeline._positionsmodus_vorbereiten`
+     verwirft dafür vor `rechnen.rechne` etwaig gelesene Positionen (die
+     USt-Aufstellung entsteht dann aus den Kopf-Feldern/Teil A), `pipeline.
+     _positionsmodus_abschliessen` baut danach die Zeile(n). Die KI wird in
+     diesem Modus gar nicht erst nach Positionen gefragt (`semantic.
+     extract_full(..., want_line_items=False)`). Eine manuelle Korrektur der
+     Positionstabelle für GENAU diese Rechnung gewinnt trotzdem immer.
+
+   Positionen in den Modi 2/3 tragen `_herkunft` je Spalte (Modus 3:
+   `positionen.HERKUNFT_EINE_POSITION`) wie bei `rechnen.py` (`errechnet`/
+   `kopf`) -- damit laufen `positionen-summe`/`steuersatz-positionen`
+   korrekt, und das UI zeigt sie kursiv/gelb wie einen "Vorschlag".
+
+4. **UI** (Abbyy-Maske, Gruppe "Positionsdaten"): Auswahl "einzeln /
+   Zusammenfassung / eine Position je Steuersatz" + Feld "Bezeichnung" (nur
+   bei `eine_position`). Bei bekanntem (bestätigtem) Lieferanten speichert
+   eine Änderung sofort am Lieferanten und lädt die Rechnung neu; ohne
+   bekannten Lieferanten nur in `STATE.supplier` (geht beim Anlegen/
+   Bestätigen mit). Reiter "Lieferanten": eigene Box je Lieferant mit
+   eigenem "Positionsmodus speichern"-Knopf (eigener API-Weg, nicht das
+   allgemeine Stammdaten-Speichern). Ist ein Beleg sehr lang (`_LANGER_
+   BELEG_SEITEN` Seiten oder `_LANGER_BELEG_POSITIONEN` Positionen) UND der
+   Modus für diesen Lieferanten noch nie bewusst gesetzt
+   (`positionsmodus_gesetzt`), erscheint ein dezenter Hinweis
+   (`pipeline._positionsmodus_hinweis`, `res.hinweise`) -- nie eine
+   automatische Umstellung.
+
+   Export (JobRouter-Payload): Positionen gehen wie angezeigt (vorhandene
+   `lineItems`-Logik) -- keine weitere Änderung nötig.
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).
