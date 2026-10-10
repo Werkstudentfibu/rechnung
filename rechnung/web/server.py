@@ -1353,11 +1353,13 @@ def create_app(store: Store, samples: Path) -> FastAPI:
 
     @app.get("/api/qualitaet")
     def qualitaet_ep() -> JSONResponse:
-        """Reiter "Qualitaet": Lieferanten-Gedaechtnis (plausi.py)."""
-        from .. import plausi
+        """Reiter "Qualitaet": Lieferanten-Gedaechtnis (plausi.py),
+        E-Rechnungs-Kandidaten (e_rechnung.py)."""
+        from .. import e_rechnung, plausi
 
         return JSONResponse({"profile": plausi.profile(store),
-                             "min_rechnungen": plausi.MIN_RECHNUNGEN})
+                             "min_rechnungen": plausi.MIN_RECHNUNGEN,
+                             "e_rechnung_kandidaten": e_rechnung.kandidaten(store)})
 
     @app.post("/api/testsatz")
     def testsatz_start() -> JSONResponse:

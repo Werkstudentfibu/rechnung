@@ -38,6 +38,8 @@ rechnung vorlernen <ordner>          # Altbestand gruppieren, Vorlagen-Vorschlae
 rechnung vorlernen                   # Vorlernen-Gruppen auflisten
 rechnung vorlernen --bestaetigen GRUPPE --operator NAME   # Vorlage einer Gruppe aktivieren
 rechnung testsatz [--json] [--lieferant X] [--variante A] [--ohne-ki]   # bestaetigte Rechnungen neu lesen + messen
+rechnung e-rechnung-kandidaten [--json]   # wer schickt noch PDF/Scan statt E-Rechnung?
+rechnung e-rechnung-kandidaten --anschreiben LIEFERANT_ID [--an ADRESSE]   # Anschreiben-Text (nichts wird versendet)
 ```
 
 `app` und `web` sind dieselbe Oberfläche (gleicher FastAPI-Code) – `app`
@@ -647,6 +649,57 @@ Prüfmaske: lernbar wie jedes Feld, ohne Vorlage per Textregel hinter einem
 eindeutigen Label („Leistungsdatum:“, „Lieferdatum“, …) -- nie per KI
 (`template.NIE_KI`, der KI-Prompt bleibt unverändert). Die Erkennung ist
 textbasiert und vereinfacht (z.B. Anschriften über PLZ/Ort) und kann irren.
+
+### 4. E-Rechnungen bevorzugen (Übersicht + Anschreiben)
+
+`rechnung e-rechnung-kandidaten` (und Reiter „Qualität“) listet die
+Lieferanten mit bestätigten Rechnungen, die als PDF oder Scan statt als
+E-Rechnung (ZUGFeRD/XRechnung) kamen -- sortiert nach Anzahl solcher
+Rechnungen, dann nach Korrekturaufwand (Korrektur-Ereignisse aus
+`events.jsonl`). „Scan“ = bei der Verarbeitung lief die Texterkennung.
+
+Vorlage für ein Anschreiben: `rechnung/web/static/anschreiben-e-rechnung.txt`
+(im UI verlinkt). `--anschreiben LIEFERANT_ID` füllt Name/Anschrift aus den
+Stammdaten und das Datum, `--an` die Empfangsadresse; alle übrigen
+Platzhalter bleiben sichtbar stehen. **Es wird nichts versendet.**
+
+```text
+{FIRMA}
+{ABSENDER_ANSCHRIFT}
+
+An
+{LIEFERANT}
+{LIEFERANT_ANSCHRIFT}
+
+{ORT}, {DATUM}
+
+Rechnungen künftig als E-Rechnung (ZUGFeRD/XRechnung)
+
+Sehr geehrte Damen und Herren,
+
+vielen Dank für die gute Zusammenarbeit. Wir stellen unseren Rechnungseingang
+auf elektronische Rechnungen um und bitten Sie, uns Rechnungen künftig als
+E-Rechnung im Format ZUGFeRD (Profil EN 16931 oder höher)
+oder XRechnung zu senden, und zwar an:
+
+    {EMPFANG_ADRESSE}
+
+Bitte geben Sie dabei wie bisher unsere Bestell- bzw. Kundennummer an:
+{KUNDENNUMMER}
+
+Zum Hintergrund: Seit dem 1. Januar 2025 müssen Unternehmen im inländischen
+B2B-Geschäft E-Rechnungen empfangen können. Für den Versand gelten
+Übergangsfristen bis Ende 2026 bzw. bis Ende 2027 für Unternehmen mit einem
+Vorjahresumsatz von höchstens 800.000 Euro. Wenn Sie schon heute E-Rechnungen
+erstellen können, freuen wir uns, wenn Sie bereits jetzt umstellen.
+
+Bei Fragen erreichen Sie uns unter {KONTAKT}.
+
+Mit freundlichen Grüßen
+
+{ANSPRECHPARTNER}
+{FIRMA}
+```
 
 ## Härtung (v1.3)
 
