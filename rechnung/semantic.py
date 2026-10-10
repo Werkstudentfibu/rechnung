@@ -44,6 +44,35 @@ from .textnorm import coerce, compact, find_ustids, iban_valid, norm, value_in_t
 
 # Typen, die als einfacher String zurueckkommen -- taxblock/Positionen sind
 # strukturiert und bewusst (noch) nicht Teil dieses Fallbacks (v1 von §7f).
+# ---- Extraktionsvarianten (Testsatz, Entscheidung Aaron 10.10.2026) --------
+# Geplanter Vergleich: A = eine grosse KI-Anfrage ueber die ganze Rechnung
+# (heutiges Verhalten), B = mehrere Block-Anfragen, C = Ueberblick + Bloecke.
+# Gebaut ist nur A; B/C sind hier als Namen vorgesehen, damit der Testsatz
+# (``rechnung testsatz --variante``) sie spaeter ohne Umbau messen kann. Die
+# Variante wird von ``pipeline.process`` bis zur KI-Stelle (``_llm_full``)
+# durchgereicht -- eine unbekannte oder noch nicht gebaute Variante ist ein
+# Fehler, nie ein stiller Rueckfall auf A (kein Raten).
+VARIANTE_A = "A"
+VARIANTEN = {"A": "eine KI-Anfrage ueber die ganze Rechnung",
+             "B": "KI-Anfragen je Block (noch nicht gebaut)",
+             "C": "Ueberblick + Bloecke (noch nicht gebaut)"}
+VARIANTEN_GEBAUT = frozenset({VARIANTE_A})
+
+
+def pruefe_variante(variante: str | None) -> str:
+    """Normalisiert die Variante ("a" -> "A"); ``ValueError`` bei
+    unbekannter, ``NotImplementedError`` bei vorgesehener, aber noch nicht
+    gebauter Variante."""
+    v = (variante or VARIANTE_A).strip().upper()
+    if v not in VARIANTEN:
+        raise ValueError(f"Unbekannte Extraktionsvariante {variante!r} "
+                         f"(bekannt: {', '.join(VARIANTEN)})")
+    if v not in VARIANTEN_GEBAUT:
+        raise NotImplementedError(f"Extraktionsvariante {v} ist vorgesehen, aber noch "
+                                  f"nicht gebaut ({VARIANTEN[v]})")
+    return v
+
+
 _SIMPLE_TYPES = {"text", "number", "date", "amount"}
 
 # Zeichenbudget fuer den Rechnungstext im Prompt. Kopf- und Fussbereich einer

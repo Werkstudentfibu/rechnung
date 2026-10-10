@@ -865,7 +865,8 @@ def _apply_line_item_correction(res: "Result", corrections: dict) -> None:
             [dict(it) for it in items if isinstance(it, dict)])
 
 
-def _llm_full(res: Result, doc, positionsmodus: str = POSITIONSMODUS_EINZELN) -> None:
+def _llm_full(res: Result, doc, positionsmodus: str = POSITIONSMODUS_EINZELN,
+              variante: str = semantic.VARIANTE_A) -> None:
     """Stufe 2: komplette KI-Extraktion, wenn es (noch) kein Template gibt.
     Fuellt nur, was nicht schon da ist -- Stammdaten aus dem gepflegten
     Lieferanten-Datensatz (``library``) gewinnen gegen das Modell.
@@ -875,7 +876,13 @@ def _llm_full(res: Result, doc, positionsmodus: str = POSITIONSMODUS_EINZELN) ->
     stattdessen aus der USt-Aufstellung gebildet, ``positionen.aus_summen``
     in ``_positionsmodus_post``). 'zusammenfassung' -- die Uebersichts-
     tabelle steht am Rechnungsende, die KI bekommt nur die Schlussseiten
-    statt der ganzen (ggf. langen) Rechnung."""
+    statt der ganzen (ggf. langen) Rechnung.
+
+    ``variante`` (Testsatz, Aaron 10.10.2026): hier wird kuenftig zwischen
+    A (eine Anfrage, unten), B (Bloecke) und C (Ueberblick + Bloecke)
+    verzweigt -- gebaut ist nur A (``semantic.pruefe_variante``)."""
+    if semantic.pruefe_variante(variante) != semantic.VARIANTE_A:  # pragma: no cover
+        raise NotImplementedError(variante)
     text = (_schlussseiten_text(doc) if positionsmodus == POSITIONSMODUS_ZUSAMMENFASSUNG
             else extraction_text(doc))
     full = semantic.extract_full(text, want_line_items=(positionsmodus != POSITIONSMODUS_EINE_POSITION))
@@ -989,7 +996,8 @@ def _gegencheck(res: "Result", doc, tpl: Template, store: Store, timer: StageTim
 def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
                         extra_checks: list[Check] | None = None,
                         timer: StageTimer | None = None,
-                        qr: "swissqr.SwissQR | None" = None) -> None:
+                        qr: "swissqr.SwissQR | None" = None,
+                        variante: str = semantic.VARIANTE_A) -> None:
     """Rechnung ohne Template (Lieferant unbekannt oder noch nicht angelernt):
     optional KI-Extraktion (Stufe 2), Korrekturen einmischen und, sobald Werte
     da sind, pruefen. Damit kann ein Mensch die Werte (KI-Vorschlag oder
@@ -1003,7 +1011,7 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
     modus = _positionsmodus(supplier)
     if use_llm:
         with timer.stage("ki"):
-            _llm_full(res, doc, modus)
+            _llm_full(res, doc, modus, variante)
     machine = dict(res.fields)
     corrections = store.corrections(doc.sha256)
     _apply_corrections(res.fields, corrections)
@@ -1153,14 +1161,20 @@ def _positionsmodus_hinweis(res: "Result", supplier: Supplier | None) -> None:
 
 
 def process(path: str | Path, store: Store, use_llm: bool = True,
-           create_draft_supplier: bool = False) -> Result:
+           create_draft_supplier: bool = False,
+           variante: str = semantic.VARIANTE_A) -> Result:
     """``create_draft_supplier`` (Standard ``False``): legt bei einem nicht
     erkannten Lieferanten einen Entwurf an (``Supplier.bestaetigt=False``,
     Entscheidung Aaron 09.10.2026) -- nur in der echten Verarbeitung
     (``scan_folder``/CLI ``rechnung scan``/Web-UI ``/api/scan``), NIE im
     Trockenlauf/Vorschau (``/api/invoice``-Anzeige, ``messen``,
     ``vorlernen``) -- deshalb ein expliziter Parameter statt eines
-    Seiteneffekts, den jeder Aufrufer woertlich entscheiden muss."""
+    Seiteneffekts, den jeder Aufrufer woertlich entscheiden muss.
+
+    ``variante``: Extraktionsvariante fuer den KI-Teil (Testsatz-Vergleich
+    A/B/C, Aaron 10.10.2026) -- unbekannt/nicht gebaut = Fehler, bevor
+    irgendetwas gelesen wird."""
+    variante = semantic.pruefe_variante(variante)
     path = Path(path)
     timer = StageTimer()
     # Passwortgeschuetztes PDF: nichts lesbar, nichts zu raten -> Mensch.
@@ -1240,7 +1254,8 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
             match = _auto_draft_pdf(res, doc, store, use_llm, timer)
     if not match:
         res.hold_reasons.insert(0, f"Lieferant: {why}")
-        _finish_untemplated(res, doc, None, store, use_llm, [addr_check], timer, qr_obj)
+        _finish_untemplated(res, doc, None, store, use_llm, [addr_check], timer, qr_obj,
+                            variante)
         _ocr_adjust(res, o)
         _apply_hold(res)
         _positionsmodus_hinweis(res, None)
@@ -1270,7 +1285,8 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
     if tpl is None:
         res.status = NO_TEMPLATE
         _inject_library_fields(res.fields, supplier)
-        _finish_untemplated(res, doc, supplier, store, use_llm, [addr_check], timer, qr_obj)
+        _finish_untemplated(res, doc, supplier, store, use_llm, [addr_check], timer, qr_obj,
+                            variante)
         if create_draft_supplier:
             _enrich_draft(res, supplier, store)
         _ocr_adjust(res, o)

@@ -16,6 +16,12 @@ Ablauf ``aktualisieren()``:
    geaendert, Abhaengigkeiten nachinstallieren.
 5. Tests (``pytest -q -x``). Rot -> zurueck auf den alten Stand
    (``zurueckgerollt``), das laufende Programm bleibt wie es war.
+6. Testsatz-Schutz (testsatz.py, Aaron 10.10.2026): gibt es mindestens 5
+   bestaetigte Testfaelle, liest der NEUE Stand sie im Trockenlauf; sinkt
+   die Gesamt-Trefferquote gegenueber dem letzten gespeicherten Lauf (gleicher
+   Filter) um mehr als 2 Prozentpunkte -> zurueckgerollt mit Grund.
+   ``RECHNUNG_UPDATE_TESTSATZ``: ``0`` = aus, Standard = nur Testfaelle ohne
+   KI (Vorlage/E-Rechnung, KI auf dem Laptop ist langsam), ``voll`` = alle.
 
 ``data\\`` und ``rechnung.env`` liegen ausserhalb des Klons und werden nie
 angefasst. Jeder Versuch steht in ``<data>/update.log``.
@@ -38,6 +44,12 @@ RESTART_EXIT_CODE = 42
 GIT_TIMEOUT_S = 90
 PIP_TIMEOUT_S = 900
 TEST_TIMEOUT_S = 900
+TESTSATZ_TIMEOUT_S = 1800
+# ab so vielen Testfaellen wird der Testsatz-Schutz aktiv (weniger: zu
+# zufaellig, ein einzelnes Feld waere schon mehrere Prozentpunkte)
+TESTSATZ_MIN_FAELLE = 5
+# erlaubter Rueckgang der Gesamt-Trefferquote in Prozentpunkten
+TESTSATZ_MAX_RUECKGANG = 2.0
 
 
 @dataclass
@@ -98,6 +110,63 @@ def _pip_install(root: Path, python: str) -> subprocess.CompletedProcess:
 
 def _tests(root: Path, python: str) -> subprocess.CompletedProcess:
     return _run([python, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider"], root, TEST_TIMEOUT_S)
+
+
+def _testsatz_modus() -> str:
+    """"aus" | "ohne_ki" (Standard) | "voll" -- aus RECHNUNG_UPDATE_TESTSATZ."""
+    import os
+
+    v = os.environ.get("RECHNUNG_UPDATE_TESTSATZ", "").strip().lower()
+    if v in ("0", "aus", "nein", "false", "off"):
+        return "aus"
+    return "voll" if v == "voll" else "ohne_ki"
+
+
+def _testsatz(root: Path, data_root: Path, python: str, ohne_ki: bool) -> tuple[dict | None, str]:
+    """Testsatz mit dem NEUEN Stand (eigener Prozess aus dem Klon) im
+    Trockenlauf -> (Bericht, Fehlertext). Speichert selbst nichts -- erst
+    nach bestandenem Vergleich wird der Lauf als neuer Bezug abgelegt."""
+    import json
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "testsatz.json"
+        cmd = [python, "-m", "rechnung.cli", "--data", str(data_root), "testsatz",
+               "--kein-bericht", "--ausgabe", str(out)] + (["--ohne-ki"] if ohne_ki else [])
+        r = _run(cmd, root, TESTSATZ_TIMEOUT_S)
+        if r.returncode != 0 or not out.exists():
+            return None, _letzte_zeilen(r.stdout + r.stderr)
+        try:
+            return json.loads(out.read_text("utf-8")), ""
+        except (OSError, ValueError) as exc:
+            return None, f"Bericht nicht lesbar: {exc}"
+
+
+def _testsatz_schutz(root: Path, data_root: Path | None, python: str) -> str:
+    """Leerer Text = in Ordnung (oder nicht anwendbar), sonst Grund fuers
+    Zurueckrollen."""
+    modus = _testsatz_modus()
+    if modus == "aus" or data_root is None:
+        return ""
+    from . import testsatz
+
+    ohne_ki = modus != "voll"
+    if testsatz.anzahl(data_root, nur_ohne_ki=ohne_ki) < TESTSATZ_MIN_FAELLE:
+        return ""
+    neu, fehler = _testsatz(root, data_root, python, ohne_ki)
+    if neu is None:
+        return "Testsatz liess sich mit dem neuen Stand nicht ausfuehren:\n" + fehler
+    alt = testsatz.letzter_bericht(data_root, neu.get("filter"))
+    neu["vergleich"] = testsatz.vergleich(alt, neu)
+    qa, qn = (alt or {}).get("trefferquote"), neu.get("trefferquote")
+    if qa is not None and qn is not None and qa - qn > TESTSATZ_MAX_RUECKGANG:
+        schlechter = "; ".join(neu["vergleich"]["schlechter"][:8])
+        return (f"Testsatz schlechter: Trefferquote {qa:.1f} % -> {qn:.1f} % "
+                f"(mehr als {TESTSATZ_MAX_RUECKGANG:g} Prozentpunkte)"
+                + (f" -- schlechter bei: {schlechter}" if schlechter else ""))
+    neu["selbstupdate"] = True
+    testsatz.speichern(data_root, neu)
+    return ""
 
 
 def _letzte_zeilen(text: str, n: int = 15) -> str:
@@ -171,6 +240,9 @@ def _aktualisieren(root: Path, data_root: Path | None, tests: bool, python: str)
             t = _tests(root, python)
             if t.returncode != 0:
                 return zurueck("Tests fehlgeschlagen:\n" + _letzte_zeilen(t.stdout + t.stderr))
+            grund = _testsatz_schutz(root, data_root, python)
+            if grund:
+                return zurueck(grund)
     except subprocess.TimeoutExpired as exc:
         return zurueck(f"Zeitueberschreitung: {exc}")
 

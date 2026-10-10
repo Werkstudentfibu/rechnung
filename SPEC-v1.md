@@ -1302,6 +1302,22 @@ Herkunft im UI wie "errechnet" (gelbes "Vorschlag"-Feld).
    Export (JobRouter-Payload): Positionen gehen wie angezeigt (vorhandene
    `lineItems`-Logik) -- keine weitere Änderung nötig.
 
+## 7ac. Qualität: Testsatz, Lieferanten-Gedächtnis, Pflichtangaben, E-Rechnung, Fehlerstatistik (2026-10-10)
+
+Entscheidung Aaron 10.10.2026 ("alle 5 Punkte"). Reiter "Qualität" im UI.
+
+1. **Testsatz** (`testsatz.py`): bestätigte Rechnung = Testfall (Original im
+   Archiv, Soll-Werte `data/testsatz/<sha>.json`, geschrieben beim Bestätigen
+   im UI; ältere aus `processed.jsonl` hergeleitet, autonom übernommene
+   zählen nicht). Trockenlauf über `guard.Guard(target=testsatz.TARGET)` mit
+   `_TrockenStore` (Korrekturen ausgeblendet), `protokoll=False` (kein Audit).
+   Vergleich normalisiert, Bericht `data/berichte/testsatz_*.json`, Vergleich
+   mit letztem Lauf gleichen Filters. Extraktionsvariante A/B/C als Parameter
+   von `pipeline.process` (nur A gebaut). Selbst-Update: nach den Tests
+   Testsatz mit dem neuen Stand (Kindprozess, `--kein-bericht --ausgabe`),
+   Rückgang > 2 Prozentpunkte → zurückrollen; neuer Bezug wird erst nach
+   bestandenem Vergleich gespeichert. `RECHNUNG_UPDATE_TESTSATZ=0|voll`.
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).

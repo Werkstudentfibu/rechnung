@@ -43,9 +43,11 @@ def _resolve(target: str):
     return getattr(importlib.import_module(mod), name)
 
 
-def _worker(conn, data_root: str, target: str) -> None:
+def _worker(conn, data_root: str, target: str, extra: dict | None = None) -> None:
     """Arbeitsprozess: Rechnungen nacheinander verarbeiten, bis der Elternteil
-    die Leitung schliesst oder ``None`` schickt."""
+    die Leitung schliesst oder ``None`` schickt. ``extra``: zusaetzliche
+    Schluesselwort-Argumente fuer ``target`` (z.B. die Extraktionsvariante
+    des Testsatzes, Aaron 10.10.2026)."""
     from .store import Store
 
     func = _resolve(target)
@@ -59,7 +61,8 @@ def _worker(conn, data_root: str, target: str) -> None:
         path, use_llm, create_draft_supplier = msg
         try:
             conn.send(("ok", func(path, Store(data_root), use_llm=use_llm,
-                                  create_draft_supplier=create_draft_supplier)))
+                                  create_draft_supplier=create_draft_supplier,
+                                  **(extra or {}))))
         except Exception as e:  # noqa: BLE001 -- jede Rechnung einzeln abfangen
             conn.send(("err", f"{type(e).__name__}: {e}"))
 
@@ -85,8 +88,14 @@ def aborted_result(path, reason: str, kind: str, duration: float):
 
 class Guard:
     def __init__(self, data_root, timeout: float | None = None, mode: str = "process",
-                 target: str = DEFAULT_TARGET):
+                 target: str = DEFAULT_TARGET, extra: dict | None = None,
+                 protokoll: bool = True):
         self.data_root = str(data_root)
+        # extra: weitere kwargs fuer target (Testsatz: Extraktionsvariante);
+        # protokoll=False: Abbruch NICHT ins Audit schreiben -- Trockenlauf des
+        # Testsatzes soll nichts speichern (Aaron 10.10.2026).
+        self.extra = dict(extra or {})
+        self.protokoll = protokoll
         self.timeout = process_timeout() if timeout is None else max(0.0, float(timeout))
         self.mode = mode
         self.target = target
@@ -100,7 +109,7 @@ class Guard:
         # und identisch unter Windows.
         ctx = mp.get_context("spawn")
         parent, child = ctx.Pipe()
-        self._proc = ctx.Process(target=_worker, args=(child, self.data_root, self.target),
+        self._proc = ctx.Process(target=_worker, args=(child, self.data_root, self.target, self.extra),
                                  daemon=True, name="rechnung-worker")
         self._proc.start()
         child.close()
@@ -142,7 +151,8 @@ class Guard:
         with self._lock:
             if self.timeout <= 0:
                 res = _resolve(self.target)(path, Store(self.data_root), use_llm=use_llm,
-                                            create_draft_supplier=create_draft_supplier)
+                                            create_draft_supplier=create_draft_supplier,
+                                            **self.extra)
                 res.duration_s = round(time.monotonic() - t0, 2)
                 return res
             kind, payload = (self._run_process(path, use_llm, create_draft_supplier)
@@ -158,6 +168,8 @@ class Guard:
             res = aborted_result(path, reason, "zeitgrenze", duration)
         else:
             res = aborted_result(path, f"Verarbeitungsfehler: {payload}", "fehler", duration)
+        if not self.protokoll:
+            return res
         Store(self.data_root).audit("verarbeitung_abgebrochen", {
             "file": Path(path).name, "sha256": res.sha256, "art": res.aborted,
             "grund": res.hold_reasons[0], "dauer_s": res.duration_s,
@@ -187,7 +199,8 @@ class Guard:
         def run():
             try:
                 box["res"] = ("ok", func(path, Store(self.data_root), use_llm=use_llm,
-                                         create_draft_supplier=create_draft_supplier))
+                                         create_draft_supplier=create_draft_supplier,
+                                         **self.extra))
             except Exception as e:  # noqa: BLE001
                 box["res"] = ("err", f"{type(e).__name__}: {e}")
 

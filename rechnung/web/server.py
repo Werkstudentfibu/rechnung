@@ -28,6 +28,7 @@ from .. import rechnen
 from .. import semantic
 from .. import split
 from .. import shadow
+from .. import testsatz
 from .. import vorlernen
 from ..billing import BillingAddress
 from ..guard import Guard
@@ -945,6 +946,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if tpl.secured != was_secured:
             res = _process_for_confirm(path)
         _log_confirmed(path, res, tpl.id, tpl.variant)
+        # Goldstandard fuer den Testsatz (testsatz.py, Aaron 10.10.2026)
+        testsatz.merken(store, res, _operator())
         shadow.record(store, res, _operator())
         eventlog.record(store, res, _operator())
         # Stufe 1: aus den eben bestaetigten Werten das Template ergaenzen/
@@ -972,6 +975,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if not store.seen_sha_template(res.sha256, res.template_id):
             _log_confirmed(path, res, res.template_id, res.template_variant,
                            extraction=res.extraction)
+        testsatz.merken(store, res, operator)
         shadow.record(store, res, operator)
         eventlog.record(store, res, operator)
         learned = learn.learn_from_confirmed(store, res, _load(path), operator)
@@ -985,6 +989,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         store.mark_confirmed(res.sha256, operator)
         if not store.seen_sha_template(res.sha256, None):
             _log_confirmed(path, res, None, None, extraction=EXTRACT_EINVOICE)
+        testsatz.merken(store, res, operator)
         shadow.record(store, res, operator)
         eventlog.record(store, res, operator)
         human.erledigt(store, res, operator)
@@ -1327,6 +1332,43 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         unsichere Felder, Korrekturen) je Pruefung/Feld und Lieferant,
         optional ab einem Datum (``seit=YYYY-MM-DD``). Siehe eventlog.py."""
         return JSONResponse(eventlog.report(store, seit))
+
+    # ---- Qualitaet: Testsatz aus bestaetigten Rechnungen (testsatz.py) ----
+    # Laeuft im Hintergrund (eigener Arbeitsprozess mit Zeitgrenze je
+    # Rechnung), das UI fragt den Fortschritt ab (Aaron 10.10.2026).
+    import threading as _threading
+
+    testsatz_lauf: dict = {"laeuft": False, "fertig": 0, "gesamt": 0, "datei": "",
+                           "fehler": "", "gestartet": ""}
+
+    @app.get("/api/testsatz")
+    def testsatz_status() -> JSONResponse:
+        letzter = testsatz.letzter_bericht(store.root)
+        return JSONResponse({"lauf": dict(testsatz_lauf), "letzter": letzter,
+                             "faelle": len(testsatz.faelle(store)[0])})
+
+    @app.post("/api/testsatz")
+    def testsatz_start() -> JSONResponse:
+        if testsatz_lauf["laeuft"]:
+            raise HTTPException(409, "Testsatz laeuft bereits")
+        import time as _time
+
+        testsatz_lauf.update(laeuft=True, fertig=0, gesamt=0, datei="", fehler="",
+                             gestartet=_time.strftime("%Y-%m-%dT%H:%M:%S"))
+
+        def fortschritt(fertig: int, gesamt: int, datei: str) -> None:
+            testsatz_lauf.update(fertig=fertig, gesamt=gesamt, datei=datei)
+
+        def run() -> None:
+            try:
+                testsatz.pruefen(store, fortschritt=fortschritt)
+            except Exception as e:  # noqa: BLE001 -- Fehler im UI anzeigen
+                testsatz_lauf["fehler"] = f"{type(e).__name__}: {e}"
+            finally:
+                testsatz_lauf["laeuft"] = False
+
+        _threading.Thread(target=run, daemon=True, name="testsatz").start()
+        return JSONResponse({"gestartet": True})
 
     # ---- Vorab-Lernen aus Altbestand (vorlernen.py) -------------------
     # Bewusst getrennt vom Rechnungen-Reiter: nichts hiervon geht nach

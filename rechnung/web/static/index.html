@@ -166,6 +166,7 @@
   <button id="nav-categories" onclick="show('categories')">Kategorien</button>
   <button id="nav-journal" onclick="show('journal')">Journal</button>
   <button id="nav-vorlernen" onclick="show('vorlernen')">Vorlernen</button>
+  <button id="nav-qualitaet" onclick="show('qualitaet')">Qualität</button>
   <span id="stats" class="hint" style="color:#eaf5ef"></span>
   <button id="btn-postfach" style="display:none" onclick="postfachJetzt()"
           title="Postfach sofort auf neue Rechnungen prüfen">Postfach prüfen</button>
@@ -229,6 +230,19 @@
     <div id="journal-table"></div>
   </div>
 
+  <div id="v-qualitaet" class="view pane">
+    <h2>Qualität</h2>
+    <div class="box sect" id="q-testsatz-box">
+      <h4>Testsatz aus bestätigten Rechnungen</h4>
+      <p class="hint">Jede bestätigte Rechnung ist ein Testfall: das Programm liest sie im
+        Trockenlauf neu (ohne die gespeicherten Korrekturen, nichts wird gespeichert oder
+        weitergegeben) und vergleicht je Feld mit dem, was der Mensch bestätigt hat.</p>
+      <p><button id="q-testsatz-btn" onclick="testsatzStart()">Testsatz jetzt prüfen</button>
+        <span id="q-testsatz-status" class="hint"></span></p>
+      <div id="q-testsatz"></div>
+    </div>
+  </div>
+
   <div id="v-vorlernen" class="view pane">
     <h2>Vorlernen aus Altbestand</h2>
     <p class="hint">Alte Rechnungen eines Ordners werden nach Lieferant und Layout gruppiert; je
@@ -283,6 +297,7 @@ function show(v) {
   if (v === 'categories') loadCategories();
   if (v === 'journal') loadJournal();
   if (v === 'vorlernen') loadVorlernen();
+  if (v === 'qualitaet') loadQualitaet();
   if (v === 'scan') loadList();
 }
 const esc = s => (s == null ? '' : String(s)).replace(/[&<>"]/g, c =>
@@ -2122,6 +2137,64 @@ async function loadJournal() {
   $('#journal-table').innerHTML = '';
   $('#journal-table').appendChild(t);
   if (!d.rows.length) $('#journal-table').innerHTML = '<p class="hint">Noch keine bestätigten Rechnungen.</p>';
+}
+
+/* ================= Qualität (Aaron 10.10.2026) ================= */
+const pct = v => (v === null || v === undefined) ? '–' : v.toFixed(1).replace('.', ',') + ' %';
+let TESTSATZ_TIMER = null;
+
+async function loadQualitaet() {
+  loadTestsatz();
+}
+
+async function loadTestsatz() {
+  const d = await api('/api/testsatz');
+  const l = d.lauf, st = $('#q-testsatz-status');
+  $('#q-testsatz-btn').disabled = l.laeuft || !d.faelle;
+  if (l.laeuft) {
+    st.textContent = `läuft … ${l.fertig} von ${l.gesamt || '?'}` + (l.datei ? ` (${l.datei})` : '');
+    clearTimeout(TESTSATZ_TIMER);
+    TESTSATZ_TIMER = setTimeout(loadTestsatz, 1500);
+  } else {
+    st.textContent = (l.fehler ? 'Fehler: ' + l.fehler + ' · ' : '') +
+      `${d.faelle} Testfall/-fälle vorhanden` + (d.faelle ? '' : ' – erst Rechnungen bestätigen');
+  }
+  const b = d.letzter, box = $('#q-testsatz');
+  if (!b) { box.innerHTML = '<p class="hint">Noch kein Lauf.</p>'; return; }
+  const f = b.filter || {};
+  const v = b.vergleich || {};
+  let html = `<p><b>Trefferquote ${pct(b.trefferquote)}</b> · ${b.anzahl} Rechnung(en) ·
+    ${esc((b.erstellt || '').slice(0, 16).replace('T', ' '))} · Variante ${esc(f.variante)}` +
+    (f.nur_ohne_ki ? ' · nur ohne KI' : '') + (f.lieferant ? ` · Lieferant ${esc(f.lieferant)}` : '') +
+    (b.zeit_s && b.zeit_s.anzahl ? ` · Zeit je Rechnung Median ${b.zeit_s.median} s, P90 ${b.zeit_s.p90} s` : '') +
+    (b.abgebrochen ? ` · <span class="chk bad">${b.abgebrochen} abgebrochen</span>` : '') + '</p>';
+  if (v.vorher) html += v.schlechter.length
+    ? `<div class="holdbox">Schlechter geworden gegenüber dem Lauf davor (${pct(v.trefferquote_vorher)}): ` +
+      v.schlechter.map(esc).join('; ') + '</div>'
+    : `<p class="hint">Gegenüber dem Lauf davor (${pct(v.trefferquote_vorher)}) nichts schlechter geworden.</p>`;
+  html += '<table><tr><th>Feld</th><th class="num">richtig</th><th class="num">falsch</th>' +
+    '<th class="num">fehlt</th><th class="num">Quote</th></tr>' +
+    Object.entries(b.felder || {}).map(([k, r]) => `<tr><td>${esc(k)}</td><td class="num">${r.richtig}</td>
+      <td class="num">${r.falsch ? `<span class="chk bad">${r.falsch}</span>` : 0}</td>
+      <td class="num">${r.fehlt}</td><td class="num">${pct(r.quote)}</td></tr>`).join('') + '</table>';
+  const p = b.positionen || {};
+  if (p.soll) html += `<p class="hint">Positionen: ${p.korrekt} von ${p.soll} Zeilen korrekt
+    (${pct(p.quote)}), ${p.gefunden} Zeilen gelesen.</p>`;
+  const schlecht = (b.faelle || []).filter(x => Object.values(x.felder).some(r => r.ergebnis !== 'richtig'));
+  if (schlecht.length) html += '<details><summary>Rechnungen mit Abweichungen (' + schlecht.length +
+    ')</summary><table><tr><th>Datei</th><th>Lieferant</th><th>Feld</th><th>bestätigt</th><th>gelesen</th></tr>' +
+    schlecht.flatMap(x => Object.entries(x.felder).filter(([, r]) => r.ergebnis !== 'richtig').map(([k, r]) =>
+      `<tr><td>${esc(x.datei)}</td><td>${esc(x.lieferant_name || x.lieferant)}</td><td>${esc(k)}</td>
+       <td>${esc(r.soll)}</td><td>${r.ergebnis === 'fehlt' ? '<i>fehlt</i>' : esc(r.ist)}</td></tr>`)).join('') +
+    '</table></details>';
+  (b.uebersprungen || []).forEach(u => html += `<p class="hint">übersprungen: ${esc(u.datei)} – ${esc(u.grund)}</p>`);
+  box.innerHTML = html;
+}
+
+async function testsatzStart() {
+  const r = await fetch('/api/testsatz', { method: 'POST' });
+  if (!r.ok) { const d = await r.json(); alert(d.detail || 'Fehler'); }
+  loadTestsatz();
 }
 
 /* ================= Vorlernen aus Altbestand ================= */

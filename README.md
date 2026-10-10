@@ -37,6 +37,7 @@ rechnung messen <ordner> [--json]    # Stufenzeiten je Rechnung messen (Trockenl
 rechnung vorlernen <ordner>          # Altbestand gruppieren, Vorlagen-Vorschlaege anlegen
 rechnung vorlernen                   # Vorlernen-Gruppen auflisten
 rechnung vorlernen --bestaetigen GRUPPE --operator NAME   # Vorlage einer Gruppe aktivieren
+rechnung testsatz [--json] [--lieferant X] [--variante A] [--ohne-ki]   # bestaetigte Rechnungen neu lesen + messen
 ```
 
 `app` und `web` sind dieselbe Oberfläche (gleicher FastAPI-Code) – `app`
@@ -561,6 +562,40 @@ wörtlich dasteht (z.B. "Total inkl. MWST" ohne separates "Netto"-Label).
   Anlegen/Bestätigen mitgespeichert. Ist ein Beleg sehr lang (≥5 Seiten oder
   ≥20 Positionen) und der Modus für diesen Lieferanten noch nie bewusst
   gesetzt, erscheint ein dezenter Hinweis -- nie eine automatische Umstellung.
+
+## Qualität (Entscheidung Aaron 10.10.2026: „alle 5 Punkte“)
+
+Neuer Reiter **„Qualität“** im Training-UI; alles lokal, nichts geht ins Netz.
+
+### 1. Testsatz aus bestätigten Rechnungen (Goldstandard)
+
+Jede im Training-UI bestätigte Rechnung ist ein Testfall: beim Bestätigen
+wird das Original unverändert nach `data/archive/<sha256>.*` gelegt und die
+bestätigten Werte (Felder, Positionen, USt-Aufstellung) nach
+`data/testsatz/<sha256>.json`. Vor dem 10.10.2026 bestätigte Rechnungen
+werden aus `processed.jsonl` + Archiv hergeleitet (nur Kopf-Felder).
+
+`rechnung testsatz` liest alle Testfälle im Trockenlauf neu (Zeitgrenze wie
+konfiguriert; keine Entwürfe, kein Ereignis/Audit/Export, **ohne** die
+gespeicherten Korrekturen) und misst je Feld richtig/falsch/fehlt, Positionen
+(Zeilen gefunden/korrekt) und Zeit je Rechnung (Median/P90). Verglichen wird
+normalisiert (Beträge ±0,01, Datum ISO, Rechnungsnummer ohne Leerzeichen).
+Stammdaten aus der Bibliothek zählen nicht als gelesener Wert; dafür gibt es
+das Pseudo-Feld `lieferant` (richtiger Lieferant erkannt). Bericht:
+`data/berichte/testsatz_<datum>_<zeit>.json` mit Vergleich zum letzten Lauf
+gleichen Filters („Schlechter geworden bei: …“). Im Reiter „Qualität“: letzte
+Auswertung + Knopf „Testsatz jetzt prüfen“ (Hintergrund, mit Fortschritt).
+
+`--variante A|B|C`: Stelle für den geplanten Vergleich A (eine KI-Anfrage,
+heute) / B (Blöcke) / C (Überblick + Blöcke). Gebaut ist nur A; B/C melden
+„vorgesehen, aber noch nicht gebaut“, alles andere ist ein Fehler
+(`semantic.pruefe_variante`, durchgereicht bis `pipeline._llm_full`).
+
+**Selbst-Update-Schutz:** nach grünen Tests liest der neue Stand den
+Testsatz (ab 5 Testfällen). Sinkt die Gesamt-Trefferquote gegenüber dem
+letzten gespeicherten Lauf um mehr als 2 Prozentpunkte → zurückgerollt mit
+Grund. `RECHNUNG_UPDATE_TESTSATZ=0` schaltet ab; Standard sind nur Testfälle
+ohne KI (Vorlage/E-Rechnung), `=voll` nimmt alle.
 
 ## Härtung (v1.3)
 

@@ -1,4 +1,4 @@
-"""Kommandozeile: fetch / scan / messen / vorlernen / suppliers / templates / journal / schatten / modus / push / web / app / demo."""
+"""Kommandozeile: fetch / scan / messen / testsatz / vorlernen / suppliers / templates / journal / schatten / modus / push / web / app / demo."""
 
 from __future__ import annotations
 
@@ -336,6 +336,32 @@ def _cmd_fehlerbericht(args) -> int:
     return 0
 
 
+def _cmd_testsatz(args) -> int:
+    """Testsatz aus bestaetigten Rechnungen im Trockenlauf pruefen
+    (testsatz.py): je Feld richtig/falsch/fehlt, Positionen, Zeit, Vergleich
+    mit dem letzten Lauf."""
+    from . import testsatz
+
+    store = Store(args.data)
+    try:
+        b = testsatz.pruefen(store, speichern_=not args.kein_bericht,
+                             lieferant=args.lieferant, variante=args.variante,
+                             nur_ohne_ki=args.ohne_ki)
+    except (ValueError, NotImplementedError) as e:
+        print(f"Fehler: {e}")
+        return 2
+    if args.ausgabe:
+        Path(args.ausgabe).write_text(json.dumps(b, indent=2, ensure_ascii=False), "utf-8")
+    if args.json:
+        print(json.dumps(b, indent=2, ensure_ascii=False))
+        return 0
+    if not b["anzahl"] and not b["uebersprungen"]:
+        print("Noch keine bestaetigten Rechnungen im Testsatz.")
+        return 0
+    print(testsatz.text(b))
+    return 0
+
+
 def _cmd_modus(args) -> int:
     """Betriebsmodus anzeigen bzw. ausdruecklich umschalten (Audit)."""
     from . import modus
@@ -607,6 +633,20 @@ def main(argv=None) -> int:
     fb.add_argument("--seit", help="nur Ereignisse ab diesem Datum (YYYY-MM-DD)")
     fb.add_argument("--json", action="store_true")
     fb.set_defaults(func=_cmd_fehlerbericht)
+
+    ts = sub.add_parser("testsatz",
+                        help="Bestaetigte Rechnungen im Trockenlauf neu lesen und je Feld "
+                             "richtig/falsch/fehlt messen (Goldstandard)")
+    ts.add_argument("--lieferant", help="nur dieser Lieferant (ID oder Teil des Namens)")
+    ts.add_argument("--variante", default="A",
+                    help="Extraktionsvariante A (heute) | B | C (vorgesehen, noch nicht gebaut)")
+    ts.add_argument("--ohne-ki", action="store_true",
+                    help="nur Testfaelle, die ohne KI auskommen (Vorlage/E-Rechnung)")
+    ts.add_argument("--kein-bericht", action="store_true",
+                    help="Bericht nicht unter <data>/berichte speichern")
+    ts.add_argument("--ausgabe", help="Bericht zusaetzlich als JSON in diese Datei schreiben")
+    ts.add_argument("--json", action="store_true")
+    ts.set_defaults(func=_cmd_testsatz)
 
     mo = sub.add_parser("modus",
                         help="Betriebsmodus (testphase/autonom) anzeigen oder umschalten")
