@@ -38,6 +38,10 @@
   .w:hover { background: rgba(28,117,80,.18); }
   .w.anchor { background: rgba(255,165,0,.4); border-color: orange; }
   .w.value { background: rgba(28,117,80,.35); }
+  .w.ziel { background: rgba(47,111,208,.35); }
+  .rahmen-auswahl { position: fixed; border: 2px dashed #2f6fd0; background: rgba(47,111,208,.08);
+                    pointer-events: none; z-index: 50; }
+  .af.ziel-sel .ab-in { outline: 2px solid #2f6fd0; }
   .w.licol { background: rgba(70,130,220,.35); border-color: #2f6fd0; }
   .w.listop { background: rgba(200,40,40,.30); border-color: #b22; }
 
@@ -567,7 +571,7 @@ async function kopiere(ev, btn) {
 }
 
 function abFeld(label, id, val, cls = '', ro = '', extra = '') {
-  return `<div class="af ${extra}"><label>${esc(label)}</label>
+  return `<div class="af ${extra}" data-input="${id}" onclick="zielInput('${id}', this)"><label>${esc(label)}</label>
     <input class="ab-in ${val ? cls : ''}" id="${id}" value="${esc(val || '')}" ${ro}>${CP_KNOPF}</div>`;
 }
 
@@ -933,14 +937,14 @@ function renderInvoice(d) {
     <button class="ghost" onclick="addCustomField()">+ eigenes Feld</button>
     <button class="ghost" onclick="toggleLi()">Positionstabelle ${STATE.li.active ? 'ausblenden' : 'anlernen'}</button>
     <button class="ghost danger" onclick="ausEingangEntfernen()" title="Z.B. Testmail oder Spam – wird nicht gelöscht, sondern nach data\\entfernt verschoben">Aus Eingang entfernen</button>
-    <div class="hint">Feld anklicken, dann Wort im PDF anklicken = Position lernen · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = bestätigen + nächste' : ''}</div>
+    <div class="hint">Feld anklicken, dann in der Rechnung Wort anklicken (weitere dazu/weg) oder Rahmen um mehrere Wörter ziehen = Wert ins Feld (wird gelernt) · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = bestätigen + nächste' : ''}</div>
     <div id="msg" class="hint"></div>`;
   fbox.appendChild(bar);
   w.appendChild(fbox);
 
   for (const pg of d.pages) {
     const wrap = document.createElement('div'); wrap.className = 'pdfwrap';
-    const img = new Image(); img.src = pg.image;
+    const img = new Image(); img.src = pg.image; img.draggable = false;
     wrap.appendChild(img);
     for (const wd of pg.words) {
       const el = document.createElement('div');
@@ -953,6 +957,7 @@ function renderInvoice(d) {
       el.onclick = (ev) => clickWord(pg.index, wd.i, ev);
       wrap.appendChild(el);
     }
+    rahmenAuswahl(wrap, pg.index);
     pagesCol.appendChild(wrap);
     img.onload = fitPages;
   }
@@ -1196,6 +1201,9 @@ function renderSupplierInfoBox(sup) {
 function selectField(name, tr) {
   STATE.li.selCol = null;
   STATE.selField = name;
+  STATE.zielInput = null;
+  document.querySelectorAll('#fields .ziel-sel').forEach(x => x.classList.remove('ziel-sel'));
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
   document.querySelectorAll('#fields [data-field].sel, #fields tr.sel').forEach(x => x.classList.remove('sel'));
   tr.classList.add('sel');
   document.querySelectorAll('.mk[data-field]').forEach(e =>
@@ -1624,13 +1632,102 @@ function clickWord(page, i, ev) {
     paintLiCols(); paint(); refreshLiPreview();
     return;
   }
-  if (!STATE.selField) { $('#msg').textContent = 'erst Feld-Zeile oder Spalte wählen'; return; }
+  if (RAHMEN_KLICK_SPERRE) return;   // Klick am Ende einer Rahmen-Auswahl
+  if (STATE.zielInput) { zielWoerter(page, [i], false); return; }
+  if (!STATE.selField) { $('#msg').textContent = 'erst ein Feld anklicken, dann den Wert in der Rechnung markieren'; return; }
   const a = STATE.assign[STATE.selField] || { page, anchor: null, values: [] };
+  if (a.page !== page) a.values = [];
   a.page = page;
   if (ev.shiftKey) a.anchor = (a.anchor === i) ? null : i;  // erneutes Shift+Klick hebt den Anker wieder auf
   else a.values.includes(i) ? a.values = a.values.filter(x => x !== i) : a.values.push(i);
   STATE.assign[STATE.selField] = a;
   paint();
+  if (!ev.shiftKey) wertEintragen(STATE.selField, page, a.values);
+}
+
+/* ---- Markieren -> Wert ins gewaehlte Feld (Aaron 11.10.2026) ----------
+   Feld anklicken, dann in der Rechnung ein Wort anklicken (weitere Woerter
+   per Klick dazu/weg) oder mit gedrueckter Maus einen Rahmen um mehrere
+   Woerter ziehen. Der Text steht sofort im Feld; Rechnungsfelder werden
+   kurz danach gespeichert (lernt zugleich die Position fuer die Vorlage),
+   Lieferant/Geschaeftsbereich beim Klick auf deren Knopf. */
+let RAHMEN_KLICK_SPERRE = false;
+let WERT_TIMER = null;
+function woerterText(page, indices) {
+  const pg = STATE.pages[page]; if (!pg) return '';
+  const wds = indices.map(i => pg.words[i]).filter(Boolean)
+    .sort((a, b) => (Math.abs(a.top - b.top) > 3 ? a.top - b.top : a.x0 - b.x0));
+  // Zeilenwechsel erhalten (Anschrift), sonst Leerzeichen
+  let out = '', lastTop = null;
+  for (const w of wds) {
+    if (lastTop !== null) out += Math.abs(w.top - lastTop) > 3 ? '\n' : ' ';
+    out += w.text; lastTop = w.top;
+  }
+  return out;
+}
+function wertEintragen(field, page, indices) {
+  const text = woerterText(page, indices).replace(/\n/g, ' ');
+  const inp = document.querySelector(`#fields .af[data-field="${CSS.escape(field)}"] input`);
+  if (inp) inp.value = text;
+  clearTimeout(WERT_TIMER);
+  if (text) WERT_TIMER = setTimeout(() => saveCorrection(field, text), 900);
+}
+function zielInput(id, el) {
+  STATE.selField = null; STATE.zielInput = id; STATE.zielWoerter = { page: null, values: [] };
+  document.querySelectorAll('#fields .sel, #fields .ziel-sel').forEach(x => x.classList.remove('sel', 'ziel-sel'));
+  el.classList.add('ziel-sel');
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+}
+function zielWoerter(page, indices, ersetzen) {
+  const z = STATE.zielWoerter || { page: null, values: [] };
+  if (ersetzen || z.page !== page) { z.page = page; z.values = []; }
+  for (const i of indices) z.values.includes(i) ? z.values = z.values.filter(x => x !== i) : z.values.push(i);
+  STATE.zielWoerter = z;
+  const wds = document.querySelectorAll('.pdfwrap')[page].querySelectorAll('.w');
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+  z.values.forEach(i => wds[i] && wds[i].classList.add('ziel'));
+  const inp = document.getElementById(STATE.zielInput);
+  if (!inp) return;
+  const txt = woerterText(page, z.values);
+  inp.value = inp.tagName === 'TEXTAREA' ? txt : txt.replace(/\n/g, ' ');
+  inp.dispatchEvent(new Event('input', { bubbles: true }));
+}
+function rahmenAuswahl(wrap, page) {
+  let start = null, box = null;
+  wrap.addEventListener('mousedown', ev => {
+    if (ev.button !== 0) return;
+    ev.preventDefault();   // kein Bild-Ziehen/Textmarkieren des Browsers
+    start = { x: ev.clientX, y: ev.clientY }; box = null;
+  });
+  window.addEventListener('mousemove', ev => {
+    if (!start) return;
+    const dx = Math.abs(ev.clientX - start.x), dy = Math.abs(ev.clientY - start.y);
+    if (!box && dx + dy < 8) return;
+    if (!box) { box = document.createElement('div'); box.className = 'rahmen-auswahl'; document.body.appendChild(box); }
+    box.style.left = Math.min(ev.clientX, start.x) + 'px'; box.style.top = Math.min(ev.clientY, start.y) + 'px';
+    box.style.width = dx + 'px'; box.style.height = dy + 'px';
+    ev.preventDefault();
+  });
+  window.addEventListener('mouseup', ev => {
+    if (!start) return;
+    const s0 = start; start = null;
+    if (!box) return;
+    const r = box.getBoundingClientRect(); box.remove(); box = null;
+    const treffer = [];
+    wrap.querySelectorAll('.w').forEach((el, i) => {
+      const b = el.getBoundingClientRect();
+      const cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2;
+      if (cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) treffer.push(i);
+    });
+    RAHMEN_KLICK_SPERRE = true; setTimeout(() => { RAHMEN_KLICK_SPERRE = false; }, 50);
+    if (!treffer.length) return;
+    if (STATE.zielInput) { zielWoerter(page, treffer, true); return; }
+    if (!STATE.selField) { $('#msg').textContent = 'erst ein Feld anklicken, dann den Wert in der Rechnung markieren'; return; }
+    const a = { page, anchor: (STATE.assign[STATE.selField] || {}).anchor ?? null, values: treffer };
+    STATE.assign[STATE.selField] = a;
+    paint();
+    wertEintragen(STATE.selField, page, treffer);
+  });
 }
 
 function clearAssign(field) {
