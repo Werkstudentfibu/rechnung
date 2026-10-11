@@ -994,6 +994,22 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         return JSONResponse({"confirmations": tpl.confirmations, "secured": tpl.secured,
                              "learned": learned.to_dict()})
 
+    @app.get("/api/lernbericht")
+    def lernbericht_vorschau() -> JSONResponse:
+        from .. import lernbericht
+        stand = lernbericht._stand(store.root)
+        b = lernbericht.erstellen(store, stand.get("bis", ""))
+        return JSONResponse({"zusammenfassung": b["zusammenfassung"], "letzter": stand,
+                             "an": lernbericht._cfg()["an"]})
+
+    @app.post("/api/lernbericht")
+    def lernbericht_jetzt() -> JSONResponse:
+        from .. import lernbericht
+        try:
+            return JSONResponse(lernbericht.senden(store, erzwingen=True))
+        except Exception as e:  # noqa: BLE001 -- SMTP-Fehler sichtbar machen
+            raise HTTPException(502, f"Versand fehlgeschlagen: {type(e).__name__}: {e}")
+
     @app.post("/api/ausschnitt-lesen")
     def ausschnitt_lesen(body: dict) -> JSONResponse:
         """Rahmen ohne erkannte Woerter (schlechter Scan, Text in Grafik):

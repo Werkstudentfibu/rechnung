@@ -76,6 +76,15 @@ class Abholer:
                     self._jobrouter_nachschicken()
                 except Exception as e:  # noqa: BLE001
                     self.status["jobrouter_fehler"] = f"{type(e).__name__}: {e}"
+                try:
+                    from . import lernbericht
+                    from .config import data_dir
+                    from .store import Store
+                    st = Store(data_dir())
+                    if lernbericht.faellig(st):
+                        self.status["lernbericht"] = lernbericht.senden(st)
+                except Exception as e:  # noqa: BLE001 -- Bericht darf Abholung nie stoeren
+                    self.status["lernbericht"] = {"gesendet": False, "grund": f"{type(e).__name__}: {e}"}
             self.status["letzte_pruefung"] = time.strftime("%H:%M")
             return dict(self.status)
         finally:

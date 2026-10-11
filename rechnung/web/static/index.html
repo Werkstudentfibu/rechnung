@@ -282,6 +282,13 @@
         Rechnung ab, wird das Feld rot (Lesefehler) bzw. ein Hinweis angezeigt.</p>
       <div id="q-profile"></div>
     </div>
+    <div class="box sect">
+      <h4>Lernbericht an Emmy</h4>
+      <p class="hint">Was richtig gelesen und was korrigiert wurde, geht einmal am Tag automatisch per Mail
+        an die Entwicklerin (ohne PDFs, sofern nicht anders eingestellt).</p>
+      <div id="q-lernbericht" class="hint"></div>
+      <button class="ghost" onclick="lernberichtSenden()">Lernbericht jetzt senden</button>
+    </div>
   </div>
 
   <div id="v-vorlernen" class="view pane">
@@ -2390,7 +2397,7 @@ const pct = v => (v === null || v === undefined) ? '–' : v.toFixed(1).replace(
 let TESTSATZ_TIMER = null;
 
 async function loadQualitaet() {
-  loadTestsatz();
+  loadTestsatz(); loadLernbericht();
   const d = await api('/api/qualitaet');
   $('#q-prof-min').textContent = d.min_rechnungen;
   const geld = v => v == null ? '' : Number(v).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -2420,6 +2427,22 @@ async function loadQualitaet() {
       <td class="num">${r.korrigiert} von ${r.rechnungen}</td><td class="num">${anteil(r.anteil)}</td>
       <td class="num">${anteil(r.anteil_4_wochen)}</td><td class="num">${anteil(r.anteil_davor)}</td>
       <td>${trendHtml(r.trend)}</td></tr>`).join('') + '</table>';
+}
+
+async function loadLernbericht() {
+  const el = $('#q-lernbericht'); if (!el) return;
+  const d = await api('/api/lernbericht').catch(() => null); if (!d) return;
+  const z = d.zusammenfassung;
+  el.textContent = (d.an ? `Empfänger: ${d.an}. ` : 'Kein Empfänger eingestellt (RECHNUNG_BERICHT_AN). ') +
+    `Seit dem letzten Bericht: ${z.rechnungen} Rechnung(en), ${z.korrigiert} von ${z.felder} Feldern korrigiert.` +
+    (d.letzter && d.letzter.gesendet ? ` Zuletzt gesendet: ${String(d.letzter.gesendet).slice(0, 16).replace('T', ' ')}.` : '');
+}
+async function lernberichtSenden() {
+  const el = $('#q-lernbericht'); el.textContent = 'Sende …';
+  const r = await fetch('/api/lernbericht', { method: 'POST' });
+  const d = await r.json().catch(() => ({}));
+  el.textContent = r.ok ? (d.gesendet ? `Gesendet an ${d.an} (${d.rechnungen} Rechnungen).` : 'Nicht gesendet: ' + d.grund)
+                        : 'Fehler: ' + (d.detail || r.status);
 }
 
 async function loadTestsatz() {
