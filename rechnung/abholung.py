@@ -81,6 +81,12 @@ class Abholer:
                     from .config import data_dir
                     from .store import Store
                     st = Store(data_dir())
+                    from . import sicherung
+                    if sicherung.faellig():
+                        try:
+                            self.status["sicherung"] = sicherung.sichern(st.root)
+                        except OSError as e:
+                            self.status["sicherung"] = {"ok": False, "detail": str(e)}
                     if lernbericht.faellig(st):
                         self.status["lernbericht"] = lernbericht.senden(st)
                 except Exception as e:  # noqa: BLE001 -- Bericht darf Abholung nie stoeren

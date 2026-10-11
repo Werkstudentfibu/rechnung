@@ -186,6 +186,7 @@
   <span id="stats" class="hint" style="color:#eaf5ef"></span>
   <button id="btn-postfach" style="display:none" onclick="postfachJetzt()"
           title="Postfach sofort auf neue Rechnungen prüfen">Postfach prüfen</button>
+  <button onclick="startklar()" title="Ist alles für den Betrieb eingerichtet?">Startklar?</button>
   <button id="btn-postfach-bericht" style="display:none" onclick="postfachBericht()"
           title="Was liegt im Postfach, und was macht das Programm mit jeder Mail?">Postfach-Übersicht</button>
   <span id="postfach" class="hint" style="color:#eaf5ef"></span>
@@ -959,6 +960,7 @@ function renderInvoice(d) {
   const bar = document.createElement('div'); bar.className = 'actionbar';
   bar.innerHTML = `
     <button onclick="saveTemplate()">Template speichern</button>
+    <button class="ghost" onclick="jobrouterVorschau()" title="Was beim Senden an JobRouter geht">JobRouter-Vorschau</button>
     <button class="senden" onclick="sendeRechnung()" title="Prüfen, lernen, an JobRouter freigeben, nächste Rechnung (Taste b)">✓ Senden</button>
     <button class="ghost" onclick="addCustomField()">+ eigenes Feld</button>
     <button class="ghost" onclick="toggleLi()">Positionstabelle ${STATE.li.active ? 'ausblenden' : 'anlernen'}</button>
@@ -1718,6 +1720,21 @@ function zielWoerter(page, indices, ersetzen) {
   inp.value = inp.tagName === 'TEXTAREA' ? txt : txt.replace(/\n/g, ' ');
   inp.dispatchEvent(new Event('input', { bubbles: true }));
 }
+// Nach dem Markieren per Rahmen gleich zum naechsten leeren oder roten
+// Rechnungsfeld springen (Aaron 11.10.2026: weniger Klicks bei ~60/Tag).
+function naechstesFeld(nach) {
+  const alle = [...document.querySelectorAll('#fields .af[data-field]')];
+  const i = alle.findIndex(el => el.dataset.field === nach);
+  const kandidat = alle.slice(i + 1).find(el => {
+    const inp = el.querySelector('input');
+    return inp && (!inp.value.trim() || inp.classList.contains('unsicher'));
+  });
+  if (!kandidat) return;
+  selectField(kandidat.dataset.field, kandidat);
+  kandidat.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  const m = $('#msg'); if (m) m.textContent = `Weiter: „${kandidat.dataset.field}“ – Wert in der Rechnung markieren (oder anderes Feld wählen).`;
+}
+
 function korrigieren(ev, name, btn) {
   ev.stopPropagation();
   const af = btn.closest('.af');
@@ -1778,9 +1795,11 @@ function rahmenAuswahl(wrap, page) {
     if (STATE.zielInput) { zielWoerter(page, treffer, true); return; }
     if (!STATE.selField) { $('#msg').textContent = 'erst ein Feld anklicken, dann den Wert in der Rechnung markieren'; return; }
     const a = { page, anchor: (STATE.assign[STATE.selField] || {}).anchor ?? null, values: treffer };
-    STATE.assign[STATE.selField] = a;
+    const fertig = STATE.selField;
+    STATE.assign[fertig] = a;
     paint();
-    wertEintragen(STATE.selField, page, treffer);
+    wertEintragen(fertig, page, treffer);
+    naechstesFeld(fertig);
   });
 }
 
@@ -2056,6 +2075,46 @@ async function abbyyEinlesen(art, input) {
   msg.textContent = `${d.anzahl} ${art === 'lieferanten' ? 'Lieferanten' : 'Geschäftsbereiche'} eingelesen.` +
     (d.fehlend && d.fehlend.length ? ` Achtung: ${d.fehlend.length} Geschäftsbereich-ID(s) fehlen noch (${d.fehlend.slice(0, 8).join(', ')}) – bitte erst die Geschäftsbereiche einlesen.` : '');
   if (art === 'lieferanten') loadSuppliers();
+}
+
+async function startklar() {
+  show('scan');
+  const w = $('#work'); w.className = '';
+  w.innerHTML = '<p class="hint" style="padding:12px">Prüfe … (Anmeldungen bei Postfach, JobRouter, Mailversand – dauert einige Sekunden)</p>';
+  const d = await api('/api/startklar');
+  const sym = { ok: '✓', warn: '!', fehler: '✗', aus: '–' };
+  const farbe = { ok: '#1c7550', warn: '#b07800', fehler: '#b22', aus: '#777' };
+  const alleOk = d.punkte.every(p => p.status !== 'fehler');
+  w.innerHTML = `<div style="padding:12px"><h3>Startklar? ${alleOk ? '<span style="color:#1c7550">ja</span>' : '<span style="color:#b22">noch nicht</span>'}</h3>
+    <table>${d.punkte.map(p => `<tr>
+      <td style="color:${farbe[p.status]};font-weight:bold;width:20px">${sym[p.status]}</td>
+      <td><b>${esc(p.name)}</b></td><td>${esc(p.detail)}</td>
+      <td class="hint">${esc(p.hilfe || '')}</td></tr>`).join('')}</table>
+    <p><button class="ghost" onclick="sicherungJetzt(this)">Datensicherung jetzt</button></p></div>`;
+}
+async function sicherungJetzt(btn) {
+  btn.disabled = true;
+  const r = await fetch('/api/sicherung', { method: 'POST' }); const d = await r.json().catch(() => ({}));
+  btn.disabled = false; btn.textContent = r.ok ? (d.ok ? '✓ ' + d.detail : d.detail) : 'Fehler: ' + (d.detail || r.status);
+}
+async function jobrouterVorschau() {
+  if (!STATE.file) return;
+  const r = await fetch('/api/jobrouter-vorschau?file=' + encodeURIComponent(STATE.file));
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert('Vorschau nicht möglich: ' + (d.detail || r.status)); return; }
+  const box = document.createElement('div');
+  box.style.cssText = 'position:fixed;inset:5% 10%;background:#fff;border:2px solid #1c7550;z-index:100;overflow:auto;padding:14px;box-shadow:0 4px 24px rgba(0,0,0,.3)';
+  const pr = d.prozess || {};
+  box.innerHTML = `<button style="float:right" onclick="this.parentElement.remove()">Schließen</button>
+    <h3>JobRouter-Vorschau</h3>
+    <p class="hint">${d.live ? 'JobRouter ist angebunden.' : 'JobRouter noch nicht angebunden – so würde es gesendet.'}
+      Prozess: ${esc(pr.name || '–')} · Version ${esc(pr.version || '–')} · Schritt ${esc(pr.schritt || '–')}
+      ${d.zuordnung_vorhanden ? '' : '<br><b style="color:#b22">Keine Feldzuordnung hinterlegt – Feldnamen gehen unverändert raus.</b>'}</p>
+    <table><tr><th>Unser Feld</th><th>JobRouter-Feld</th><th>Wert</th></tr>
+    ${d.felder.map(f => `<tr><td>${esc(f.feld)}</td><td style="${f.zugeordnet ? '' : 'color:#b07800'}">${esc(f.jobrouter)}${f.zugeordnet ? '' : ' (nicht zugeordnet)'}</td>
+      <td><code>${esc(JSON.stringify(f.wert))}</code></td></tr>`).join('')}</table>
+    <details><summary>Komplette Nutzlast (technisch)</summary><pre style="white-space:pre-wrap">${esc(JSON.stringify(d.nutzlast, null, 2))}</pre></details>`;
+  document.body.appendChild(box);
 }
 
 /* ================= Postfach-Abholung (abholung.py) ================= */

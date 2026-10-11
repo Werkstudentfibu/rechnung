@@ -21,6 +21,7 @@ from .. import billing
 from .. import einvoice
 from .. import eventlog
 from .. import human
+from .. import jobrouter
 from .. import learn
 from .. import pdf as pdfmod
 from .. import positionen
@@ -1001,6 +1002,43 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         human.erledigt(store, res, _operator())
         return JSONResponse({"confirmations": tpl.confirmations, "secured": tpl.secured,
                              "learned": learned.to_dict()})
+
+    @app.get("/api/startklar")
+    def startklar_ep() -> JSONResponse:
+        from .. import startklar
+        return JSONResponse({"punkte": startklar.pruefen(store, samples)})
+
+    @app.post("/api/sicherung")
+    def sicherung_jetzt() -> JSONResponse:
+        from .. import sicherung
+        try:
+            return JSONResponse(sicherung.sichern(store.root))
+        except OSError as e:
+            raise HTTPException(502, f"Sicherung fehlgeschlagen: {e}")
+
+    @app.get("/api/jobrouter-vorschau")
+    def jobrouter_vorschau(file: str) -> JSONResponse:
+        """Genau das, was "Senden" an JobRouter schicken wuerde -- je Feld
+        unser Name, JobRouter-Feldname (Zuordnung) und Wert (Aaron 11.10.2026:
+        Zuordnung einmal mit der IT an einer Testrechnung pruefen)."""
+        from .. import stammdaten
+        from ..config import jobrouter as _jr
+
+        path = _resolve(file)
+        res = _process_for_confirm(path)
+        payload = res.to_dict()
+        payload["freigabe"] = "mensch"
+        payload["stammdaten"] = stammdaten.fuer_rechnung(store, res)
+        cfg = _jr()
+        body = jobrouter.payload_from_result(payload, cfg)
+        mapping = jobrouter.load_mapping(cfg)
+        felder = [{"feld": k, "jobrouter": mapping.get(k, k), "zugeordnet": k in mapping,
+                   "wert": (v.get("value") if isinstance(v, dict) else v)}
+                  for k, v in (payload.get("fields") or {}).items()]
+        return JSONResponse({"felder": felder, "nutzlast": body, "live": cfg.live,
+                             "zuordnung_vorhanden": bool(mapping),
+                             "prozess": {"name": cfg.process, "version": cfg.process_version,
+                                         "schritt": cfg.step}})
 
     @app.get("/api/lernbericht")
     def lernbericht_vorschau() -> JSONResponse:
