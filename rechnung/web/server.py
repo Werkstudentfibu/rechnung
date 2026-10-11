@@ -387,6 +387,37 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "daten": str(store.root),
         }
 
+    @app.post("/api/import-abbyy")
+    def import_abbyy(body: dict) -> JSONResponse:
+        """Abbyy-Export einlesen (Reiter Lieferanten, Aaron 11.10.2026):
+        ``art`` = "lieferanten" (Vendors) | "geschaeftsbereiche"
+        (BusinessUnits), ``inhalt`` = Dateiinhalt Base64."""
+        import base64
+        import tempfile
+
+        from ..importers import import_business_units_csv, import_vendors_csv
+
+        art = body.get("art")
+        if art not in ("lieferanten", "geschaeftsbereiche"):
+            raise HTTPException(400, "art muss lieferanten oder geschaeftsbereiche sein")
+        try:
+            daten = base64.b64decode(body.get("inhalt") or "", validate=True)
+        except ValueError:
+            raise HTTPException(400, "Datei nicht lesbar")
+        if not daten:
+            raise HTTPException(400, "Datei ist leer")
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "import.csv"
+            f.write_bytes(daten)
+            try:
+                if art == "geschaeftsbereiche":
+                    return JSONResponse({"anzahl": import_business_units_csv(f, store), "fehlend": []})
+                fehlend: list[str] = []
+                n = import_vendors_csv(f, store, fehlend)
+                return JSONResponse({"anzahl": n, "fehlend": sorted(set(fehlend))})
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+
     @app.get("/api/postfach-bericht")
     def postfach_bericht() -> JSONResponse:
         """Je Mail im Postfach: wird sie abgeholt, und wenn nicht, warum

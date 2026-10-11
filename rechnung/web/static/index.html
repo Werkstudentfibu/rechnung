@@ -213,6 +213,16 @@
       <b>feste Werte</b> – Felder, die das Programm nicht aus jeder Rechnung liest, sondern
       hier einträgt und auf der Rechnung nur gegenprüft.</p>
     <button class="ghost" onclick="editSupplier(null)">+ Neuer Lieferant</button>
+    <div class="box" style="margin:8px 0">
+      <h4>Abbyy-Listen einlesen</h4>
+      <div class="hint">CSV-Export aus ABBYY FlexiCapture. Erst die Geschäftsbereiche (BusinessUnits),
+        dann die Lieferanten (Vendors). Bestehende Einträge werden ergänzt, nichts wird gelöscht.</div>
+      <label class="ghost">Geschäftsbereiche (BusinessUnits) … <input type="file" accept=".csv,.txt" style="display:none"
+        onchange="abbyyEinlesen('geschaeftsbereiche', this)"></label>
+      <label class="ghost" style="margin-left:12px">Lieferanten (Vendors) … <input type="file" accept=".csv,.txt" style="display:none"
+        onchange="abbyyEinlesen('lieferanten', this)"></label>
+      <div id="abbyy-msg" class="hint"></div>
+    </div>
     <label class="hint"><input type="checkbox" id="sup-filter-unconfirmed" onchange="loadSuppliers()"> nur unbestätigte Entwürfe zeigen</label>
     <div id="sup-table"></div>
     <div id="sup-form"></div>
@@ -1959,6 +1969,21 @@ async function postfachBericht() {
     <h4>Letzte Mails im Ordner „${esc(r.ordner || '')}“</h4>
     <table><tr><th>Datum</th><th>Von</th><th>Betreff</th><th>gelesen</th><th>Anhänge</th><th>Was das Programm tut</th></tr>${zeilen}</table>
   </div>`;
+}
+
+async function abbyyEinlesen(art, input) {
+  const f = input.files && input.files[0]; if (!f) return;
+  const msg = $('#abbyy-msg'); msg.textContent = `„${f.name}“ wird eingelesen …`;
+  const buf = new Uint8Array(await f.arrayBuffer());
+  let bin = ''; for (let i = 0; i < buf.length; i += 8192) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 8192));
+  const r = await fetch('/api/import-abbyy', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ art, inhalt: btoa(bin) }) });
+  const d = await r.json().catch(() => ({}));
+  input.value = '';
+  if (!r.ok) { msg.textContent = 'Fehler: ' + (d.detail || r.status); return; }
+  msg.textContent = `${d.anzahl} ${art === 'lieferanten' ? 'Lieferanten' : 'Geschäftsbereiche'} eingelesen.` +
+    (d.fehlend && d.fehlend.length ? ` Achtung: ${d.fehlend.length} Geschäftsbereich-ID(s) fehlen noch (${d.fehlend.slice(0, 8).join(', ')}) – bitte erst die Geschäftsbereiche einlesen.` : '');
+  if (art === 'lieferanten') loadSuppliers();
 }
 
 /* ================= Postfach-Abholung (abholung.py) ================= */
