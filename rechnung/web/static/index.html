@@ -115,6 +115,9 @@
   .af .cp:hover { color: #1c7550; }
   .af .cp.ok { color: #1c7550; font-weight: bold; }
   .af .ab-in { padding-right: 24px; }
+  .af .mk-btn { position: absolute; right: 24px; top: 17px; padding: 0 5px; font-size: 14px; line-height: 20px;
+                background: transparent; border: none; color: #2f6fd0; cursor: pointer; }
+  .af .ab-in.val-input { padding-right: 46px; }
   button.senden { background: #1c7550; color: #fff; font-weight: 600; padding: 6px 18px; }
   .af label { display: block; font-size: 12px; color: #444; margin-bottom: 1px; }
   .ab-in { width: 100%; box-sizing: border-box; border: 1px solid #a9a9a9; background: #fff;
@@ -611,7 +614,9 @@ function fBox(name, label, cls = '') {
     <label>${esc(label)}${def.required ? ' *' : ''}</label>
     <input class="ab-in val-input ${st}" data-field="${esc(name)}" value="${esc(val)}"
            title="${esc(name)}${cur.source ? ' · ' + esc(cur.source) : ''}${cur.confidence ? ' · ' + cur.confidence : ''}"
-           onchange="saveCorrection('${esc(name)}', this.value)">${CP_KNOPF}
+           onchange="saveCorrection('${esc(name)}', this.value)">${CP_KNOPF}<button class="mk-btn" tabindex="-1"
+      title="Korrigieren: danach in der Rechnung den richtigen Wert markieren (Rahmen ziehen)"
+      onclick="korrigieren(event, '${esc(name)}', this)">⌖</button>
     ${raw}${rot.map(g => `<div class="chk bad">✗ ${esc(g)}</div>`).join('')}<div class="ass"></div></div>`;
 }
 
@@ -1703,6 +1708,34 @@ function zielWoerter(page, indices, ersetzen) {
   inp.value = inp.tagName === 'TEXTAREA' ? txt : txt.replace(/\n/g, ' ');
   inp.dispatchEvent(new Event('input', { bubbles: true }));
 }
+function korrigieren(ev, name, btn) {
+  ev.stopPropagation();
+  const af = btn.closest('.af');
+  selectField(name, af);
+  delete STATE.assign[name];   // neu markieren ersetzt die bisherige Stelle
+  paint();
+  const m = $('#msg'); if (m) m.textContent = `„${name}“ korrigieren: jetzt in der Rechnung den richtigen Wert anklicken oder einen Rahmen darum ziehen.`;
+}
+async function ausschnittLesen(wrap, page, r) {
+  const ziel = STATE.zielInput || STATE.selField;
+  if (!ziel) { $('#msg').textContent = 'erst ein Feld anklicken, dann den Wert in der Rechnung markieren'; return; }
+  const pg = STATE.pages[page]; const w = wrap.getBoundingClientRect();
+  const fx = pg.width / w.width, fy = pg.height / w.height;
+  const box = { x0: (r.left - w.left) * fx, y0: (r.top - w.top) * fy, x1: (r.right - w.left) * fx, y1: (r.bottom - w.top) * fy };
+  $('#msg').textContent = 'Lese den markierten Ausschnitt …';
+  const resp = await fetch('/api/ausschnitt-lesen', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, page, ...box }) });
+  const d = await resp.json().catch(() => ({}));
+  if (!resp.ok || !d.text) { $('#msg').textContent = '✗ ' + (d.detail || 'Im Ausschnitt nichts erkannt – Wert bitte eintippen.'); return; }
+  if (STATE.zielInput) {
+    const inp = document.getElementById(STATE.zielInput); if (inp) { inp.value = d.text; inp.dispatchEvent(new Event('input', { bubbles: true })); }
+  } else {
+    const inp = document.querySelector(`#fields .af[data-field="${CSS.escape(ziel)}"] input`);
+    if (inp) inp.value = d.text;
+    saveCorrection(ziel, d.text);
+  }
+  $('#msg').textContent = `Gelesen: ${d.text}`;
+}
 function rahmenAuswahl(wrap, page) {
   let start = null, box = null;
   wrap.addEventListener('mousedown', ev => {
@@ -1731,7 +1764,7 @@ function rahmenAuswahl(wrap, page) {
       if (cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) treffer.push(i);
     });
     RAHMEN_KLICK_SPERRE = true; setTimeout(() => { RAHMEN_KLICK_SPERRE = false; }, 50);
-    if (!treffer.length) return;
+    if (!treffer.length) { ausschnittLesen(wrap, page, r); return; }
     if (STATE.zielInput) { zielWoerter(page, treffer, true); return; }
     if (!STATE.selField) { $('#msg').textContent = 'erst ein Feld anklicken, dann den Wert in der Rechnung markieren'; return; }
     const a = { page, anchor: (STATE.assign[STATE.selField] || {}).anchor ?? null, values: treffer };

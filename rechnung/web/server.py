@@ -994,6 +994,46 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         return JSONResponse({"confirmations": tpl.confirmations, "secured": tpl.secured,
                              "learned": learned.to_dict()})
 
+    @app.post("/api/ausschnitt-lesen")
+    def ausschnitt_lesen(body: dict) -> JSONResponse:
+        """Rahmen ohne erkannte Woerter (schlechter Scan, Text in Grafik):
+        genau diesen Ausschnitt in hoher Aufloesung per Tesseract lesen
+        (Aaron 11.10.2026). Koordinaten in PDF-Punkten der Seite."""
+        import tempfile
+
+        import pypdfium2 as pdfium
+
+        from .. import ocr as ocrmod
+
+        if not (ocrmod.enabled() and ocrmod.available()):
+            raise HTTPException(409, "Texterkennung nicht verfügbar – Wert bitte von Hand eintragen")
+        path = _resolve(str(body.get("file", "")))
+        try:
+            page_i = int(body.get("page", 0))
+            x0, y0, x1, y1 = (float(body[k]) for k in ("x0", "y0", "x1", "y1"))
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "Ausschnitt ungültig")
+        if path.suffix.lower() != ".pdf":
+            raise HTTPException(400, "nur PDF")
+        scale = 400 / 72
+        doc = pdfium.PdfDocument(str(path))
+        try:
+            img = doc[page_i].render(scale=scale).to_pil().convert("L")
+        finally:
+            doc.close()
+        rand = 4
+        box = (max(0, int(min(x0, x1) * scale) - rand), max(0, int(min(y0, y1) * scale) - rand),
+               min(img.width, int(max(x0, x1) * scale) + rand), min(img.height, int(max(y0, y1) * scale) + rand))
+        if box[2] - box[0] < 5 or box[3] - box[1] < 5:
+            raise HTTPException(400, "Ausschnitt zu klein")
+        with tempfile.TemporaryDirectory() as tmp:
+            png = Path(tmp) / "a.png"
+            img.crop(box).save(png, dpi=(400, 400))
+            r = ocrmod._run([ocrmod.tesseract_cmd(), str(png), "stdout", "-l", ocrmod.LANG,
+                             "--psm", "6"], 60, text=True, encoding="utf-8", errors="replace")
+        text = " ".join(" ".join((r.stdout or "").split("\n")).split())
+        return JSONResponse({"text": text})
+
     @app.post("/api/senden")
     def senden(body: ConfirmPost) -> JSONResponse:
         """Ein Klick fuer die taegliche Arbeit (Aaron 11.10.2026): pruefen,
