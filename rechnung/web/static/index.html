@@ -1906,9 +1906,14 @@ async function sendeRechnung() {
   const idx = LIST_FILES.indexOf(STATE.file);
   const next = idx >= 0 ? (LIST_FILES[idx + 1] || null) : null;
   $('#msg').textContent = 'Sende …';
-  const r = await fetch('/api/senden', { method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ file: STATE.file, template_id: STATE.tid || null }) });
-  const d = await r.json().catch(() => ({}));
+  const sende = trotzdem => fetch('/api/senden', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, template_id: STATE.tid || null, trotzdem }) });
+  let r = await sende(false);
+  let d = await r.json().catch(() => ({}));
+  if (r.status === 409 && d.code === 'dublette') {
+    if (!confirm(d.detail + '\n\nTrotzdem senden?')) { $('#msg').textContent = 'Nicht gesendet (Dublettenverdacht).'; return; }
+    r = await sende(true); d = await r.json().catch(() => ({}));
+  }
   if (!r.ok) { $('#msg').textContent = '✗ ' + (d.detail || ('Fehler ' + r.status)); alert(d.detail || ('Fehler ' + r.status)); return; }
   const wohin = d.jobrouter_live ? 'an JobRouter übergeben' : 'freigegeben – geht an JobRouter, sobald die Anbindung steht';
   await loadList();

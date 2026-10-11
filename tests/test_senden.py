@@ -38,3 +38,20 @@ def test_senden_ohne_lieferant_wird_abgelehnt(tmp_path: Path):
     r = c.post("/api/senden", json={"file": "Rechnung #1.pdf", "template_id": None})
     assert r.status_code == 400 and "Lieferant" in r.json()["detail"]
     assert (samples / "Rechnung #1.pdf").exists()
+
+
+def test_dublette_braucht_bestaetigung(tmp_path: Path):
+    import shutil
+    store, samples = _secured_setup(tmp_path)
+    c = TestClient(create_app(store, samples))
+    d = c.get("/api/invoice?file=a.pdf").json()
+    shutil.copy(samples / "a.pdf", tmp_path / "kopie.pdf")
+    assert c.post("/api/senden", json={"file": "a.pdf", "template_id": d["template_id"]}).status_code == 200
+    # dieselbe Rechnung kommt noch einmal (andere Datei, gleicher Inhalt/gleiche Nummer)
+    make_invoice(samples / "b.pdf", rechnungsnr="RE-2026-00001")
+    d2 = c.get("/api/invoice?file=b.pdf").json()
+    r = c.post("/api/senden", json={"file": "b.pdf", "template_id": d2["template_id"]})
+    assert r.status_code == 409 and r.json()["code"] == "dublette"
+    assert (samples / "b.pdf").exists()
+    r = c.post("/api/senden", json={"file": "b.pdf", "template_id": d2["template_id"], "trotzdem": True})
+    assert r.status_code == 200

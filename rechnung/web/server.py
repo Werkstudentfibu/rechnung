@@ -113,6 +113,11 @@ class ConfirmPost(BaseModel):
     template_id: str | None = None      # None nur bei E-Rechnungen (kein Template)
 
 
+class SendenPost(ConfirmPost):
+    # Mensch hat einen Dublettenverdacht gesehen und will trotzdem senden
+    trotzdem: bool = False
+
+
 class CorrectionPost(BaseModel):
     file: str
     field: str
@@ -1058,7 +1063,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         return JSONResponse({"text": text})
 
     @app.post("/api/senden")
-    def senden(body: ConfirmPost) -> JSONResponse:
+    def senden(body: SendenPost) -> JSONResponse:
         """Ein Klick fuer die taegliche Arbeit (Aaron 11.10.2026): pruefen,
         bestaetigen (= lernen, Goldstandard), fuer JobRouter freigeben
         (finalize -> Warteschlange) und aus dem Eingang nehmen."""
@@ -1084,7 +1089,13 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                     fehlt.append(name)
         if fehlt:
             raise HTTPException(400, "Noch nicht vollständig: " + ", ".join(fehlt))
-        gelernt = confirm(body)            # lernen + Goldstandard + Ereignisse
+        from .. import dubletten
+        dub = [c for c in res.checks if c.name == dubletten.CHECK_NAME and c.ok is False]
+        if dub and not body.trotzdem:
+            return JSONResponse(status_code=409, content={
+                "detail": "Mögliche Dublette: " + (dub[0].detail or "gleiche Rechnung schon verarbeitet"),
+                "code": "dublette"})
+        gelernt = confirm(ConfirmPost(file=body.file, template_id=body.template_id))            # lernen + Goldstandard + Ereignisse
         res = _process_for_confirm(path)   # Stand nach dem Lernen
         fin = finalize(res, store)
         if not fin.get("finalized"):
