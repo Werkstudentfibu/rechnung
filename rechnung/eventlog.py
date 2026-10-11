@@ -85,7 +85,7 @@ def record(store, res, operator: str = "") -> dict:
 def record_correction(store, sha256: str, field: str, alt, neu, operator: str = "",
                       supplier_id: str | None = None, supplier_name: str | None = None,
                       file: str = "", template_id: str | None = None,
-                      quelle_vorher: str | None = None) -> dict:
+                      quelle_vorher: str | None = None, programmwert=None) -> dict:
     """Ein nachtraeglich korrigiertes Feld anhaengen. ``alt`` ist der Wert der
     vorherigen Korrektur (``None``, wenn es die erste Korrektur dieser
     Rechnung/dieses Feldes ist) -- Grundlage fuer "haeufige Korrekturen" im
@@ -104,6 +104,7 @@ def record_correction(store, sha256: str, field: str, alt, neu, operator: str = 
         "supplier_name": supplier_name,
         "template_id": template_id,
         "quelle_vorher": quelle_vorher,
+        "programmwert": programmwert,
         "operator": operator or "?",
     }
     store.event_append(rec)

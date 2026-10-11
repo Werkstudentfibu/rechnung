@@ -48,8 +48,26 @@ def test_bericht_enthaelt_rechnung_und_korrektur(tmp_path: Path):
     b = lernbericht.erstellen(store)
     assert b["zusammenfassung"]["rechnungen"] == 1
     r = b["rechnungen"][0]
-    assert r["lieferant"] == "Muster Handels GmbH" and "rechnungsnummer" in r["korrigiert"]
-    assert any(k["field"] == "rechnungsnummer" for k in b["korrekturen"])
+    assert r["lieferant"].startswith("L-") and "rechnungsnummer" in r["korrigiert"]
+    k = [k for k in b["korrekturen"] if k["feld"] == "rechnungsnummer"]
+    assert k and k[0]["form_nachher"] == "AA-9999-99999"
+
+
+def test_bericht_ist_anonym(tmp_path: Path):
+    store = _bestaetigt(tmp_path)
+    text = json.dumps(lernbericht.erstellen(store), ensure_ascii=False)
+    for geheim in ("Muster", "DE89370400440532013000", "DE123456789", "RE-2026", "1190",
+                   "1.190", "a.pdf", "muster"):
+        assert geheim not in text, geheim
+
+
+def test_fehlerarten():
+    f = lernbericht.fehlerart
+    assert f(None, "x") == "fehlte"
+    assert f("11,90", "1190") == "Faktor 100 (Komma/Tausender)"
+    assert f("2026-05-10", "2026-10-05") == "Datumsteile vertauscht"
+    assert f("RE-2026-0O042", "RE-2026-00042") == "1 Zeichen falsch gelesen"
+    assert f("RE-2026-00042 Kunde", "RE-2026-00042") == "zu viel gelesen"
 
 
 def test_senden_einmal_und_nur_neues(tmp_path: Path, monkeypatch):

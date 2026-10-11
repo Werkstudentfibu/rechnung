@@ -284,9 +284,12 @@
     </div>
     <div class="box sect">
       <h4>Lernbericht an Emmy</h4>
-      <p class="hint">Was richtig gelesen und was korrigiert wurde, geht einmal am Tag automatisch per Mail
-        an die Entwicklerin (ohne PDFs, sofern nicht anders eingestellt).</p>
+      <p class="hint">Einmal am Tag per Mail an die Entwicklerin – <b>anonymisiert</b>: keine Namen, Beträge,
+        IBANs, Rechnungsnummern oder PDFs, nur welche Felder korrigiert wurden und welche Art Fehler es war.
+        Lieferanten erscheinen als Kürzel (z. B. L-3f2a1c); die Zuordnung steht nur hier.</p>
       <div id="q-lernbericht" class="hint"></div>
+      <details><summary class="hint">Zuordnung Kürzel → Lieferant (bleibt auf diesem Rechner)</summary>
+        <div id="q-zuordnung"></div></details>
       <button class="ghost" onclick="lernberichtSenden()">Lernbericht jetzt senden</button>
     </div>
   </div>
@@ -1855,7 +1858,9 @@ async function saveCorrection(field, value) {
   const r = await api('/api/correction', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ file: STATE.file, field: field, value: value,
-                          template_id: STATE.tid || null, quelle_vorher: quelleVorher }),
+                          template_id: STATE.tid || null, quelle_vorher: quelleVorher,
+                          wert_vorher: (STATE.current[field] || {}).value == null ? null
+                                       : String((STATE.current[field] || {}).value) }),
   });
   if (r.ok) {
     $('#msg').textContent = `Korrektur für ${field} gespeichert: ${value}`;
@@ -2436,6 +2441,8 @@ async function loadLernbericht() {
   el.textContent = (d.an ? `Empfänger: ${d.an}. ` : 'Kein Empfänger eingestellt (RECHNUNG_BERICHT_AN). ') +
     `Seit dem letzten Bericht: ${z.rechnungen} Rechnung(en), ${z.korrigiert} von ${z.felder} Feldern korrigiert.` +
     (d.letzter && d.letzter.gesendet ? ` Zuletzt gesendet: ${String(d.letzter.gesendet).slice(0, 16).replace('T', ' ')}.` : '');
+  $('#q-zuordnung').innerHTML = '<table>' + (d.zuordnung || []).map(z =>
+    `<tr><td>${esc(z.pseudonym)}</td><td>${esc(z.name)}</td></tr>`).join('') + '</table>';
 }
 async function lernberichtSenden() {
   const el = $('#q-lernbericht'); el.textContent = 'Sende …';

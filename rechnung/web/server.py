@@ -122,6 +122,9 @@ class CorrectionPost(BaseModel):
     # kein zweiter Server-Durchlauf noetig, um das zu rekonstruieren.
     template_id: str | None = None
     quelle_vorher: str | None = None
+    # Wert, den das Programm vor der Korrektur anzeigte (anonymisierter
+    # Lernbericht: Fehlerart bestimmen, lernbericht.py)
+    wert_vorher: str | None = None
 
 
 class TabellePost(BaseModel):
@@ -999,8 +1002,12 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         from .. import lernbericht
         stand = lernbericht._stand(store.root)
         b = lernbericht.erstellen(store, stand.get("bis", ""))
+        # Zuordnung Pseudonym -> Lieferant bleibt auf dem Laptop (nur Anzeige),
+        # damit Aaron Rueckfragen zu "L-3f2a1c" beantworten kann.
+        zuordnung = sorted(({"pseudonym": lernbericht.pseudonym(store.root, s.id), "name": s.name}
+                            for s in store.suppliers()), key=lambda x: x["name"].lower())
         return JSONResponse({"zusammenfassung": b["zusammenfassung"], "letzter": stand,
-                             "an": lernbericht._cfg()["an"]})
+                             "an": lernbericht._cfg()["an"], "zuordnung": zuordnung})
 
     @app.post("/api/lernbericht")
     def lernbericht_jetzt() -> JSONResponse:
@@ -1153,7 +1160,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         eventlog.record_correction(store, sha, body.field, alt, body.value, op,
                                    supplier_id=sup_id, supplier_name=sup_name,
                                    file=path.name, template_id=body.template_id,
-                                   quelle_vorher=body.quelle_vorher)
+                                   quelle_vorher=body.quelle_vorher,
+                                   programmwert=body.wert_vorher)
         return JSONResponse({"ok": True})
 
     @app.post("/api/tabelle")
