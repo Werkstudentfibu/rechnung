@@ -115,6 +115,7 @@
   .af .cp:hover { color: #1c7550; }
   .af .cp.ok { color: #1c7550; font-weight: bold; }
   .af .ab-in { padding-right: 24px; }
+  button.senden { background: #1c7550; color: #fff; font-weight: 600; padding: 6px 18px; }
   .af label { display: block; font-size: 12px; color: #444; margin-bottom: 1px; }
   .ab-in { width: 100%; box-sizing: border-box; border: 1px solid #a9a9a9; background: #fff;
            padding: 3px 6px; font: inherit; }
@@ -943,11 +944,11 @@ function renderInvoice(d) {
   const bar = document.createElement('div'); bar.className = 'actionbar';
   bar.innerHTML = `
     <button onclick="saveTemplate()">Template speichern</button>
-    ${canConfirm() ? `<button class="ghost" onclick="confirmTpl()">Extraktion bestätigen (b)</button>` : ''}
+    <button class="senden" onclick="sendeRechnung()" title="Prüfen, lernen, an JobRouter freigeben, nächste Rechnung (Taste b)">✓ Senden</button>
     <button class="ghost" onclick="addCustomField()">+ eigenes Feld</button>
     <button class="ghost" onclick="toggleLi()">Positionstabelle ${STATE.li.active ? 'ausblenden' : 'anlernen'}</button>
     <button class="ghost danger" onclick="ausEingangEntfernen()" title="Z.B. Testmail oder Spam – wird nicht gelöscht, sondern nach data\\entfernt verschoben">Aus Eingang entfernen</button>
-    <div class="hint">Feld anklicken, dann in der Rechnung Wort anklicken (weitere dazu/weg) oder Rahmen um mehrere Wörter ziehen = Wert ins Feld (wird gelernt) · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = bestätigen + nächste' : ''}</div>
+    <div class="hint">Feld anklicken, dann in der Rechnung Wort anklicken (weitere dazu/weg) oder Rahmen um mehrere Wörter ziehen = Wert ins Feld (wird gelernt) · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = senden + nächste' : ''}</div>
     <div id="msg" class="hint"></div>`;
   fbox.appendChild(bar);
   w.appendChild(fbox);
@@ -1854,6 +1855,27 @@ function learnedMsg(r) {
   return ` · Vorlage ${l.created ? 'gelernt' : 'ergänzt'}: ${l.learned.join(', ')}`;
 }
 
+async function sendeRechnung() {
+  // Ein Klick (Aaron 11.10.2026): pruefen -> lernen -> an JobRouter freigeben
+  // -> aus der Liste -> naechste Rechnung.
+  const idx = LIST_FILES.indexOf(STATE.file);
+  const next = idx >= 0 ? (LIST_FILES[idx + 1] || null) : null;
+  $('#msg').textContent = 'Sende …';
+  const r = await fetch('/api/senden', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, template_id: STATE.tid || null }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { $('#msg').textContent = '✗ ' + (d.detail || ('Fehler ' + r.status)); alert(d.detail || ('Fehler ' + r.status)); return; }
+  const wohin = d.jobrouter_live ? 'an JobRouter übergeben' : 'freigegeben – geht an JobRouter, sobald die Anbindung steht';
+  await loadList();
+  if (next) {
+    const row = document.querySelector(`#list .row[data-file="${CSS.escape(next)}"]`);
+    if (row) { await openInvoice(next, row); }
+  } else {
+    $('#work').innerHTML = '<p class="hint" style="padding:12px">Keine weitere Rechnung in der Liste.</p>';
+  }
+  const m = $('#msg'); if (m) m.textContent = `✓ Vorige Rechnung ${wohin}.`;
+}
+
 async function confirmTpl() {
   // Naechste Datei VOR dem Neuladen merken -- loadList() baut #list komplett
   // neu auf, danach ist die alte Reihenfolge/Position weg.
@@ -1882,9 +1904,9 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key !== 'b' || ev.ctrlKey || ev.metaKey || ev.altKey) return;
   const tag = document.activeElement && document.activeElement.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-  if (!canConfirm()) return;
+  if (!STATE || !STATE.file) return;
   ev.preventDefault();
-  confirmTpl();
+  sendeRechnung();
 });
 
 /* ================= Betriebsmodus ================= */

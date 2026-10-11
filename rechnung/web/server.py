@@ -994,6 +994,49 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         return JSONResponse({"confirmations": tpl.confirmations, "secured": tpl.secured,
                              "learned": learned.to_dict()})
 
+    @app.post("/api/senden")
+    def senden(body: ConfirmPost) -> JSONResponse:
+        """Ein Klick fuer die taegliche Arbeit (Aaron 11.10.2026): pruefen,
+        bestaetigen (= lernen, Goldstandard), fuer JobRouter freigeben
+        (finalize -> Warteschlange) und aus dem Eingang nehmen."""
+        import time as _time
+
+        from ..pipeline import finalize
+        from ..template import sichtbare_felder
+
+        path = _resolve(body.file)
+        res = _process_for_confirm(path)
+        fehlt = []
+        sup = store.supplier(res.supplier_id) if res.supplier_id else None
+        if sup is None:
+            fehlt.append("Lieferant (über „Suchen...“ wählen oder anlegen)")
+        elif not sup.bestaetigt:
+            fehlt.append("Lieferant bestätigen")
+        if store.addresses() and not res.billing_address_id:
+            fehlt.append("Geschäftsbereich")
+        if not res.einvoice:
+            for name, (_t, req) in sichtbare_felder().items():
+                fr = res.fields.get(name)
+                if req and (fr is None or fr.source == "missing" or fr.value in (None, "")):
+                    fehlt.append(name)
+        if fehlt:
+            raise HTTPException(400, "Noch nicht vollständig: " + ", ".join(fehlt))
+        gelernt = confirm(body)            # lernen + Goldstandard + Ereignisse
+        res = _process_for_confirm(path)   # Stand nach dem Lernen
+        fin = finalize(res, store)
+        if not fin.get("finalized"):
+            raise HTTPException(409, f"Freigabe nicht möglich: {fin.get('error')}")
+        if path.parent.resolve() == samples.resolve():
+            ziel = store.root / "erledigt"
+            ziel.mkdir(parents=True, exist_ok=True)
+            path.replace(ziel / f"{_time.strftime('%Y%m%d-%H%M%S')}_{path.name}")
+        if abholer is not None:
+            abholer.anstossen()            # JobRouter-Nachschicken gleich versuchen
+        from ..config import jobrouter as _jr
+        return JSONResponse({"gesendet": True, "queued": fin.get("queued"),
+                             "jobrouter_live": _jr().live,
+                             "gelernt": __import__("json").loads(gelernt.body)})
+
     def _confirm_untemplated(file: str, operator: str) -> JSONResponse:
         """Bestaetigen ohne Template: E-Rechnung (Werte aus dem XML) oder ein
         PDF, dessen Werte der Mensch eingetippt/korrigiert bzw. aus der KI-
