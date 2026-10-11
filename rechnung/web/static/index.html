@@ -104,7 +104,13 @@
   .ab-body { padding: 4px 10px 8px; }
   .ab-sect { margin: 10px 0; }
   .ab-h { font-weight: 600; margin-bottom: 2px; }
-  .af { margin: 3px 0; min-width: 0; }
+  .af { margin: 3px 0; min-width: 0; position: relative; }
+  /* Kopier-Knopf je Feld (Uebertragen nach Abbyy/JobRouter, 11.10.2026) */
+  .af .cp { position: absolute; right: 3px; top: 17px; padding: 0 5px; font-size: 13px; line-height: 20px;
+            background: transparent; border: none; color: #777; cursor: pointer; }
+  .af .cp:hover { color: #1c7550; }
+  .af .cp.ok { color: #1c7550; font-weight: bold; }
+  .af .ab-in { padding-right: 24px; }
   .af label { display: block; font-size: 12px; color: #444; margin-bottom: 1px; }
   .ab-in { width: 100%; box-sizing: border-box; border: 1px solid #a9a9a9; background: #fff;
            padding: 3px 6px; font: inherit; }
@@ -543,9 +549,26 @@ function gruppe(titel, html, zu = false) {
 }
 
 /* Stammdaten-Feld (Geschäftsbereich/Lieferant): Beschriftung über dem Feld */
+// Klick kopiert den angezeigten Wert (deutsches Format, wie in Abbyy
+// einzutragen) -- bis JobRouter angebunden ist, werden die Werte parallel
+// von Hand uebertragen (Aaron 11.10.2026, ca. 60 Rechnungen/Tag).
+const CP_KNOPF = `<button class="cp" tabindex="-1" title="Wert kopieren" onclick="kopiere(event, this)">⧉</button>`;
+async function kopiere(ev, btn) {
+  ev.stopPropagation(); ev.preventDefault();
+  const inp = btn.parentElement.querySelector('input, textarea');
+  const v = inp ? inp.value : '';
+  try { await navigator.clipboard.writeText(v); }
+  catch (e) {
+    const t = document.createElement('textarea'); t.value = v; document.body.appendChild(t);
+    t.select(); document.execCommand('copy'); t.remove();
+  }
+  btn.textContent = '✓'; btn.classList.add('ok');
+  setTimeout(() => { btn.textContent = '⧉'; btn.classList.remove('ok'); }, 900);
+}
+
 function abFeld(label, id, val, cls = '', ro = '', extra = '') {
   return `<div class="af ${extra}"><label>${esc(label)}</label>
-    <input class="ab-in ${val ? cls : ''}" id="${id}" value="${esc(val || '')}" ${ro}></div>`;
+    <input class="ab-in ${val ? cls : ''}" id="${id}" value="${esc(val || '')}" ${ro}>${CP_KNOPF}</div>`;
 }
 
 /* Rechnungsfeld: wie Abbyy grün = sicher erkannt, rot = unsicher; darunter der
@@ -573,7 +596,7 @@ function fBox(name, label, cls = '') {
     <label>${esc(label)}${def.required ? ' *' : ''}</label>
     <input class="ab-in val-input ${st}" data-field="${esc(name)}" value="${esc(val)}"
            title="${esc(name)}${cur.source ? ' · ' + esc(cur.source) : ''}${cur.confidence ? ' · ' + cur.confidence : ''}"
-           onchange="saveCorrection('${esc(name)}', this.value)">
+           onchange="saveCorrection('${esc(name)}', this.value)">${CP_KNOPF}
     ${raw}${rot.map(g => `<div class="chk bad">✗ ${esc(g)}</div>`).join('')}<div class="ass"></div></div>`;
 }
 
