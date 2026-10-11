@@ -1203,7 +1203,10 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
     statt an jedem der vielen Ausgaenge von ``_process``."""
     res = _process(path, store, use_llm=use_llm, create_draft_supplier=create_draft_supplier,
                    variante=variante)
-    _qualitaet(res, store)
+    try:
+        _qualitaet(res, store)
+    except Exception as e:  # noqa: BLE001 -- reine Hinweise duerfen nie die Verarbeitung kippen
+        res.hinweise.append(f"Qualitaetshinweise nicht verfuegbar ({type(e).__name__}: {e})")
     return res
 
 
