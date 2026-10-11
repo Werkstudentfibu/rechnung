@@ -1338,13 +1338,8 @@ Entscheidung Aaron 10.10.2026 ("alle 5 Punkte"). Reiter "Qualität" im UI.
    `STANDARD_FIELDS`, in `NIE_KI` (nicht im KI-Schema), Textregel
    `pflicht.apply_leistungsdatum` nur bei eindeutigem Fund.
 
-4. **E-Rechnungs-Kandidaten** (`e_rechnung.py`): aus `testsatz.bestaetigte`
-   je Lieferant PDF/Scan/E-Rechnung (Scan = Verarbeitungs-Ereignis mit Stufe
-   `ocr`; E-Rechnung = Extraktion `einvoice` oder Original `.xml`),
-   Korrekturen aus `eventlog`. Sortierung: PDF+Scan absteigend, dann
-   Korrekturen. Anschreiben-Vorlage `web/static/anschreiben-e-rechnung.txt`
-   (Empfangspflicht seit 1.1.2025, Versand-Übergang bis Ende 2026 bzw. 2027
-   bei Vorjahresumsatz ≤ 800.000 €); `anschreiben()` füllt nur Bekanntes.
+4. ~~E-Rechnungs-Kandidaten/Anschreiben~~ -- entfernt (Aaron 10.10.2026: Umstellung der
+   Lieferanten auf E-Rechnung entscheidet nicht er und ist nicht Aufgabe des Programms).
 
 5. **Fehlerstatistik** (`eventlog.fehlerstatistik`): je (Lieferant, Feld)
    die Menge korrigierter sha256 / Rechnungen des Lieferanten (bestätigte

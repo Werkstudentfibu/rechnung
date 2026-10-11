@@ -258,14 +258,6 @@
         Rechnung ab, wird das Feld rot (Lesefehler) bzw. ein Hinweis angezeigt.</p>
       <div id="q-profile"></div>
     </div>
-    <div class="box sect">
-      <h4>E-Rechnungen bevorzugen</h4>
-      <p class="hint">Lieferanten, die (bestätigt) PDF oder Scan statt E-Rechnung (ZUGFeRD/XRechnung)
-        schicken – sortiert nach Anzahl und Korrekturaufwand. Eine E-Rechnung braucht weder Vorlage
-        noch Texterkennung noch KI. <a href="/static/anschreiben-e-rechnung.txt" target="_blank">Vorlage
-        für ein Anschreiben</a> (Platzhalter in {…}; es wird nichts versendet).</p>
-      <div id="q-erechnung"></div>
-    </div>
   </div>
 
   <div id="v-vorlernen" class="view pane">
@@ -2228,13 +2220,6 @@ async function loadQualitaet() {
       <td class="num">${r.korrigiert} von ${r.rechnungen}</td><td class="num">${anteil(r.anteil)}</td>
       <td class="num">${anteil(r.anteil_4_wochen)}</td><td class="num">${anteil(r.anteil_davor)}</td>
       <td>${trendHtml(r.trend)}</td></tr>`).join('') + '</table>';
-  const ek = d.e_rechnung_kandidaten || [];
-  $('#q-erechnung').innerHTML = !ek.length ? '<p class="hint">Keine Lieferanten mit bestätigten PDF-/Scan-Rechnungen.</p>' :
-    '<table><tr><th>Lieferant</th><th class="num">PDF</th><th class="num">Scan</th><th class="num">E-Rechnung</th>' +
-    '<th class="num">Korrekturen</th><th class="num">je Rechnung</th></tr>' +
-    ek.map(r => `<tr><td>${esc(r.lieferant_name || r.lieferant)}</td><td class="num">${r.pdf}</td>
-      <td class="num">${r.scan}</td><td class="num">${r.e_rechnung}</td><td class="num">${r.korrekturen}</td>
-      <td class="num">${String(r.korrekturen_je_rechnung).replace('.', ',')}</td></tr>`).join('') + '</table>';
 }
 
 async function loadTestsatz() {
