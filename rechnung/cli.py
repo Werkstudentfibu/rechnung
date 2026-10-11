@@ -70,7 +70,7 @@ def _cmd_push(args) -> int:
     from .jobrouter import push_queue
 
     store = Store(args.data)
-    res = push_queue(store.root)
+    res = push_queue(store.root, trockenlauf_aufheben=True)
     if args.json:
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0

@@ -259,7 +259,11 @@ def enqueue(data_root: str | Path, res: dict) -> Path | None:
 
 
 def push_queue(data_root: str | Path, cfg: JobRouterConfig | None = None,
-               out_dir: str | Path | None = None) -> dict:
+               out_dir: str | Path | None = None, trockenlauf_aufheben: bool = False) -> dict:
+    """``trockenlauf_aufheben``: ohne echte JobRouter-Anbindung (Trockenlauf)
+    bleibt die Rechnung in der Warteschlange und geht automatisch raus,
+    sobald JobRouter angeschlossen ist (Aaron 11.10.2026: freigeben ab
+    Mittwoch, Anbindung evtl. erst spaeter)."""
     cfg = cfg or _jr_cfg()
     root = Path(data_root)
     q = queue_dir(root)
@@ -273,6 +277,8 @@ def push_queue(data_root: str | Path, cfg: JobRouterConfig | None = None,
         r = submit(res, out_dir, cfg, pdf_path=pdf_path)
         r["file"] = res.get("file")
         results.append(r)
+        if r.get("dry_run") and trockenlauf_aufheben:
+            continue
         if r.get("sent") or r.get("dry_run") or r.get("skipped"):
             f.rename(done / f.name)
         else:

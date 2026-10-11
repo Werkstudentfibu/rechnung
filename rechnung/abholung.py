@@ -40,6 +40,19 @@ class Abholer:
         from .ingest import fetch
         return fetch(dest=self.dest, warten=False)
 
+    def _jobrouter_nachschicken(self) -> None:
+        """Freigegebene Rechnungen an JobRouter -- nur mit echter Anbindung
+        (sonst bleiben sie in der Warteschlange, siehe push_queue)."""
+        from .config import data_dir, jobrouter
+        cfg = jobrouter()
+        if not cfg.live:
+            return
+        from .jobrouter import push_queue
+        r = push_queue(data_dir(), cfg, trockenlauf_aufheben=True)
+        self.status["jobrouter_gesendet"] = self.status.get("jobrouter_gesendet", 0) + r["sent"]
+        offen = [x for x in r["results"] if not x.get("sent") and not x.get("skipped")]
+        self.status["jobrouter_fehler"] = (offen[0].get("error") or "") if offen else ""
+
     def einmal(self) -> dict:
         """Eine Abholung jetzt (auch von Hand ueber /api/abholung). Laeuft
         schon eine, wird nicht parallel ein zweiter IMAP-Abruf gestartet."""
@@ -58,6 +71,11 @@ class Abholer:
                     self.bei_neuen(neu)
             except Exception as e:  # Netz weg, Login falsch ... -> naechster Takt
                 self.status["fehler"] = f"{type(e).__name__}: {e}"
+            if self._fetch is None:   # nur im echten Betrieb, nicht in Tests mit Attrappe
+                try:
+                    self._jobrouter_nachschicken()
+                except Exception as e:  # noqa: BLE001
+                    self.status["jobrouter_fehler"] = f"{type(e).__name__}: {e}"
             self.status["letzte_pruefung"] = time.strftime("%H:%M")
             return dict(self.status)
         finally:
