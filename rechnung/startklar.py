@@ -71,6 +71,11 @@ def pruefen(store, samples: Path) -> list[dict]:
     else:
         out.append(_p("KI", OK if semantic.available() else FEHLER, llm.model,
                       "" if semantic.available() else "Ollama läuft nicht oder Modell fehlt"))
+        # Positionen per KI (Befund Aaron 12.10.2026: Positionen leer, Einstellung
+        # nicht sichtbar) -- zeigt den Wert, mit dem das Programm wirklich läuft
+        out.append(_p("KI-Positionen", OK if llm.line_items else WARN,
+                      f"an (Kontext bis {llm.num_ctx})" if llm.line_items else "aus",
+                      "" if llm.line_items else "RECHNUNG_LLM_LINE_ITEMS=1 in rechnung.env"))
 
     frei = shutil.disk_usage(store.root).free / 1e9
     out.append(_p("Speicherplatz", OK if frei > 5 else (WARN if frei > 1 else FEHLER), f"{frei:.1f} GB frei"))
