@@ -902,22 +902,25 @@ def _llm_full(res: Result, doc, positionsmodus: str = POSITIONSMODUS_EINZELN,
     text = (_schlussseiten_text(doc) if positionsmodus == POSITIONSMODUS_ZUSAMMENFASSUNG
             else extraction_text(doc))
     want_lines = positionsmodus != POSITIONSMODUS_EINE_POSITION and not skip_items
-    if v == semantic.VARIANTE_B and want_lines:
+    tbl_pages = (list(range(max(0, len(doc.pages) - _ZUSAMMENFASSUNG_SCHLUSSSEITEN), len(doc.pages)))
+                if positionsmodus == POSITIONSMODUS_ZUSAMMENFASSUNG else None)
+    excerpt = tabelle.tabelle_text(doc, pages=tbl_pages) if v == semantic.VARIANTE_B else ""
+    if v == semantic.VARIANTE_B and want_lines and excerpt:
+        # Positionen als eigener kleiner Block (Baustein 3) -- der grosse
+        # Prompt fragt dann gar nicht erst danach.
         full = semantic.extract_full(text, want_line_items=False)
-        tbl_pages = (list(range(max(0, len(doc.pages) - _ZUSAMMENFASSUNG_SCHLUSSSEITEN),
-                                len(doc.pages)))
-                    if positionsmodus == POSITIONSMODUS_ZUSAMMENFASSUNG else None)
-        excerpt = tabelle.tabelle_text(doc, pages=tbl_pages)
-        if excerpt:
-            items, rejected = semantic.positions_block(excerpt, doc.text)
-            netto_fr = full.fields.get("netto")
-            netto_wert = _to_amount(netto_fr.value) if netto_fr else None
-            items, grund = semantic.positionen_plausibel(items, netto_wert)
-            if grund:
-                rejected["positionen"] = grund
-            full.line_items = items
-            full.rejected.update(rejected)
+        items, rejected = semantic.positions_block(excerpt, doc.text)
+        netto_fr = full.fields.get("netto")
+        netto_wert = _to_amount(netto_fr.value) if netto_fr else None
+        items, grund = semantic.positionen_plausibel(items, netto_wert)
+        if grund:
+            rejected["positionen"] = grund
+        full.line_items = items
+        full.rejected.update(rejected)
     else:
+        # Kein Tabellenausschnitt gefunden (kein erkennbarer Tabellenkopf) --
+        # dann wie Variante A nach Positionen im Rundum-Prompt fragen, statt
+        # sie ganz entfallen zu lassen.
         full = semantic.extract_full(text, want_line_items=want_lines)
     res.llm_rejected.update(full.rejected)
     res.ki_lieferant = {**(full.lieferant_details or {}), **(full.supplier or {})}
