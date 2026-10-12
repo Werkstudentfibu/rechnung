@@ -1292,7 +1292,10 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
     res = _process(path, store, use_llm=use_llm, create_draft_supplier=create_draft_supplier,
                    variante=variante)
     _absender_schatten(res)
-    _qualitaet(res, store)
+    try:
+        _qualitaet(res, store)
+    except Exception as e:  # noqa: BLE001 -- reine Hinweise duerfen nie die Verarbeitung kippen
+        res.hinweise.append(f"Qualitaetshinweise nicht verfuegbar ({type(e).__name__}: {e})")
     return res
 
 
@@ -1738,7 +1741,9 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
     queued = None
     if to_jobrouter:
         cfg = _jr_cfg()
-        if (not cfg.allow_status) or res.status in cfg.allow_status:
+        # Vom Menschen gepruefte und freigegebene Rechnung ("Senden", Aaron
+        # 11.10.2026) geht unabhaengig vom Konfidenz-Status raus.
+        if freigabe == "mensch" or (not cfg.allow_status) or res.status in cfg.allow_status:
             q = jobrouter.enqueue(store.root, payload)
             queued = str(q) if q else None
     return {"finalized": True, "already": already, "queued": queued,

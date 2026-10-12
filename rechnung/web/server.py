@@ -21,6 +21,7 @@ from .. import billing
 from .. import einvoice
 from .. import eventlog
 from .. import human
+from .. import jobrouter
 from .. import learn
 from .. import mailherkunft
 from .. import pdf as pdfmod
@@ -114,6 +115,11 @@ class ConfirmPost(BaseModel):
     template_id: str | None = None      # None nur bei E-Rechnungen (kein Template)
 
 
+class SendenPost(ConfirmPost):
+    # Mensch hat einen Dublettenverdacht gesehen und will trotzdem senden
+    trotzdem: bool = False
+
+
 class CorrectionPost(BaseModel):
     file: str
     field: str
@@ -123,6 +129,9 @@ class CorrectionPost(BaseModel):
     # kein zweiter Server-Durchlauf noetig, um das zu rekonstruieren.
     template_id: str | None = None
     quelle_vorher: str | None = None
+    # Wert, den das Programm vor der Korrektur anzeigte (anonymisierter
+    # Lernbericht: Fehlerart bestimmen, lernbericht.py)
+    wert_vorher: str | None = None
 
 
 class TabellePost(BaseModel):
@@ -387,6 +396,37 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "ki_an": llm.enabled, "ki_modell": llm.model,
             "daten": str(store.root),
         }
+
+    @app.post("/api/import-abbyy")
+    def import_abbyy(body: dict) -> JSONResponse:
+        """Abbyy-Export einlesen (Reiter Lieferanten, Aaron 11.10.2026):
+        ``art`` = "lieferanten" (Vendors) | "geschaeftsbereiche"
+        (BusinessUnits), ``inhalt`` = Dateiinhalt Base64."""
+        import base64
+        import tempfile
+
+        from ..importers import import_business_units_csv, import_vendors_csv
+
+        art = body.get("art")
+        if art not in ("lieferanten", "geschaeftsbereiche"):
+            raise HTTPException(400, "art muss lieferanten oder geschaeftsbereiche sein")
+        try:
+            daten = base64.b64decode(body.get("inhalt") or "", validate=True)
+        except ValueError:
+            raise HTTPException(400, "Datei nicht lesbar")
+        if not daten:
+            raise HTTPException(400, "Datei ist leer")
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "import.csv"
+            f.write_bytes(daten)
+            try:
+                if art == "geschaeftsbereiche":
+                    return JSONResponse({"anzahl": import_business_units_csv(f, store), "fehlend": []})
+                fehlend: list[str] = []
+                n = import_vendors_csv(f, store, fehlend)
+                return JSONResponse({"anzahl": n, "fehlend": sorted(set(fehlend))})
+            except ValueError as e:
+                raise HTTPException(400, str(e))
 
     @app.get("/api/postfach-bericht")
     def postfach_bericht() -> JSONResponse:
@@ -975,6 +1015,152 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         return JSONResponse({"confirmations": tpl.confirmations, "secured": tpl.secured,
                              "learned": learned.to_dict()})
 
+    @app.get("/api/startklar")
+    def startklar_ep() -> JSONResponse:
+        from .. import startklar
+        return JSONResponse({"punkte": startklar.pruefen(store, samples)})
+
+    @app.post("/api/sicherung")
+    def sicherung_jetzt() -> JSONResponse:
+        from .. import sicherung
+        try:
+            return JSONResponse(sicherung.sichern(store.root))
+        except OSError as e:
+            raise HTTPException(502, f"Sicherung fehlgeschlagen: {e}")
+
+    @app.get("/api/jobrouter-vorschau")
+    def jobrouter_vorschau(file: str) -> JSONResponse:
+        """Genau das, was "Senden" an JobRouter schicken wuerde -- je Feld
+        unser Name, JobRouter-Feldname (Zuordnung) und Wert (Aaron 11.10.2026:
+        Zuordnung einmal mit der IT an einer Testrechnung pruefen)."""
+        from .. import stammdaten
+        from ..config import jobrouter as _jr
+
+        path = _resolve(file)
+        res = _process_for_confirm(path)
+        payload = res.to_dict()
+        payload["freigabe"] = "mensch"
+        payload["stammdaten"] = stammdaten.fuer_rechnung(store, res)
+        cfg = _jr()
+        body = jobrouter.payload_from_result(payload, cfg)
+        mapping = jobrouter.load_mapping(cfg)
+        felder = [{"feld": k, "jobrouter": mapping.get(k, k), "zugeordnet": k in mapping,
+                   "wert": (v.get("value") if isinstance(v, dict) else v)}
+                  for k, v in (payload.get("fields") or {}).items()]
+        return JSONResponse({"felder": felder, "nutzlast": body, "live": cfg.live,
+                             "zuordnung_vorhanden": bool(mapping),
+                             "prozess": {"name": cfg.process, "version": cfg.process_version,
+                                         "schritt": cfg.step}})
+
+    @app.get("/api/lernbericht")
+    def lernbericht_vorschau() -> JSONResponse:
+        from .. import lernbericht
+        stand = lernbericht._stand(store.root)
+        b = lernbericht.erstellen(store, stand.get("bis", ""))
+        # Zuordnung Pseudonym -> Lieferant bleibt auf dem Laptop (nur Anzeige),
+        # damit Aaron Rueckfragen zu "L-3f2a1c" beantworten kann.
+        zuordnung = sorted(({"pseudonym": lernbericht.pseudonym(store.root, s.id), "name": s.name}
+                            for s in store.suppliers()), key=lambda x: x["name"].lower())
+        return JSONResponse({"zusammenfassung": b["zusammenfassung"], "letzter": stand,
+                             "an": lernbericht._cfg()["an"], "zuordnung": zuordnung})
+
+    @app.post("/api/lernbericht")
+    def lernbericht_jetzt() -> JSONResponse:
+        from .. import lernbericht
+        try:
+            return JSONResponse(lernbericht.senden(store, erzwingen=True))
+        except Exception as e:  # noqa: BLE001 -- SMTP-Fehler sichtbar machen
+            raise HTTPException(502, f"Versand fehlgeschlagen: {type(e).__name__}: {e}")
+
+    @app.post("/api/ausschnitt-lesen")
+    def ausschnitt_lesen(body: dict) -> JSONResponse:
+        """Rahmen ohne erkannte Woerter (schlechter Scan, Text in Grafik):
+        genau diesen Ausschnitt in hoher Aufloesung per Tesseract lesen
+        (Aaron 11.10.2026). Koordinaten in PDF-Punkten der Seite."""
+        import tempfile
+
+        import pypdfium2 as pdfium
+
+        from .. import ocr as ocrmod
+
+        if not (ocrmod.enabled() and ocrmod.available()):
+            raise HTTPException(409, "Texterkennung nicht verfügbar – Wert bitte von Hand eintragen")
+        path = _resolve(str(body.get("file", "")))
+        try:
+            page_i = int(body.get("page", 0))
+            x0, y0, x1, y1 = (float(body[k]) for k in ("x0", "y0", "x1", "y1"))
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "Ausschnitt ungültig")
+        if path.suffix.lower() != ".pdf":
+            raise HTTPException(400, "nur PDF")
+        scale = 400 / 72
+        doc = pdfium.PdfDocument(str(path))
+        try:
+            img = doc[page_i].render(scale=scale).to_pil().convert("L")
+        finally:
+            doc.close()
+        rand = 4
+        box = (max(0, int(min(x0, x1) * scale) - rand), max(0, int(min(y0, y1) * scale) - rand),
+               min(img.width, int(max(x0, x1) * scale) + rand), min(img.height, int(max(y0, y1) * scale) + rand))
+        if box[2] - box[0] < 5 or box[3] - box[1] < 5:
+            raise HTTPException(400, "Ausschnitt zu klein")
+        with tempfile.TemporaryDirectory() as tmp:
+            png = Path(tmp) / "a.png"
+            img.crop(box).save(png, dpi=(400, 400))
+            r = ocrmod._run([ocrmod.tesseract_cmd(), str(png), "stdout", "-l", ocrmod.LANG,
+                             "--psm", "6"], 60, text=True, encoding="utf-8", errors="replace")
+        text = " ".join(" ".join((r.stdout or "").split("\n")).split())
+        return JSONResponse({"text": text})
+
+    @app.post("/api/senden")
+    def senden(body: SendenPost) -> JSONResponse:
+        """Ein Klick fuer die taegliche Arbeit (Aaron 11.10.2026): pruefen,
+        bestaetigen (= lernen, Goldstandard), fuer JobRouter freigeben
+        (finalize -> Warteschlange) und aus dem Eingang nehmen."""
+        import time as _time
+
+        from ..pipeline import finalize
+        from ..template import sichtbare_felder
+
+        path = _resolve(body.file)
+        res = _process_for_confirm(path)
+        fehlt = []
+        sup = store.supplier(res.supplier_id) if res.supplier_id else None
+        if sup is None:
+            fehlt.append("Lieferant (über „Suchen...“ wählen oder anlegen)")
+        elif not sup.bestaetigt:
+            fehlt.append("Lieferant bestätigen")
+        if store.addresses() and not res.billing_address_id:
+            fehlt.append("Geschäftsbereich")
+        if not res.einvoice:
+            for name, (_t, req) in sichtbare_felder().items():
+                fr = res.fields.get(name)
+                if req and (fr is None or fr.source == "missing" or fr.value in (None, "")):
+                    fehlt.append(name)
+        if fehlt:
+            raise HTTPException(400, "Noch nicht vollständig: " + ", ".join(fehlt))
+        from .. import dubletten
+        dub = [c for c in res.checks if c.name == dubletten.CHECK_NAME and c.ok is False]
+        if dub and not body.trotzdem:
+            return JSONResponse(status_code=409, content={
+                "detail": "Mögliche Dublette: " + (dub[0].detail or "gleiche Rechnung schon verarbeitet"),
+                "code": "dublette"})
+        gelernt = confirm(ConfirmPost(file=body.file, template_id=body.template_id))            # lernen + Goldstandard + Ereignisse
+        res = _process_for_confirm(path)   # Stand nach dem Lernen
+        fin = finalize(res, store)
+        if not fin.get("finalized"):
+            raise HTTPException(409, f"Freigabe nicht möglich: {fin.get('error')}")
+        if path.parent.resolve() == samples.resolve():
+            ziel = store.root / "erledigt"
+            ziel.mkdir(parents=True, exist_ok=True)
+            path.replace(ziel / f"{_time.strftime('%Y%m%d-%H%M%S')}_{path.name}")
+        if abholer is not None:
+            abholer.anstossen()            # JobRouter-Nachschicken gleich versuchen
+        from ..config import jobrouter as _jr
+        return JSONResponse({"gesendet": True, "queued": fin.get("queued"),
+                             "jobrouter_live": _jr().live,
+                             "gelernt": __import__("json").loads(gelernt.body)})
+
     def _confirm_untemplated(file: str, operator: str) -> JSONResponse:
         """Bestaetigen ohne Template: E-Rechnung (Werte aus dem XML) oder ein
         PDF, dessen Werte der Mensch eingetippt/korrigiert bzw. aus der KI-
@@ -1036,7 +1222,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         eventlog.record_correction(store, sha, body.field, alt, body.value, op,
                                    supplier_id=sup_id, supplier_name=sup_name,
                                    file=path.name, template_id=body.template_id,
-                                   quelle_vorher=body.quelle_vorher)
+                                   quelle_vorher=body.quelle_vorher,
+                                   programmwert=body.wert_vorher)
         return JSONResponse({"ok": True})
 
     @app.post("/api/tabelle")
@@ -1367,12 +1554,12 @@ def create_app(store: Store, samples: Path) -> FastAPI:
     @app.get("/api/qualitaet")
     def qualitaet_ep() -> JSONResponse:
         """Reiter "Qualitaet": Lieferanten-Gedaechtnis (plausi.py),
-        E-Rechnungs-Kandidaten (e_rechnung.py), Fehlerstatistik (eventlog.py)."""
-        from .. import e_rechnung, plausi
+        Fehlerstatistik (eventlog.py). E-Rechnungs-Kandidaten/Anschreiben
+        bewusst entfernt (Aaron 10.10.2026: nicht Aufgabe des Programms)."""
+        from .. import plausi
 
         return JSONResponse({"profile": plausi.profile(store),
                              "min_rechnungen": plausi.MIN_RECHNUNGEN,
-                             "e_rechnung_kandidaten": e_rechnung.kandidaten(store),
                              "fehlerstatistik": eventlog.fehlerstatistik(store)})
 
     @app.post("/api/testsatz")

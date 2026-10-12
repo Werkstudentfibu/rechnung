@@ -38,6 +38,10 @@
   .w:hover { background: rgba(28,117,80,.18); }
   .w.anchor { background: rgba(255,165,0,.4); border-color: orange; }
   .w.value { background: rgba(28,117,80,.35); }
+  .w.ziel { background: rgba(47,111,208,.35); }
+  .rahmen-auswahl { position: fixed; border: 2px dashed #2f6fd0; background: rgba(47,111,208,.08);
+                    pointer-events: none; z-index: 50; }
+  .af.ziel-sel .ab-in { outline: 2px solid #2f6fd0; }
   .w.licol { background: rgba(70,130,220,.35); border-color: #2f6fd0; }
   .w.listop { background: rgba(200,40,40,.30); border-color: #b22; }
 
@@ -104,7 +108,17 @@
   .ab-body { padding: 4px 10px 8px; }
   .ab-sect { margin: 10px 0; }
   .ab-h { font-weight: 600; margin-bottom: 2px; }
-  .af { margin: 3px 0; min-width: 0; }
+  .af { margin: 3px 0; min-width: 0; position: relative; }
+  /* Kopier-Knopf je Feld (Uebertragen nach Abbyy/JobRouter, 11.10.2026) */
+  .af .cp { position: absolute; right: 3px; top: 17px; padding: 0 5px; font-size: 13px; line-height: 20px;
+            background: transparent; border: none; color: #777; cursor: pointer; }
+  .af .cp:hover { color: #1c7550; }
+  .af .cp.ok { color: #1c7550; font-weight: bold; }
+  .af .ab-in { padding-right: 24px; }
+  .af .mk-btn { position: absolute; right: 24px; top: 17px; padding: 0 5px; font-size: 14px; line-height: 20px;
+                background: transparent; border: none; color: #2f6fd0; cursor: pointer; }
+  .af .ab-in.val-input { padding-right: 46px; }
+  button.senden { background: #1c7550; color: #fff; font-weight: 600; padding: 6px 18px; }
   .af label { display: block; font-size: 12px; color: #444; margin-bottom: 1px; }
   .ab-in { width: 100%; box-sizing: border-box; border: 1px solid #a9a9a9; background: #fff;
            padding: 3px 6px; font: inherit; }
@@ -172,6 +186,7 @@
   <span id="stats" class="hint" style="color:#eaf5ef"></span>
   <button id="btn-postfach" style="display:none" onclick="postfachJetzt()"
           title="Postfach sofort auf neue Rechnungen prüfen">Postfach prüfen</button>
+  <button onclick="startklar()" title="Ist alles für den Betrieb eingerichtet?">Startklar?</button>
   <button id="btn-postfach-bericht" style="display:none" onclick="postfachBericht()"
           title="Was liegt im Postfach, und was macht das Programm mit jeder Mail?">Postfach-Übersicht</button>
   <span id="postfach" class="hint" style="color:#eaf5ef"></span>
@@ -203,6 +218,16 @@
       <b>feste Werte</b> – Felder, die das Programm nicht aus jeder Rechnung liest, sondern
       hier einträgt und auf der Rechnung nur gegenprüft.</p>
     <button class="ghost" onclick="editSupplier(null)">+ Neuer Lieferant</button>
+    <div class="box" style="margin:8px 0">
+      <h4>Abbyy-Listen einlesen</h4>
+      <div class="hint">CSV-Export aus ABBYY FlexiCapture. Erst die Geschäftsbereiche (BusinessUnits),
+        dann die Lieferanten (Vendors). Bestehende Einträge werden ergänzt, nichts wird gelöscht.</div>
+      <label class="ghost">Geschäftsbereiche (BusinessUnits) … <input type="file" accept=".csv,.txt" style="display:none"
+        onchange="abbyyEinlesen('geschaeftsbereiche', this)"></label>
+      <label class="ghost" style="margin-left:12px">Lieferanten (Vendors) … <input type="file" accept=".csv,.txt" style="display:none"
+        onchange="abbyyEinlesen('lieferanten', this)"></label>
+      <div id="abbyy-msg" class="hint"></div>
+    </div>
     <label class="hint"><input type="checkbox" id="sup-filter-unconfirmed" onchange="loadSuppliers()"> nur unbestätigte Entwürfe zeigen</label>
     <div id="sup-table"></div>
     <div id="sup-form"></div>
@@ -259,12 +284,14 @@
       <div id="q-profile"></div>
     </div>
     <div class="box sect">
-      <h4>E-Rechnungen bevorzugen</h4>
-      <p class="hint">Lieferanten, die (bestätigt) PDF oder Scan statt E-Rechnung (ZUGFeRD/XRechnung)
-        schicken – sortiert nach Anzahl und Korrekturaufwand. Eine E-Rechnung braucht weder Vorlage
-        noch Texterkennung noch KI. <a href="/static/anschreiben-e-rechnung.txt" target="_blank">Vorlage
-        für ein Anschreiben</a> (Platzhalter in {…}; es wird nichts versendet).</p>
-      <div id="q-erechnung"></div>
+      <h4>Lernbericht an Emmy</h4>
+      <p class="hint">Einmal am Tag per Mail an die Entwicklerin – <b>anonymisiert</b>: keine Namen, Beträge,
+        IBANs, Rechnungsnummern oder PDFs, nur welche Felder korrigiert wurden und welche Art Fehler es war.
+        Lieferanten erscheinen als Kürzel (z. B. L-3f2a1c); die Zuordnung steht nur hier.</p>
+      <div id="q-lernbericht" class="hint"></div>
+      <details><summary class="hint">Zuordnung Kürzel → Lieferant (bleibt auf diesem Rechner)</summary>
+        <div id="q-zuordnung"></div></details>
+      <button class="ghost" onclick="lernberichtSenden()">Lernbericht jetzt senden</button>
     </div>
   </div>
 
@@ -554,9 +581,26 @@ function gruppe(titel, html, zu = false) {
 }
 
 /* Stammdaten-Feld (Geschäftsbereich/Lieferant): Beschriftung über dem Feld */
+// Klick kopiert den angezeigten Wert (deutsches Format, wie in Abbyy
+// einzutragen) -- bis JobRouter angebunden ist, werden die Werte parallel
+// von Hand uebertragen (Aaron 11.10.2026, ca. 60 Rechnungen/Tag).
+const CP_KNOPF = `<button class="cp" tabindex="-1" title="Wert kopieren" onclick="kopiere(event, this)">⧉</button>`;
+async function kopiere(ev, btn) {
+  ev.stopPropagation(); ev.preventDefault();
+  const inp = btn.parentElement.querySelector('input, textarea');
+  const v = inp ? inp.value : '';
+  try { await navigator.clipboard.writeText(v); }
+  catch (e) {
+    const t = document.createElement('textarea'); t.value = v; document.body.appendChild(t);
+    t.select(); document.execCommand('copy'); t.remove();
+  }
+  btn.textContent = '✓'; btn.classList.add('ok');
+  setTimeout(() => { btn.textContent = '⧉'; btn.classList.remove('ok'); }, 900);
+}
+
 function abFeld(label, id, val, cls = '', ro = '', extra = '') {
-  return `<div class="af ${extra}"><label>${esc(label)}</label>
-    <input class="ab-in ${val ? cls : ''}" id="${id}" value="${esc(val || '')}" ${ro}></div>`;
+  return `<div class="af ${extra}" data-input="${id}" onclick="zielInput('${id}', this)"><label>${esc(label)}</label>
+    <input class="ab-in ${val ? cls : ''}" id="${id}" value="${esc(val || '')}" ${ro}>${CP_KNOPF}</div>`;
 }
 
 /* Rechnungsfeld: wie Abbyy grün = sicher erkannt, rot = unsicher; darunter der
@@ -584,7 +628,9 @@ function fBox(name, label, cls = '') {
     <label>${esc(label)}${def.required ? ' *' : ''}</label>
     <input class="ab-in val-input ${st}" data-field="${esc(name)}" value="${esc(val)}"
            title="${esc(name)}${cur.source ? ' · ' + esc(cur.source) : ''}${cur.confidence ? ' · ' + cur.confidence : ''}"
-           onchange="saveCorrection('${esc(name)}', this.value)">
+           onchange="saveCorrection('${esc(name)}', this.value)">${CP_KNOPF}<button class="mk-btn" tabindex="-1"
+      title="Korrigieren: danach in der Rechnung den richtigen Wert markieren (Rahmen ziehen)"
+      onclick="korrigieren(event, '${esc(name)}', this)">⌖</button>
     ${raw}${rot.map(g => `<div class="chk bad">✗ ${esc(g)}</div>`).join('')}<div class="ass"></div></div>`;
 }
 
@@ -934,18 +980,19 @@ function renderInvoice(d) {
   const bar = document.createElement('div'); bar.className = 'actionbar';
   bar.innerHTML = `
     <button onclick="saveTemplate()">Template speichern</button>
-    ${canConfirm() ? `<button class="ghost" onclick="confirmTpl()">Extraktion bestätigen (b)</button>` : ''}
+    <button class="ghost" onclick="jobrouterVorschau()" title="Was beim Senden an JobRouter geht">JobRouter-Vorschau</button>
+    <button class="senden" onclick="sendeRechnung()" title="Prüfen, lernen, an JobRouter freigeben, nächste Rechnung (Taste b)">✓ Senden</button>
     <button class="ghost" onclick="addCustomField()">+ eigenes Feld</button>
     <button class="ghost" onclick="toggleLi()">Positionstabelle ${STATE.li.active ? 'ausblenden' : 'anlernen'}</button>
     <button class="ghost danger" onclick="ausEingangEntfernen()" title="Z.B. Testmail oder Spam – wird nicht gelöscht, sondern nach data\\entfernt verschoben">Aus Eingang entfernen</button>
-    <div class="hint">Feld anklicken, dann Wort im PDF anklicken = Position lernen · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = bestätigen + nächste' : ''}</div>
+    <div class="hint">Feld anklicken, dann in der Rechnung Wort anklicken (weitere dazu/weg) oder Rahmen um mehrere Wörter ziehen = Wert ins Feld (wird gelernt) · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = senden + nächste' : ''}</div>
     <div id="msg" class="hint"></div>`;
   fbox.appendChild(bar);
   w.appendChild(fbox);
 
   for (const pg of d.pages) {
     const wrap = document.createElement('div'); wrap.className = 'pdfwrap';
-    const img = new Image(); img.src = pg.image;
+    const img = new Image(); img.src = pg.image; img.draggable = false;
     wrap.appendChild(img);
     for (const wd of pg.words) {
       const el = document.createElement('div');
@@ -958,6 +1005,7 @@ function renderInvoice(d) {
       el.onclick = (ev) => clickWord(pg.index, wd.i, ev);
       wrap.appendChild(el);
     }
+    rahmenAuswahl(wrap, pg.index);
     pagesCol.appendChild(wrap);
     img.onload = fitPages;
   }
@@ -1201,6 +1249,9 @@ function renderSupplierInfoBox(sup) {
 function selectField(name, tr) {
   STATE.li.selCol = null;
   STATE.selField = name;
+  STATE.zielInput = null;
+  document.querySelectorAll('#fields .ziel-sel').forEach(x => x.classList.remove('ziel-sel'));
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
   document.querySelectorAll('#fields [data-field].sel, #fields tr.sel').forEach(x => x.classList.remove('sel'));
   tr.classList.add('sel');
   document.querySelectorAll('.mk[data-field]').forEach(e =>
@@ -1629,13 +1680,147 @@ function clickWord(page, i, ev) {
     paintLiCols(); paint(); refreshLiPreview();
     return;
   }
-  if (!STATE.selField) { $('#msg').textContent = 'erst Feld-Zeile oder Spalte wählen'; return; }
+  if (RAHMEN_KLICK_SPERRE) return;   // Klick am Ende einer Rahmen-Auswahl
+  if (STATE.zielInput) { zielWoerter(page, [i], false); return; }
+  if (!STATE.selField) { $('#msg').textContent = 'erst ein Feld anklicken, dann den Wert in der Rechnung markieren'; return; }
   const a = STATE.assign[STATE.selField] || { page, anchor: null, values: [] };
+  if (a.page !== page) a.values = [];
   a.page = page;
   if (ev.shiftKey) a.anchor = (a.anchor === i) ? null : i;  // erneutes Shift+Klick hebt den Anker wieder auf
   else a.values.includes(i) ? a.values = a.values.filter(x => x !== i) : a.values.push(i);
   STATE.assign[STATE.selField] = a;
   paint();
+  if (!ev.shiftKey) wertEintragen(STATE.selField, page, a.values);
+}
+
+/* ---- Markieren -> Wert ins gewaehlte Feld (Aaron 11.10.2026) ----------
+   Feld anklicken, dann in der Rechnung ein Wort anklicken (weitere Woerter
+   per Klick dazu/weg) oder mit gedrueckter Maus einen Rahmen um mehrere
+   Woerter ziehen. Der Text steht sofort im Feld; Rechnungsfelder werden
+   kurz danach gespeichert (lernt zugleich die Position fuer die Vorlage),
+   Lieferant/Geschaeftsbereich beim Klick auf deren Knopf. */
+let RAHMEN_KLICK_SPERRE = false;
+let WERT_TIMER = null;
+function woerterText(page, indices) {
+  const pg = STATE.pages[page]; if (!pg) return '';
+  const wds = indices.map(i => pg.words[i]).filter(Boolean)
+    .sort((a, b) => (Math.abs(a.top - b.top) > 3 ? a.top - b.top : a.x0 - b.x0));
+  // Zeilenwechsel erhalten (Anschrift), sonst Leerzeichen
+  let out = '', lastTop = null;
+  for (const w of wds) {
+    if (lastTop !== null) out += Math.abs(w.top - lastTop) > 3 ? '\n' : ' ';
+    out += w.text; lastTop = w.top;
+  }
+  return out;
+}
+function wertEintragen(field, page, indices) {
+  const text = woerterText(page, indices).replace(/\n/g, ' ');
+  const inp = document.querySelector(`#fields .af[data-field="${CSS.escape(field)}"] input`);
+  if (inp) inp.value = text;
+  clearTimeout(WERT_TIMER);
+  if (text) WERT_TIMER = setTimeout(() => saveCorrection(field, text), 900);
+}
+function zielInput(id, el) {
+  STATE.selField = null; STATE.zielInput = id; STATE.zielWoerter = { page: null, values: [] };
+  document.querySelectorAll('#fields .sel, #fields .ziel-sel').forEach(x => x.classList.remove('sel', 'ziel-sel'));
+  el.classList.add('ziel-sel');
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+}
+function zielWoerter(page, indices, ersetzen) {
+  const z = STATE.zielWoerter || { page: null, values: [] };
+  if (ersetzen || z.page !== page) { z.page = page; z.values = []; }
+  for (const i of indices) z.values.includes(i) ? z.values = z.values.filter(x => x !== i) : z.values.push(i);
+  STATE.zielWoerter = z;
+  const wds = document.querySelectorAll('.pdfwrap')[page].querySelectorAll('.w');
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+  z.values.forEach(i => wds[i] && wds[i].classList.add('ziel'));
+  const inp = document.getElementById(STATE.zielInput);
+  if (!inp) return;
+  const txt = woerterText(page, z.values);
+  inp.value = inp.tagName === 'TEXTAREA' ? txt : txt.replace(/\n/g, ' ');
+  inp.dispatchEvent(new Event('input', { bubbles: true }));
+}
+// Nach dem Markieren per Rahmen gleich zum naechsten leeren oder roten
+// Rechnungsfeld springen (Aaron 11.10.2026: weniger Klicks bei ~60/Tag).
+function naechstesFeld(nach) {
+  const alle = [...document.querySelectorAll('#fields .af[data-field]')];
+  const i = alle.findIndex(el => el.dataset.field === nach);
+  const kandidat = alle.slice(i + 1).find(el => {
+    const inp = el.querySelector('input');
+    return inp && (!inp.value.trim() || inp.classList.contains('unsicher'));
+  });
+  if (!kandidat) return;
+  selectField(kandidat.dataset.field, kandidat);
+  kandidat.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  const m = $('#msg'); if (m) m.textContent = `Weiter: „${kandidat.dataset.field}“ – Wert in der Rechnung markieren (oder anderes Feld wählen).`;
+}
+
+function korrigieren(ev, name, btn) {
+  ev.stopPropagation();
+  const af = btn.closest('.af');
+  selectField(name, af);
+  delete STATE.assign[name];   // neu markieren ersetzt die bisherige Stelle
+  paint();
+  const m = $('#msg'); if (m) m.textContent = `„${name}“ korrigieren: jetzt in der Rechnung den richtigen Wert anklicken oder einen Rahmen darum ziehen.`;
+}
+async function ausschnittLesen(wrap, page, r) {
+  const ziel = STATE.zielInput || STATE.selField;
+  if (!ziel) { $('#msg').textContent = 'erst ein Feld anklicken, dann den Wert in der Rechnung markieren'; return; }
+  const pg = STATE.pages[page]; const w = wrap.getBoundingClientRect();
+  const fx = pg.width / w.width, fy = pg.height / w.height;
+  const box = { x0: (r.left - w.left) * fx, y0: (r.top - w.top) * fy, x1: (r.right - w.left) * fx, y1: (r.bottom - w.top) * fy };
+  $('#msg').textContent = 'Lese den markierten Ausschnitt …';
+  const resp = await fetch('/api/ausschnitt-lesen', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, page, ...box }) });
+  const d = await resp.json().catch(() => ({}));
+  if (!resp.ok || !d.text) { $('#msg').textContent = '✗ ' + (d.detail || 'Im Ausschnitt nichts erkannt – Wert bitte eintippen.'); return; }
+  if (STATE.zielInput) {
+    const inp = document.getElementById(STATE.zielInput); if (inp) { inp.value = d.text; inp.dispatchEvent(new Event('input', { bubbles: true })); }
+  } else {
+    const inp = document.querySelector(`#fields .af[data-field="${CSS.escape(ziel)}"] input`);
+    if (inp) inp.value = d.text;
+    saveCorrection(ziel, d.text);
+  }
+  $('#msg').textContent = `Gelesen: ${d.text}`;
+}
+function rahmenAuswahl(wrap, page) {
+  let start = null, box = null;
+  wrap.addEventListener('mousedown', ev => {
+    if (ev.button !== 0) return;
+    ev.preventDefault();   // kein Bild-Ziehen/Textmarkieren des Browsers
+    start = { x: ev.clientX, y: ev.clientY }; box = null;
+  });
+  window.addEventListener('mousemove', ev => {
+    if (!start) return;
+    const dx = Math.abs(ev.clientX - start.x), dy = Math.abs(ev.clientY - start.y);
+    if (!box && dx + dy < 8) return;
+    if (!box) { box = document.createElement('div'); box.className = 'rahmen-auswahl'; document.body.appendChild(box); }
+    box.style.left = Math.min(ev.clientX, start.x) + 'px'; box.style.top = Math.min(ev.clientY, start.y) + 'px';
+    box.style.width = dx + 'px'; box.style.height = dy + 'px';
+    ev.preventDefault();
+  });
+  window.addEventListener('mouseup', ev => {
+    if (!start) return;
+    const s0 = start; start = null;
+    if (!box) return;
+    const r = box.getBoundingClientRect(); box.remove(); box = null;
+    const treffer = [];
+    wrap.querySelectorAll('.w').forEach((el, i) => {
+      const b = el.getBoundingClientRect();
+      const cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2;
+      if (cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) treffer.push(i);
+    });
+    RAHMEN_KLICK_SPERRE = true; setTimeout(() => { RAHMEN_KLICK_SPERRE = false; }, 50);
+    if (!treffer.length) { ausschnittLesen(wrap, page, r); return; }
+    if (STATE.zielInput) { zielWoerter(page, treffer, true); return; }
+    if (!STATE.selField) { $('#msg').textContent = 'erst ein Feld anklicken, dann den Wert in der Rechnung markieren'; return; }
+    const a = { page, anchor: (STATE.assign[STATE.selField] || {}).anchor ?? null, values: treffer };
+    const fertig = STATE.selField;
+    STATE.assign[fertig] = a;
+    paint();
+    wertEintragen(fertig, page, treffer);
+    naechstesFeld(fertig);
+  });
 }
 
 function clearAssign(field) {
@@ -1712,7 +1897,9 @@ async function saveCorrection(field, value) {
   const r = await api('/api/correction', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ file: STATE.file, field: field, value: value,
-                          template_id: STATE.tid || null, quelle_vorher: quelleVorher }),
+                          template_id: STATE.tid || null, quelle_vorher: quelleVorher,
+                          wert_vorher: (STATE.current[field] || {}).value == null ? null
+                                       : String((STATE.current[field] || {}).value) }),
   });
   if (r.ok) {
     $('#msg').textContent = `Korrektur für ${field} gespeichert: ${value}`;
@@ -1752,6 +1939,32 @@ function learnedMsg(r) {
   return ` · Vorlage ${l.created ? 'gelernt' : 'ergänzt'}: ${l.learned.join(', ')}`;
 }
 
+async function sendeRechnung() {
+  // Ein Klick (Aaron 11.10.2026): pruefen -> lernen -> an JobRouter freigeben
+  // -> aus der Liste -> naechste Rechnung.
+  const idx = LIST_FILES.indexOf(STATE.file);
+  const next = idx >= 0 ? (LIST_FILES[idx + 1] || null) : null;
+  $('#msg').textContent = 'Sende …';
+  const sende = trotzdem => fetch('/api/senden', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, template_id: STATE.tid || null, trotzdem }) });
+  let r = await sende(false);
+  let d = await r.json().catch(() => ({}));
+  if (r.status === 409 && d.code === 'dublette') {
+    if (!confirm(d.detail + '\n\nTrotzdem senden?')) { $('#msg').textContent = 'Nicht gesendet (Dublettenverdacht).'; return; }
+    r = await sende(true); d = await r.json().catch(() => ({}));
+  }
+  if (!r.ok) { $('#msg').textContent = '✗ ' + (d.detail || ('Fehler ' + r.status)); alert(d.detail || ('Fehler ' + r.status)); return; }
+  const wohin = d.jobrouter_live ? 'an JobRouter übergeben' : 'freigegeben – geht an JobRouter, sobald die Anbindung steht';
+  await loadList();
+  if (next) {
+    const row = document.querySelector(`#list .row[data-file="${CSS.escape(next)}"]`);
+    if (row) { await openInvoice(next, row); }
+  } else {
+    $('#work').innerHTML = '<p class="hint" style="padding:12px">Keine weitere Rechnung in der Liste.</p>';
+  }
+  const m = $('#msg'); if (m) m.textContent = `✓ Vorige Rechnung ${wohin}.`;
+}
+
 async function confirmTpl() {
   // Naechste Datei VOR dem Neuladen merken -- loadList() baut #list komplett
   // neu auf, danach ist die alte Reihenfolge/Position weg.
@@ -1780,9 +1993,9 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key !== 'b' || ev.ctrlKey || ev.metaKey || ev.altKey) return;
   const tag = document.activeElement && document.activeElement.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-  if (!canConfirm()) return;
+  if (!STATE || !STATE.file) return;
   ev.preventDefault();
-  confirmTpl();
+  sendeRechnung();
 });
 
 /* ================= Betriebsmodus ================= */
@@ -1867,6 +2080,61 @@ async function postfachBericht() {
     <h4>Letzte Mails im Ordner „${esc(r.ordner || '')}“</h4>
     <table><tr><th>Datum</th><th>Von</th><th>Betreff</th><th>gelesen</th><th>Anhänge</th><th>Was das Programm tut</th></tr>${zeilen}</table>
   </div>`;
+}
+
+async function abbyyEinlesen(art, input) {
+  const f = input.files && input.files[0]; if (!f) return;
+  const msg = $('#abbyy-msg'); msg.textContent = `„${f.name}“ wird eingelesen …`;
+  const buf = new Uint8Array(await f.arrayBuffer());
+  let bin = ''; for (let i = 0; i < buf.length; i += 8192) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 8192));
+  const r = await fetch('/api/import-abbyy', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ art, inhalt: btoa(bin) }) });
+  const d = await r.json().catch(() => ({}));
+  input.value = '';
+  if (!r.ok) { msg.textContent = 'Fehler: ' + (d.detail || r.status); return; }
+  msg.textContent = `${d.anzahl} ${art === 'lieferanten' ? 'Lieferanten' : 'Geschäftsbereiche'} eingelesen.` +
+    (d.fehlend && d.fehlend.length ? ` Achtung: ${d.fehlend.length} Geschäftsbereich-ID(s) fehlen noch (${d.fehlend.slice(0, 8).join(', ')}) – bitte erst die Geschäftsbereiche einlesen.` : '');
+  if (art === 'lieferanten') loadSuppliers();
+}
+
+async function startklar() {
+  show('scan');
+  const w = $('#work'); w.className = '';
+  w.innerHTML = '<p class="hint" style="padding:12px">Prüfe … (Anmeldungen bei Postfach, JobRouter, Mailversand – dauert einige Sekunden)</p>';
+  const d = await api('/api/startklar');
+  const sym = { ok: '✓', warn: '!', fehler: '✗', aus: '–' };
+  const farbe = { ok: '#1c7550', warn: '#b07800', fehler: '#b22', aus: '#777' };
+  const alleOk = d.punkte.every(p => p.status !== 'fehler');
+  w.innerHTML = `<div style="padding:12px"><h3>Startklar? ${alleOk ? '<span style="color:#1c7550">ja</span>' : '<span style="color:#b22">noch nicht</span>'}</h3>
+    <table>${d.punkte.map(p => `<tr>
+      <td style="color:${farbe[p.status]};font-weight:bold;width:20px">${sym[p.status]}</td>
+      <td><b>${esc(p.name)}</b></td><td>${esc(p.detail)}</td>
+      <td class="hint">${esc(p.hilfe || '')}</td></tr>`).join('')}</table>
+    <p><button class="ghost" onclick="sicherungJetzt(this)">Datensicherung jetzt</button></p></div>`;
+}
+async function sicherungJetzt(btn) {
+  btn.disabled = true;
+  const r = await fetch('/api/sicherung', { method: 'POST' }); const d = await r.json().catch(() => ({}));
+  btn.disabled = false; btn.textContent = r.ok ? (d.ok ? '✓ ' + d.detail : d.detail) : 'Fehler: ' + (d.detail || r.status);
+}
+async function jobrouterVorschau() {
+  if (!STATE.file) return;
+  const r = await fetch('/api/jobrouter-vorschau?file=' + encodeURIComponent(STATE.file));
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert('Vorschau nicht möglich: ' + (d.detail || r.status)); return; }
+  const box = document.createElement('div');
+  box.style.cssText = 'position:fixed;inset:5% 10%;background:#fff;border:2px solid #1c7550;z-index:100;overflow:auto;padding:14px;box-shadow:0 4px 24px rgba(0,0,0,.3)';
+  const pr = d.prozess || {};
+  box.innerHTML = `<button style="float:right" onclick="this.parentElement.remove()">Schließen</button>
+    <h3>JobRouter-Vorschau</h3>
+    <p class="hint">${d.live ? 'JobRouter ist angebunden.' : 'JobRouter noch nicht angebunden – so würde es gesendet.'}
+      Prozess: ${esc(pr.name || '–')} · Version ${esc(pr.version || '–')} · Schritt ${esc(pr.schritt || '–')}
+      ${d.zuordnung_vorhanden ? '' : '<br><b style="color:#b22">Keine Feldzuordnung hinterlegt – Feldnamen gehen unverändert raus.</b>'}</p>
+    <table><tr><th>Unser Feld</th><th>JobRouter-Feld</th><th>Wert</th></tr>
+    ${d.felder.map(f => `<tr><td>${esc(f.feld)}</td><td style="${f.zugeordnet ? '' : 'color:#b07800'}">${esc(f.jobrouter)}${f.zugeordnet ? '' : ' (nicht zugeordnet)'}</td>
+      <td><code>${esc(JSON.stringify(f.wert))}</code></td></tr>`).join('')}</table>
+    <details><summary>Komplette Nutzlast (technisch)</summary><pre style="white-space:pre-wrap">${esc(JSON.stringify(d.nutzlast, null, 2))}</pre></details>`;
+  document.body.appendChild(box);
 }
 
 /* ================= Postfach-Abholung (abholung.py) ================= */
@@ -2218,7 +2486,7 @@ const pct = v => (v === null || v === undefined) ? '–' : v.toFixed(1).replace(
 let TESTSATZ_TIMER = null;
 
 async function loadQualitaet() {
-  loadTestsatz();
+  loadTestsatz(); loadLernbericht();
   const d = await api('/api/qualitaet');
   $('#q-prof-min').textContent = d.min_rechnungen;
   const geld = v => v == null ? '' : Number(v).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -2248,13 +2516,24 @@ async function loadQualitaet() {
       <td class="num">${r.korrigiert} von ${r.rechnungen}</td><td class="num">${anteil(r.anteil)}</td>
       <td class="num">${anteil(r.anteil_4_wochen)}</td><td class="num">${anteil(r.anteil_davor)}</td>
       <td>${trendHtml(r.trend)}</td></tr>`).join('') + '</table>';
-  const ek = d.e_rechnung_kandidaten || [];
-  $('#q-erechnung').innerHTML = !ek.length ? '<p class="hint">Keine Lieferanten mit bestätigten PDF-/Scan-Rechnungen.</p>' :
-    '<table><tr><th>Lieferant</th><th class="num">PDF</th><th class="num">Scan</th><th class="num">E-Rechnung</th>' +
-    '<th class="num">Korrekturen</th><th class="num">je Rechnung</th></tr>' +
-    ek.map(r => `<tr><td>${esc(r.lieferant_name || r.lieferant)}</td><td class="num">${r.pdf}</td>
-      <td class="num">${r.scan}</td><td class="num">${r.e_rechnung}</td><td class="num">${r.korrekturen}</td>
-      <td class="num">${String(r.korrekturen_je_rechnung).replace('.', ',')}</td></tr>`).join('') + '</table>';
+}
+
+async function loadLernbericht() {
+  const el = $('#q-lernbericht'); if (!el) return;
+  const d = await api('/api/lernbericht').catch(() => null); if (!d) return;
+  const z = d.zusammenfassung;
+  el.textContent = (d.an ? `Empfänger: ${d.an}. ` : 'Kein Empfänger eingestellt (RECHNUNG_BERICHT_AN). ') +
+    `Seit dem letzten Bericht: ${z.rechnungen} Rechnung(en), ${z.korrigiert} von ${z.felder} Feldern korrigiert.` +
+    (d.letzter && d.letzter.gesendet ? ` Zuletzt gesendet: ${String(d.letzter.gesendet).slice(0, 16).replace('T', ' ')}.` : '');
+  $('#q-zuordnung').innerHTML = '<table>' + (d.zuordnung || []).map(z =>
+    `<tr><td>${esc(z.pseudonym)}</td><td>${esc(z.name)}</td></tr>`).join('') + '</table>';
+}
+async function lernberichtSenden() {
+  const el = $('#q-lernbericht'); el.textContent = 'Sende …';
+  const r = await fetch('/api/lernbericht', { method: 'POST' });
+  const d = await r.json().catch(() => ({}));
+  el.textContent = r.ok ? (d.gesendet ? `Gesendet an ${d.an} (${d.rechnungen} Rechnungen).` : 'Nicht gesendet: ' + d.grund)
+                        : 'Fehler: ' + (d.detail || r.status);
 }
 
 async function loadTestsatz() {

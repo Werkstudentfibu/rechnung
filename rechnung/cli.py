@@ -70,7 +70,7 @@ def _cmd_push(args) -> int:
     from .jobrouter import push_queue
 
     store = Store(args.data)
-    res = push_queue(store.root)
+    res = push_queue(store.root, trockenlauf_aufheben=True)
     if args.json:
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0
@@ -359,32 +359,6 @@ def _cmd_testsatz(args) -> int:
         print("Noch keine bestaetigten Rechnungen im Testsatz.")
         return 0
     print(testsatz.text(b))
-    return 0
-
-
-def _cmd_e_rechnung_kandidaten(args) -> int:
-    """Lieferanten, die (bestaetigt) PDF/Scan statt E-Rechnung schicken, nach
-    Anzahl und Korrekturaufwand (e_rechnung.py). Versendet nichts."""
-    from . import e_rechnung
-
-    store = Store(args.data)
-    if args.anschreiben:
-        print(e_rechnung.anschreiben(store, args.anschreiben, empfang_adresse=args.an or ""))
-        return 0
-    rows = e_rechnung.kandidaten(store)
-    if args.json:
-        print(json.dumps(rows, indent=2, ensure_ascii=False))
-        return 0
-    if not rows:
-        print("Keine Lieferanten mit bestaetigten PDF-/Scan-Rechnungen.")
-        return 0
-    print(f"{'Lieferant':34s} {'PDF':>5s} {'Scan':>5s} {'E-Re.':>5s} {'Korr.':>6s} {'je Re.':>6s}")
-    for r in rows:
-        who = r["lieferant_name"] or r["lieferant"]
-        print(f"{who:34.34s} {r['pdf']:5d} {r['scan']:5d} {r['e_rechnung']:5d} "
-              f"{r['korrekturen']:6d} {r['korrekturen_je_rechnung']:6.2f}")
-    print(f"\nAnschreiben (Vorlage, wird nicht versendet): rechnung e-rechnung-kandidaten "
-          f"--anschreiben LIEFERANT_ID [--an EMPFANGSADRESSE]")
     return 0
 
 
@@ -703,15 +677,6 @@ def main(argv=None) -> int:
     ts.add_argument("--ausgabe", help="Bericht zusaetzlich als JSON in diese Datei schreiben")
     ts.add_argument("--json", action="store_true")
     ts.set_defaults(func=_cmd_testsatz)
-
-    ek = sub.add_parser("e-rechnung-kandidaten",
-                        help="Lieferanten, die PDF/Scan statt E-Rechnung schicken (nach Anzahl/"
-                             "Korrekturaufwand), Anschreiben-Vorlage")
-    ek.add_argument("--anschreiben", metavar="LIEFERANT_ID",
-                    help="Anschreiben fuer diesen Lieferanten ausgeben (nichts wird versendet)")
-    ek.add_argument("--an", help="Empfangsadresse fuer E-Rechnungen im Anschreiben")
-    ek.add_argument("--json", action="store_true")
-    ek.set_defaults(func=_cmd_e_rechnung_kandidaten)
 
     fs = sub.add_parser("fehlerstatistik",
                         help="Welche Felder werden bei welchen Lieferanten wie oft korrigiert "
