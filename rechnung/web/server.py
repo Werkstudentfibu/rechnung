@@ -29,6 +29,7 @@ from .. import rechnen
 from .. import semantic
 from .. import split
 from .. import shadow
+from .. import tabelle
 from .. import testsatz
 from .. import vorlernen
 from ..billing import BillingAddress
@@ -142,6 +143,18 @@ class TabellePost(BaseModel):
     rows: list[dict]
     template_id: str | None = None
     quelle_vorher: str | None = None
+
+
+class TabelleMarkierenPost(BaseModel):
+    """Baustein 2 (Aaron 12.10.2026): der Mensch zieht im PDF einen Rahmen
+    um die Positionstabelle (bei mehrseitigen Tabellen: je Seite einer) --
+    ``boxes`` in PDF-Punkten der jeweiligen Seite. ``mapping`` (optional):
+    vom Menschen geaenderte Spalten-Zuordnung (Index wie die Antwort-
+    Spalten des vorigen Aufrufs); fehlt sie, gilt der Vorschlag (``guess``)
+    je Spalte."""
+    file: str
+    boxes: list[dict]
+    mapping: list[str | None] | None = None
 
 
 class PruefenPost(BaseModel):
@@ -1256,6 +1269,22 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                                    file=path.name, template_id=body.template_id,
                                    quelle_vorher=body.quelle_vorher)
         return JSONResponse({"ok": True, "rows": rows})
+
+    @app.post("/api/tabelle/markieren")
+    def tabelle_markieren_ep(body: TabelleMarkierenPost) -> JSONResponse:
+        """Baustein 2: Rahmen(e) um die Positionstabelle -> erkannte Spalten
+        (mit Zuordnungs-Vorschlag) + die daraus gelesenen Positionen. Reine
+        Vorschau (speichert nichts) -- "Positionen uebernehmen" (/api/tabelle)
+        macht aus dem Ergebnis danach eine normale Korrektur."""
+        doc = _load(_resolve(body.file))
+        try:
+            boxes = [{"page": int(b["page"]), "x0": float(b["x0"]), "top": float(b["top"]),
+                     "x1": float(b["x1"]), "bottom": float(b["bottom"])} for b in body.boxes]
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "Rahmen ungültig")
+        grid = tabelle.markiere_tabelle(doc, boxes)
+        items = tabelle.anwenden_markierung(grid, body.mapping)
+        return JSONResponse({"columns": grid["columns"], "rows": grid["rows"], "items": items})
 
     @app.post("/api/pruefen")
     def pruefen_ep(body: PruefenPost) -> JSONResponse:

@@ -6,6 +6,8 @@ aenderbar: ``anwenden_markierung``)."""
 
 from __future__ import annotations
 
+import pytest
+
 from rechnung import synth, tabelle
 from rechnung.pdf import load
 
@@ -78,3 +80,37 @@ def test_mehrseitige_markierung_ueber_zwei_rahmen(tmp_path):
     items = tabelle.anwenden_markierung(grid)
     assert len(items) == 6
     assert round(sum(it["gesamt_netto"] for it in items), 2) == soll["netto"]
+
+
+# ---- API: /api/tabelle/markieren (UI-Weg fuer Baustein 2) -----------------
+
+def test_api_tabelle_markieren_liefert_spalten_und_items(tmp_path):
+    pytest.importorskip("fastapi.testclient")
+    from fastapi.testclient import TestClient
+
+    from rechnung.store import Store
+    from rechnung.web import server as server_mod
+
+    store = Store(tmp_path / "data")
+    samples = tmp_path / "s"
+    samples.mkdir()
+    client = TestClient(server_mod.create_app(store, samples))
+
+    p = synth.make_invoice(samples / "a.pdf", netto=1000.0, satz=19)
+    doc = load(p)
+    box = _box_um_tabelle(doc)
+
+    r = client.post("/api/tabelle/markieren",
+                    json={"file": "a.pdf", "boxes": [box]}).json()
+    namen = {c["guess"] for c in r["columns"]}
+    assert {"beschreibung", "menge", "einzelpreis_netto", "gesamt_netto",
+           "mwst_satz", "waehrung"} <= namen
+    assert len(r["rows"]) == 3
+    assert len(r["items"]) == 3
+    assert all(it["beschreibung"] for it in r["items"])
+
+    # Mapping aendern (Waehrung ignorieren) -> items sofort ohne Waehrung
+    mapping = [("ignorieren" if c["guess"] == "waehrung" else c["guess"]) for c in r["columns"]]
+    r2 = client.post("/api/tabelle/markieren",
+                     json={"file": "a.pdf", "boxes": [box], "mapping": mapping}).json()
+    assert all("waehrung" not in it for it in r2["items"])
