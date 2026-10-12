@@ -135,7 +135,7 @@ def iban_valid(iban: str | None) -> bool:
 
 _USTID_RE = re.compile(r"\b(DE\s?\d{9}|[A-Z]{2}\s?[A-Z0-9]{8,12})\b")
 # Schweizer UID/MWST-Nummer: CHE-123.456.789 (MWST/TVA/IVA)
-_CHE_RE = re.compile(r"\bCHE[-\s]?(\d{3})[.\s]?(\d{3})[.\s]?(\d{3})\b")
+_CHE_RE = re.compile(r"\bCHE[-\s]*(\d{3})[.\s]?(\d{3})[.\s]?(\d{3})(?!\d)")
 
 
 def che_valid(uid: str) -> bool:

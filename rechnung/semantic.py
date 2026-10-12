@@ -695,6 +695,9 @@ def _extract_full_once(prompt_text: str, verify_text: str, cfg, schema: dict,
         res.line_items.append(item)
     if dropped:
         res.rejected["positionen"] = f"{dropped} Position(en) ohne belegten Betrag verworfen"
+    elif want_lines and not res.line_items:
+        # sichtbar machen statt still leer (Befund Aaron 12.10.2026)
+        res.rejected["positionen"] = "KI hat keine Positionen geliefert"
     return res
 
 
@@ -742,6 +745,8 @@ def extract_full(text: str, want_line_items: bool | None = None) -> FullExtracti
             res.line_items = retry.line_items
         for n, why in retry.rejected.items():
             res.rejected.setdefault(n, why)
+    if res.line_items and res.rejected.get("positionen") == "KI hat keine Positionen geliefert":
+        res.rejected.pop("positionen")
     _absender_nicht_empfaenger(res)
     return res
 
