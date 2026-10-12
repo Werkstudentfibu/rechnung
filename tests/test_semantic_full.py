@@ -142,10 +142,27 @@ def test_full_line_items_only_when_enabled_and_verified(monkeypatch, text):
     calls = _mock(monkeypatch, answer, line_items=True)
     full = semantic.extract_full(text)
     assert "positionen" in calls[-1]
+    # Nur eine Position ist belegt (550,00); ihre Summe passt nicht zum
+    # gelesenen Netto (1.000,00 aus GOOD) -- Baustein 4 (Positions-
+    # Plausibilitaet, Aaron 12.10.2026) verwirft sie deshalb komplett,
+    # statt eine Tabelle zu zeigen, die nicht aufgeht.
+    assert full.line_items == []
+    assert "Netto" in full.rejected["positionen"]
+
+
+def test_full_line_items_bleiben_wenn_summe_zum_netto_passt(monkeypatch, text):
+    """Gegenstueck zu oben (Baustein 4, Aaron 12.10.2026): passt die Summe
+    der belegten Positionen zum Netto, bleiben sie erhalten."""
+    answer = dict(GOOD, netto="550,00", positionen=[
+        {"beschreibung": "Ersatzteile Serie X200", "menge": 1, "einzelpreis": "550,00",
+         "netto": "550,00", "ust_satz": 19},
+    ])
+    _mock(monkeypatch, answer, line_items=True)
+    full = semantic.extract_full(text)
     assert full.line_items == [{"beschreibung": "Ersatzteile Serie X200", "menge": 1.0,
                                 "einzelpreis": 550.0, "netto": 550.0, "ust_satz": 19.0,
                                 "_quelle": "llm"}]
-    assert "1 Position" in full.rejected["positionen"]
+    assert "positionen" not in full.rejected
 
 
 def test_gap_fill_also_verifies_against_text(monkeypatch):

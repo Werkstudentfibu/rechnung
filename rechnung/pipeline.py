@@ -26,6 +26,7 @@ from . import semantic
 from . import shadow
 from . import split
 from . import swissqr
+from . import tabelle
 from . import waehrung
 from . import zahlung
 from .timing import StageTimer
@@ -879,7 +880,7 @@ def _apply_line_item_correction(res: "Result", corrections: dict) -> None:
 
 
 def _llm_full(res: Result, doc, positionsmodus: str = POSITIONSMODUS_EINZELN,
-              variante: str = semantic.VARIANTE_A) -> None:
+              variante: str = semantic.VARIANTE_A, skip_items: bool = False) -> None:
     """Stufe 2: komplette KI-Extraktion, wenn es (noch) kein Template gibt.
     Fuellt nur, was nicht schon da ist -- Stammdaten aus dem gepflegten
     Lieferanten-Datensatz (``library``) gewinnen gegen das Modell.
@@ -889,16 +890,35 @@ def _llm_full(res: Result, doc, positionsmodus: str = POSITIONSMODUS_EINZELN,
     stattdessen aus der USt-Aufstellung gebildet, ``positionen.aus_summen``
     in ``_positionsmodus_post``). 'zusammenfassung' -- die Uebersichts-
     tabelle steht am Rechnungsende, die KI bekommt nur die Schlussseiten
-    statt der ganzen (ggf. langen) Rechnung.
+    statt der ganzen (ggf. langen) Rechnung. ``skip_items``: Baustein 2 hat
+    die Positionen schon ohne KI gefunden -- gar nicht erst danach fragen
+    (kleinerer Prompt, schneller).
 
-    ``variante`` (Testsatz, Aaron 10.10.2026): hier wird kuenftig zwischen
-    A (eine Anfrage, unten), B (Bloecke) und C (Ueberblick + Bloecke)
-    verzweigt -- gebaut ist nur A (``semantic.pruefe_variante``)."""
-    if semantic.pruefe_variante(variante) != semantic.VARIANTE_A:  # pragma: no cover
-        raise NotImplementedError(variante)
+    ``variante`` (Testsatz, Aaron 10.10.2026): A = eine Anfrage ueber die
+    ganze Rechnung (unten); B = Positionen als eigener kleiner Block
+    (SPEC Baustein 3, Schwerpunkt Aaron 12.10.2026), Kopf/Parteien wie A;
+    C = noch nicht gebaut (``semantic.pruefe_variante``)."""
+    v = semantic.pruefe_variante(variante)
     text = (_schlussseiten_text(doc) if positionsmodus == POSITIONSMODUS_ZUSAMMENFASSUNG
             else extraction_text(doc))
-    full = semantic.extract_full(text, want_line_items=(positionsmodus != POSITIONSMODUS_EINE_POSITION))
+    want_lines = positionsmodus != POSITIONSMODUS_EINE_POSITION and not skip_items
+    if v == semantic.VARIANTE_B and want_lines:
+        full = semantic.extract_full(text, want_line_items=False)
+        tbl_pages = (list(range(max(0, len(doc.pages) - _ZUSAMMENFASSUNG_SCHLUSSSEITEN),
+                                len(doc.pages)))
+                    if positionsmodus == POSITIONSMODUS_ZUSAMMENFASSUNG else None)
+        excerpt = tabelle.tabelle_text(doc, pages=tbl_pages)
+        if excerpt:
+            items, rejected = semantic.positions_block(excerpt, doc.text)
+            netto_fr = full.fields.get("netto")
+            netto_wert = _to_amount(netto_fr.value) if netto_fr else None
+            items, grund = semantic.positionen_plausibel(items, netto_wert)
+            if grund:
+                rejected["positionen"] = grund
+            full.line_items = items
+            full.rejected.update(rejected)
+    else:
+        full = semantic.extract_full(text, want_line_items=want_lines)
     res.llm_rejected.update(full.rejected)
     res.ki_lieferant = {**(full.lieferant_details or {}), **(full.supplier or {})}
     res.ki_empfaenger = dict(full.empfaenger or {})
@@ -1022,9 +1042,26 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
     timer = timer or StageTimer()
     extra = list(extra_checks or [])
     modus = _positionsmodus(supplier)
+    # SPEC Effizienz-Baustein 2 (Schwerpunkt Aaron 12.10.2026): die
+    # Positionstabelle zuerst OHNE KI aus dem Wort-Layout versuchen -- noch
+    # ohne Netto/Brutto (die kommen erst aus ``rechnen.rechne`` unten), also
+    # greift hier nur die Zeilen-Mathematik (menge * einzelpreis ≈ gesamt),
+    # nicht die Summenpruefung. Gelingt das, fragt die KI unten erst gar
+    # nicht mehr nach Positionen (``skip_items``).
+    tbl_pages = (list(range(max(0, len(doc.pages) - _ZUSAMMENFASSUNG_SCHLUSSSEITEN),
+                            len(doc.pages)))
+                if modus == POSITIONSMODUS_ZUSAMMENFASSUNG else None)
+    tbl_items = (tabelle.extract(doc, text=doc.text, pages=tbl_pages)
+                if modus != POSITIONSMODUS_EINE_POSITION else None)
+    if tbl_items:
+        res.line_items = positionen.normalize_columns(tbl_items)
     if use_llm:
         with timer.stage("ki"):
-            _llm_full(res, doc, modus, variante)
+            _llm_full(res, doc, modus, variante, skip_items=bool(tbl_items))
+    if tbl_items:
+        # Deterministisch gefundene Tabelle gewinnt gegen einen KI-Vorschlag
+        # (der bei ``skip_items`` ohnehin nicht mehr erfragt wurde).
+        res.line_items = positionen.normalize_columns(tbl_items)
     machine = dict(res.fields)
     corrections = store.corrections(doc.sha256)
     _apply_corrections(res.fields, corrections)
@@ -1056,6 +1093,22 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
         rk = rechnen.rechne(res.fields, res.line_items, doc.text)
         res.fields, res.line_items, res.tax_breakdown = rk.fields, rk.line_items, rk.tax_breakdown
         res.hinweise.extend(g for g in rk.gruende if g not in res.hinweise)
+        # Baustein 2, zweiter Versuch: jetzt sind Netto/Brutto bekannt (ohne
+        # KI, aus ``rechnen.rechne``/``summen.py``) -- eine Tabelle, die beim
+        # ersten Versuch nur an der fehlenden Summenpruefung scheiterte (z.B.
+        # keine Mengen-Spalte), noch einmal pruefen, bevor die Rechnung ohne
+        # Positionen bleibt.
+        if (not manuell_korrigiert and not res.line_items
+                and modus != POSITIONSMODUS_EINE_POSITION):
+            netto_fr, brutto_fr = res.fields.get("netto"), res.fields.get("brutto")
+            retry = tabelle.extract(doc, netto=_to_amount(netto_fr.value) if netto_fr else None,
+                                    brutto=_to_amount(brutto_fr.value) if brutto_fr else None,
+                                    text=doc.text, pages=tbl_pages)
+            if retry:
+                rk2 = rechnen.rechne(res.fields, positionen.normalize_columns(retry), doc.text)
+                res.fields, res.line_items, res.tax_breakdown = (
+                    rk2.fields, rk2.line_items, rk2.tax_breakdown)
+                res.hinweise.extend(g for g in rk2.gruende if g not in res.hinweise)
         _positionsmodus_abschliessen(res, supplier, manuell_korrigiert)
         res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, extra, qr)
         _set_dublette(res, store, doc)
