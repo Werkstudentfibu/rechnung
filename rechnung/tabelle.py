@@ -167,6 +167,14 @@ def _ist_seitenwechsel_zeile(line: list[Word]) -> bool:
     return any(fw == s or fw.startswith(s) for s in _SEITENWECHSEL_WOERTER)
 
 
+def _ist_header_zeile(line: list[Word]) -> bool:
+    """Wie ``_header_candidates``, aber fuer eine einzelne (schon bekannte)
+    Zeile: erkennt die auf Folgeseiten wiederholte Kopfzeile innerhalb eines
+    per Rahmen markierten Bereichs (Baustein 2)."""
+    matches = {c for w in line if (c := _match_header_word(w.text))}
+    return len(matches) >= _MIN_SPALTEN and all(c in matches for c in _PFLICHT_SPALTEN)
+
+
 def _merge_fortsetzungen(rows: list[dict]) -> list[dict]:
     """Mehrzeilige Beschreibungen zusammenfuehren: eine Zeile ohne jeden
     Betrag ist die Fortsetzung der Beschreibung der VORHERIGEN Position,
@@ -278,6 +286,150 @@ def extract(doc: Document, netto: float | None = None, brutto: float | None = No
     if not items:
         return None
     return _validieren(items, netto, brutto, text)
+
+
+# ---- Tabelle per Rahmen markieren (Aaron 12.10.2026, Baustein 2) ---------
+# Wo die automatische Kopfzeilen-Erkennung oben (``extract``) nicht
+# anschlaegt (ungewohnte Spaltenwoerter, Scan ohne klares Layout, Tabelle
+# zu ungewoehnlich), zieht der Mensch im UI einen Rahmen um die Tabelle
+# (Kopfzeile bis letzte Position; bei mehrseitigen Tabellen je Seite ein
+# Rahmen). Die Spalten werden hier NICHT ueber Schluesselwoerter in der
+# Kopfzeile gefunden (die kann voellig frei formuliert sein), sondern ueber
+# die Wortluecken quer durch den ganzen Rahmen (Projektionsprofil): eine
+# Luecke, die auf JEDER Zeile frei bleibt, trennt zwei Spalten -- robuster
+# als nur die Kopfzeile allein, weil ein kurzes Kopfwort ("Menge") naeher an
+# seinem Nachbarn stehen kann als die Datenspalte darunter breit ist.
+_SPALTENLUECKE_MIN = 8.0
+
+
+def _spaltenluecken(words: list[Word], x0: float, x1: float,
+                    min_gap: float = _SPALTENLUECKE_MIN) -> list[tuple[float, float]]:
+    """Spaltenbereiche [x0,x1) im Rahmen aus den Woertern ALLER Zeilen:
+    Wort-Intervalle zusammenfuehren, jede verbleibende Luecke >= ``min_gap``
+    wird (an ihrer Mitte) zur Spaltengrenze."""
+    ivs = sorted((max(w.x0, x0), min(w.x1, x1)) for w in words if w.x1 > x0 and w.x0 < x1)
+    merged: list[list[float]] = []
+    for a, b in ivs:
+        if merged and a <= merged[-1][1] + 0.5:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    bounds = [x0]
+    for i in range(len(merged) - 1):
+        if merged[i + 1][0] - merged[i][1] >= min_gap:
+            bounds.append((merged[i][1] + merged[i + 1][0]) / 2)
+    bounds.append(x1)
+    return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+
+
+def _words_in_box(doc: Document, box: dict) -> list[Word]:
+    page = doc.pages[box["page"]]
+    return [w for w in page.words
+            if box["top"] <= w.cy <= box["bottom"] and box["x0"] <= w.cx <= box["x1"]]
+
+
+def markiere_tabelle(doc: Document, boxes: list[dict]) -> dict:
+    """Rahmen (je ``{"page","x0","top","x1","bottom"}`` in PDF-Punkten) ->
+    ``{"columns": [{"index","x0","x1","header_text","guess"}], "rows": [[zelltext,...]]}``.
+    Spaltenbereiche (``x0``/``x1`` als Seitenanteile der ERSTEN Seite) aus
+    ``_spaltenluecken`` ueber den ersten Rahmen; die oberste Zeile darin
+    gilt als Kopfzeile. Weitere Rahmen (naechste Seite derselben Tabelle)
+    liefern nur weitere Datenzeilen, keine neuen Spalten -- dieselben
+    Spaltenanteile werden auf ihre jeweilige Seitenbreite angewendet.
+    ``guess``: Kopfwort-Schluesselwort-Treffer (``_match_header_word``) als
+    Vorschlag fuer die Spalten-Zuordnung im UI, oder ``None`` (Mensch
+    waehlt per Dropdown)."""
+    if not boxes:
+        return {"columns": [], "rows": []}
+    b0 = boxes[0]
+    page0 = doc.pages[b0["page"]]
+    words0 = sorted(_words_in_box(doc, b0), key=lambda w: (w.cy, w.x0))
+    if not words0:
+        return {"columns": [], "rows": []}
+    line_h = _line_h(words0)
+    zeilen0 = _cluster_rows(words0, line_h)
+    header_line = zeilen0[0]
+    daten0: list[list[Word]] = []
+    for line in zeilen0[1:]:
+        if _ist_stop(line):
+            break
+        if _ist_seitenwechsel_zeile(line):
+            continue
+        daten0.append(line)
+    # Spaltenlagen nur aus Kopfzeile + den echten Datenzeilen (ohne Summen-
+    # block): eine Betragszeile wie "Nettobetrag 1.000,00 EUR" liegt oft
+    # quer ueber mehreren Datenspalten und wuerde sonst faelschlich zwei
+    # Spalten zu einer verschmelzen (Aaron 12.10.2026).
+    spalten_woerter = header_line + [w for line in daten0 for w in line]
+    luecken = _spaltenluecken(spalten_woerter, b0["x0"], b0["x1"])
+    cols = []
+    for i, (cx0, cx1) in enumerate(luecken):
+        hwords = sorted((w for w in header_line if cx0 <= w.cx < cx1), key=lambda w: w.x0)
+        guess = next((g for w in hwords if (g := _match_header_word(w.text))), None)
+        cols.append({"index": i, "x0": round(cx0 / page0.width, 4), "x1": round(cx1 / page0.width, 4),
+                    "header_text": " ".join(w.text for w in hwords), "guess": guess})
+
+    def _zeilen_lesen(zeilen: list[list[Word]], page_width: float,
+                     skip_header: bool = False) -> list[list[str]]:
+        out = []
+        for line in zeilen:
+            if _ist_stop(line):
+                break
+            if _ist_seitenwechsel_zeile(line):
+                continue
+            if skip_header and _ist_header_zeile(line):
+                continue
+            cells = []
+            for c in cols:
+                x0, x1 = c["x0"] * page_width, c["x1"] * page_width
+                cell = sorted((w for w in line if x0 <= w.cx < x1), key=lambda w: w.x0)
+                cells.append(" ".join(w.text for w in cell).strip())
+            if any(cells):
+                out.append(cells)
+        return out
+
+    rows: list[list[str]] = _zeilen_lesen(daten0, page0.width)
+    for box in boxes[1:]:
+        words = sorted(_words_in_box(doc, box), key=lambda w: (w.cy, w.x0))
+        if not words:
+            continue
+        page = doc.pages[box["page"]]
+        rows.extend(_zeilen_lesen(_cluster_rows(words, _line_h(words)), page.width,
+                                  skip_header=True))
+    return {"columns": cols, "rows": rows}
+
+
+def anwenden_markierung(grid: dict, mapping: list[str | None] | None = None) -> list[dict]:
+    """Rohraster aus ``markiere_tabelle`` + Spalten-Zuordnung (Liste, Index
+    wie ``grid["columns"]``; ``None``/fehlend = Vorschlag ``guess``
+    uebernehmen, ``"ignorieren"`` = Spalte verwerfen) -> Positionen in
+    LI_STD-Spaltennamen. Mehrzeilige Beschreibungen werden wie bei der
+    automatischen Erkennung zusammengefuehrt (Zeile ohne jeden Betrag =
+    Fortsetzung der vorigen Position)."""
+    cols = grid["columns"]
+    targets = list(mapping) if mapping is not None else [c["guess"] for c in cols]
+    while len(targets) < len(cols):
+        targets.append(None)
+    rows_raw: list[dict] = []
+    for raw_row in grid["rows"]:
+        rec: dict = {}
+        for cell, target in zip(raw_row, targets):
+            if not target or target == "ignorieren" or not cell:
+                continue
+            if target in _TEXT_SPALTEN:
+                rec[target] = (rec[target] + " " + cell).strip() if target in rec else cell
+                continue
+            vtype = "number" if target == "pos" else "amount"
+            val, ok = coerce(cell, vtype)
+            if ok:
+                rec[target] = val
+        if rec:
+            rows_raw.append(rec)
+    items = _merge_fortsetzungen(rows_raw)
+    for i, it in enumerate(items, 1):
+        it.setdefault("pos", i)
+        it["_quelle"] = "tabelle_rahmen"
+    return items
 
 
 def tabelle_text(doc: Document, pages: list[int] | None = None) -> str:
