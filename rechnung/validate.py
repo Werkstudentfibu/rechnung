@@ -22,6 +22,14 @@ _DISCOUNT_AMT_KEYS = ("rabatt_betrag", "nachlass_betrag", "rabatt", "nachlass", 
 _BRUTTO_HINT_RE = re.compile(r"(?i)inkl(?:usive)?\.?\s*(?:mwst|ust)|brutto[- ]?preise?|"
                              r"preise\s+brutto")
 
+# Zeilenpruefung Tabelle Baustein 4 (Aaron 12.10.2026): eine Beschreibung,
+# die auf einem Betrag endet (z.B. "... 2 320,00"), ist ein Zahlen-/
+# Mengenrest aus einer falsch gezogenen Spaltengrenze -- kein echter
+# Artikeltext. Nur die typische deutsche Betragsform (Komma-Dezimalstellen,
+# optional Tausenderpunkt/-leerzeichen) zaehlt; eine blanke Artikelnummer
+# am Ende ("Artikel 12345") ist dagegen ueblich und kein Fehler.
+_BESCHREIBUNG_ZAHLENREST_RE = re.compile(r"[\d.'’ ]*\d,\d{1,2}\s*$")
+
 
 def looks_like_brutto_prices(text: str) -> bool:
     """Weist der Rechnungstext auf Bruttopreis-Positionen hin ("inkl. MwSt"/
@@ -249,6 +257,47 @@ def line_item_row(it: dict, i: int = 1, tol: float = 0.01) -> tuple[bool | None,
     return True, "ok"
 
 
+_WAEHRUNG_ALIAS = {"EURO": "EUR", "€": "EUR", "SFR": "CHF", "SFR.": "CHF", "FR": "CHF",
+                   "FR.": "CHF"}
+
+
+def _norm_currency(v) -> str:
+    s = str(v or "").strip().upper()
+    return _WAEHRUNG_ALIAS.get(s, s)
+
+
+def line_item_row_full(it: dict, i: int, invoice_currency: str | None,
+                       gueltige_saetze: set[float] | None, tol: float = 0.01
+                       ) -> tuple[bool | None, str]:
+    """Vollstaendige Zeilenpruefung fuer die Anzeige (Baustein 4, Aaron
+    12.10.2026): dieselbe Rechen-Pruefung wie ``line_item_row``, zusaetzlich
+    Beschreibung (Pflicht, kein Zahlen-/Mengenrest), Waehrung (= Rechnungs-
+    waehrung, falls beide bekannt) und Steuersatz (muss in der USt-
+    Aufstellung vorkommen, falls eine da ist). Nur fuer die Anzeige
+    (``rechen_pruefungen``) -- geht NICHT in ``check_line_item_math``/
+    ``run_all`` ein, damit sich das bestehende Rueckstell-Verhalten (rot bei
+    ``positionen-rechnung``) durch diese zusaetzlichen Pruefungen nicht
+    verschaerft."""
+    ok, grund = line_item_row(it, i, tol)
+    if ok is False:
+        return ok, grund
+    bez = (it.get("beschreibung") or "").strip()
+    if not bez:
+        return False, "Beschreibung fehlt"
+    if _BESCHREIBUNG_ZAHLENREST_RE.search(bez):
+        return False, f"Beschreibung endet auf einen Zahlen-/Mengenrest: „{bez}“"
+    waehrung = it.get("waehrung")
+    if waehrung and invoice_currency:
+        if _norm_currency(waehrung) != _norm_currency(invoice_currency):
+            return False, f"Währung {waehrung} ≠ Rechnungswährung {invoice_currency}"
+    satz = _num(it, "mwst_satz")
+    if satz is not None and gueltige_saetze:
+        if round(satz, 2) not in gueltige_saetze:
+            saetze = ", ".join(f"{s:g}" for s in sorted(gueltige_saetze))
+            return False, f"Steuersatz {satz:g} % nicht in der Steueraufschlüsselung ({saetze} %)"
+    return ok, grund
+
+
 def check_line_item_math(line_items: list[dict] | None, tol: float = 0.01) -> Check:
     """Je Position: menge * einzelpreis (abzueglich Rabatt/Nachlass, falls
     erkannt) = Zeilensumme. Zeilen ohne Menge/Einzelpreis (Pauschalen)
@@ -339,13 +388,18 @@ def rechen_pruefungen(fields: dict, line_items: list[dict] | None, text: str = "
     fr = fields.get("ust_aufstellung")
     rows = fr.value if fr is not None and isinstance(fr.value, list) else []
     by_rate = _sums_by_rate(line_items)
+    invoice_currency = fields.get("waehrung")
+    invoice_currency = invoice_currency.value if invoice_currency is not None else None
+    gueltige_saetze = {round(float(r["satz"]), 2) for r in rows
+                       if isinstance(r, dict) and r.get("satz") is not None}
 
     def _view(ok, grund):
         return {"ok": ok, "detail": grund}
 
     return {
         "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks],
-        "positionen": [_view(*line_item_row(it, i)) for i, it in enumerate(line_items or [], 1)],
+        "positionen": [_view(*line_item_row_full(it, i, invoice_currency, gueltige_saetze))
+                       for i, it in enumerate(line_items or [], 1)],
         "ust": [_view(*tax_row(r, by_rate)) for r in rows],
     }
 
