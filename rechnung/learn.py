@@ -27,6 +27,7 @@ import re
 from dataclasses import dataclass, field
 
 from . import rechnen
+from .identify import POSITIONSMODUS_EINE_POSITION
 from .pdf import Document, Word
 from .template import (STANDARD_FIELDS, ausgeblendet, FieldResult, FieldSpec, LineItemSpec, Template,
                        apply_line_items, apply_template, build_field_spec,
@@ -821,7 +822,15 @@ def learn_from_confirmed(store, res, doc: Document, operator: str = "") -> Learn
     taxblock = (rechnen.nur_gelesene_werte(tb_fr.value)
                if tb_fr is not None and tb_fr.source != "missing"
                and isinstance(tb_fr.value, list) and tb_fr.value else None)
-    gelesene_items = rechnen.nur_gelesene_werte(res.line_items) or None
+    sup = store.supplier(res.supplier_id)
+    # Positionsmodus 'eine_position' (SPEC Baustein 1, Aaron 12.10.2026):
+    # die "Positionen" sind aus der USt-Aufstellung gebildet
+    # (positionen.aus_summen), stehen nicht als eigene Tabellenzeile im PDF
+    # -- eine Tabellen-Spec daraus zu lernen waere Zufallstreffer. Explizit
+    # ausgelassen statt sich auf die Herkunfts-Filterung unten zu verlassen.
+    gelesene_items = (rechnen.nur_gelesene_werte(res.line_items) or None
+                      if (sup is None or sup.positionsmodus != POSITIONSMODUS_EINE_POSITION)
+                      else None)
     tpl, outcome = learn_template(doc, res.supplier_id, confirmed_values(res.fields),
                                   existing, variant, template_id=tid_override,
                                   line_items=gelesene_items, taxblock=taxblock)

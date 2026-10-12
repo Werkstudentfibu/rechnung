@@ -243,3 +243,29 @@ def test_gesichertes_template_wird_nicht_still_umgeschrieben(tmp_path: Path):
     assert "_positionen" not in outcome2.learned
     # die gesicherte Vorlage bleibt unveraendert
     assert store.template(tid).line_items.to_dict() == tpl.line_items.to_dict()
+
+
+def test_positionsmodus_eine_position_lernt_keine_tabellen_spec(tmp_path: Path):
+    """SPEC Baustein 1 (Aaron 12.10.2026): 'Positionsmodus eine_position:
+    nichts lernen' -- die 'Positionen' sind aus der USt-Aufstellung
+    gebildet (positionen.aus_summen), stehen nicht als eigene Zeile im PDF.
+    Eine Tabellen-Spec daraus zu lernen waere Zufall/falsch."""
+    from rechnung.identify import POSITIONSMODUS_EINE_POSITION
+    from rechnung.positionen import aus_summen
+
+    store = _store(tmp_path)
+    sup = store.supplier("tt")
+    sup.positionsmodus = POSITIONSMODUS_EINE_POSITION
+    store.save_supplier(sup)
+
+    p1 = _tabular_invoice(tmp_path / "a.pdf")
+    doc1 = pdfmod.load(p1)
+    items = aus_summen(_TAXROWS, "Rechnung", "EUR")
+    doc1, res1 = _confirmed_result(p1, items, _TAXROWS)
+    store.mark_confirmed(res1.sha256, "tester")
+
+    outcome = learn.learn_from_confirmed(store, res1, doc1, "tester")
+    assert "_positionen" not in outcome.learned
+    assert "_positionen" not in outcome.skipped
+    if outcome.saved:
+        assert store.template(outcome.template_id).line_items is None
