@@ -669,7 +669,8 @@ def main(argv=None) -> int:
                              "richtig/falsch/fehlt messen (Goldstandard)")
     ts.add_argument("--lieferant", help="nur dieser Lieferant (ID oder Teil des Namens)")
     ts.add_argument("--variante", default="A",
-                    help="Extraktionsvariante A (heute) | B | C (vorgesehen, noch nicht gebaut)")
+                    help="Extraktionsvariante A (ein Rundum-Prompt) | B (Positionen als "
+                         "eigener Block) | C (vorgesehen, noch nicht gebaut)")
     ts.add_argument("--ohne-ki", action="store_true",
                     help="nur Testfaelle, die ohne KI auskommen (Vorlage/E-Rechnung)")
     ts.add_argument("--kein-bericht", action="store_true",

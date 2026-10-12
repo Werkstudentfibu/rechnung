@@ -1253,12 +1253,20 @@ def _qualitaet(res: Result, store: Store) -> None:
 
 def process(path: str | Path, store: Store, use_llm: bool = True,
             create_draft_supplier: bool = False,
-            variante: str = semantic.VARIANTE_A) -> Result:
+            variante: str | None = None) -> Result:
     """Eine Rechnung verarbeiten (``_process``) und danach die Qualitaets-
     Hinweise anhaengen (Lieferanten-Gedaechtnis, Datum) -- an einer Stelle
-    statt an jedem der vielen Ausgaenge von ``_process``."""
+    statt an jedem der vielen Ausgaenge von ``_process``.
+
+    ``variante``: ``None`` (Standard) nimmt ``config.ki_variante()``
+    (``RECHNUNG_KI_VARIANTE``, Aaron 12.10.2026) -- so schaltet die echte
+    Verarbeitung (Postfach/Web-UI) ohne Code-Aenderung zwischen A und B,
+    sobald B gemessen und freigegeben ist; ein expliziter Wert (Testsatz)
+    ueberschreibt das."""
+    from .config import ki_variante
+
     res = _process(path, store, use_llm=use_llm, create_draft_supplier=create_draft_supplier,
-                   variante=variante)
+                   variante=variante if variante is not None else ki_variante())
     try:
         _qualitaet(res, store)
     except Exception as e:  # noqa: BLE001 -- reine Hinweise duerfen nie die Verarbeitung kippen
