@@ -44,6 +44,11 @@
   .af.ziel-sel .ab-in { outline: 2px solid #2f6fd0; }
   .w.licol { background: rgba(70,130,220,.35); border-color: #2f6fd0; }
   .w.listop { background: rgba(200,40,40,.30); border-color: #b22; }
+  /* Baustein 2 (Aaron 12.10.2026): Rahmen um die Tabelle je Seite, bleibt
+     sichtbar; einzelne Tabellenzelle als Rahmen-Ziel ausgewaehlt. */
+  .tabrahmen-box { position: absolute; border: 2px solid #9b59b6; background: rgba(155,89,182,.08);
+                   pointer-events: none; }
+  .li-cell-ziel { outline: 2px solid #2f6fd0; }
 
   .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #ddd; }
   .badge.auto { background: #c9ecd6; } .badge.review { background: #ffe5b4; }
@@ -454,6 +459,14 @@ function applyInvoiceData(d) {
     tabDirty: { positionen: false, ust: false },
     similar: d.similar_suppliers || [],
     li: { active: false, page: 0, columns: [], stop_words: [], selCol: null },
+    // Baustein 2 (Aaron 12.10.2026): Tabelle per Rahmen markieren --
+    // ``boxes``: ein Rahmen je Seite (PDF-Punkte), ``columns``/``mapping``
+    // die zuletzt vom Server erkannte Spaltenaufteilung bzw. die davon
+    // (ggf. vom Menschen geaenderte) Zielspalten-Zuordnung.
+    tabRahmen: { active: false, boxes: [], columns: [], mapping: null },
+    // Einzelne Positions-Zelle als Rahmen-Ziel ausgewaehlt (wie ein
+    // Kopffeld, STATE.zielInput) -- {ri, col} oder null.
+    zielLiCell: null,
   };
   // vorhandene Positionsspalten übernehmen
   if (d.template_line_items) {
@@ -937,6 +950,10 @@ function renderInvoice(d) {
   // Positionsdaten
   const pd = gruppe('Positionsdaten', '');
   pd.querySelector('.ab-body').appendChild(renderPositionsmodusAuswahl(supO));
+  const trBtn = document.createElement('div');
+  trBtn.innerHTML = `<button class="ghost mini" onclick="toggleTabRahmen()">Tabelle im PDF markieren${STATE.tabRahmen.active ? ' – ausblenden' : ''}</button>`;
+  pd.querySelector('.ab-body').appendChild(trBtn);
+  if (STATE.tabRahmen.active) pd.querySelector('.ab-body').appendChild(renderTabRahmenPanel());
   if (STATE.li.active) pd.querySelector('.ab-body').appendChild(renderLiPanel());
   pd.querySelector('.ab-body').appendChild(renderLiPreviewBox(STATE.lineItems));
   fbox.appendChild(pd);
@@ -991,6 +1008,7 @@ function renderInvoice(d) {
   }
   paintMarkierungen();
   paint();
+  paintTabRahmen();
 }
 
 /* -------- Vorschlaege im PDF umrahmen (Baustein 11b) -------- */
@@ -1312,6 +1330,132 @@ function wordText(page, i) {
   const pg = STATE.pages[page]; const wd = pg && pg.words[i]; return wd ? wd.text : '?';
 }
 
+/* -------- Tabelle per Rahmen markieren (Baustein 2, Aaron 12.10.2026) ----
+   "Tabelle im PDF markieren": Rahmen um die ganze Tabelle (je Seite einer)
+   statt Kopfwoerter einzeln anzuklicken -- das Programm erkennt Spalten
+   ueber die Wortluecken (tabelle.markiere_tabelle) und schlaegt je Spalte
+   eine LI_STD-Zuordnung vor (Dropdown, sofort wirksam). */
+function toggleTabRahmen() {
+  STATE.tabRahmen.active = !STATE.tabRahmen.active;
+  if (!STATE.tabRahmen.active) Object.assign(STATE.tabRahmen, { boxes: [], columns: [], mapping: null });
+  renderCurrent();
+}
+function tabRahmenZuruecksetzen() {
+  Object.assign(STATE.tabRahmen, { boxes: [], columns: [], mapping: null });
+  renderCurrent();
+}
+function tabRahmenMappingGeaendert(i, value) {
+  STATE.tabRahmen.mapping[i] = value;
+  tabRahmenAktualisieren();
+}
+function renderTabRahmenPanel() {
+  const box = document.createElement('div'); box.className = 'box';
+  const cols = STATE.tabRahmen.columns;
+  const seiten = [...new Set(STATE.tabRahmen.boxes.map(b => b.page + 1))].sort((a, b) => a - b);
+  const ziele = [...LI_STD, ['pos', 'Pos.'], ['ignorieren', 'ignorieren']];
+  box.innerHTML = `<h4>Tabelle im PDF markieren</h4>
+    <div class="hint">In der Rechnung links einen Rahmen um die Tabelle ziehen (Kopfzeile bis letzte
+      Position). Bei mehrseitigen Tabellen auf jeder weiteren Seite ebenfalls einen Rahmen ziehen –
+      ein Rahmen ersetzt den vorigen auf derselben Seite. Esc bricht ab.</div>
+    ${seiten.length ? `<div class="hint">Markierte Seite(n): ${seiten.join(', ')}
+      <button class="ghost mini" onclick="tabRahmenZuruecksetzen()">Rahmen zurücksetzen</button></div>` : ''}
+    ${cols.length ? `<div style="margin:6px 0">${cols.map((c, i) => `
+      <span class="li-col">${esc(c.header_text || ('Spalte ' + (i + 1)))}:
+        <select onchange="tabRahmenMappingGeaendert(${i}, this.value)">
+          ${ziele.map(([k, label]) => `<option value="${k}" ${STATE.tabRahmen.mapping[i] === k ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+        </select></span>`).join(' ')}</div>` : ''}`;
+  return box;
+}
+function tabRahmenBoxGezogen(wrap, page, r) {
+  const pg = STATE.pages[page]; const w = wrap.getBoundingClientRect();
+  const fx = pg.width / w.width, fy = pg.height / w.height;
+  const box = { page, x0: (r.left - w.left) * fx, top: (r.top - w.top) * fy,
+               x1: (r.right - w.left) * fx, bottom: (r.bottom - w.top) * fy };
+  STATE.tabRahmen.boxes = STATE.tabRahmen.boxes.filter(b => b.page !== page);
+  STATE.tabRahmen.boxes.push(box);
+  paintTabRahmen();
+  tabRahmenAktualisieren();
+}
+async function tabRahmenAktualisieren() {
+  if (!STATE.tabRahmen.boxes.length) return;
+  $('#msg').textContent = 'Lese die markierte Tabelle …';
+  const r = await api('/api/tabelle/markieren', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, boxes: STATE.tabRahmen.boxes, mapping: STATE.tabRahmen.mapping }),
+  });
+  if (!r.columns) { $('#msg').textContent = '✗ ' + (r.detail || 'Rahmen konnte nicht gelesen werden'); return; }
+  STATE.tabRahmen.columns = r.columns;
+  if (!STATE.tabRahmen.mapping || STATE.tabRahmen.mapping.length !== r.columns.length)
+    STATE.tabRahmen.mapping = r.columns.map(c => c.guess || 'ignorieren');
+  STATE.lineItems = r.items || [];
+  STATE.tabDirty.positionen = true;
+  renderCurrent();
+  $('#msg').textContent = `Tabelle gelesen: ${r.items.length} Position(en) – Spalten-Zuordnung prüfen, ` +
+    'dann „Positionen übernehmen“.';
+}
+function paintTabRahmen() {
+  document.querySelectorAll('.tabrahmen-box').forEach(e => e.remove());
+  const wraps = document.querySelectorAll('.pdfwrap');
+  for (const b of STATE.tabRahmen.boxes) {
+    const pg = STATE.pages[b.page]; const wrap = wraps[b.page];
+    if (!pg || !wrap) continue;
+    const el = document.createElement('div'); el.className = 'tabrahmen-box';
+    el.style.left = (b.x0 * pg.scale) + 'px'; el.style.top = (b.top * pg.scale) + 'px';
+    el.style.width = ((b.x1 - b.x0) * pg.scale) + 'px'; el.style.height = ((b.bottom - b.top) * pg.scale) + 'px';
+    wrap.appendChild(el);
+  }
+}
+
+/* -------- Einzelne Tabellenzelle per Rahmen fuellen (Baustein 2) --------
+   Zelle anklicken waehlt sie wie ein Kopffeld aus; danach in der Rechnung
+   ein Wort anklicken (mehrere dazu/weg) oder einen Rahmen ziehen -- Text
+   kommt in die Zelle (Code/Optik wie beim Kopffeld-Rahmen-Ziehen). */
+function selLiZelle(ri, col) {
+  STATE.selField = null; STATE.zielInput = null;
+  STATE.zielLiCell = { ri, col, page: null, values: [] };
+  document.querySelectorAll('.li-cell-ziel').forEach(e => e.classList.remove('li-cell-ziel'));
+  const el = document.getElementById(`li-cell-${ri}-${col}`);
+  if (el) el.classList.add('li-cell-ziel');
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+}
+function paintZielLiCell(page) {
+  const wraps = document.querySelectorAll('.pdfwrap');
+  const wds = wraps[page] && wraps[page].querySelectorAll('.w');
+  if (!wds) return;
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+  (STATE.zielLiCell.values || []).forEach(i => wds[i] && wds[i].classList.add('ziel'));
+}
+function liZelleWortToggle(page, i) {
+  const z = STATE.zielLiCell;
+  if (z.page !== page) { z.page = page; z.values = []; }
+  z.values.includes(i) ? z.values = z.values.filter(x => x !== i) : z.values.push(i);
+  paintZielLiCell(page);
+  liSetCell(z.ri, z.col, woerterText(page, z.values).replace(/\n/g, ' ').trim());
+}
+function liZelleRahmen(page, indices) {
+  const z = STATE.zielLiCell;
+  z.page = page; z.values = indices;
+  paintZielLiCell(page);
+  liSetCell(z.ri, z.col, woerterText(page, indices).replace(/\n/g, ' ').trim());
+  liNaechsteZelle(z.ri, z.col);
+}
+// Nach dem Fuellen per Rahmen gleich zur naechsten leeren Zelle DERSELBEN
+// Zeile (SPEC: "automatisch zur naechsten leeren/roten Zelle der Zeile") --
+// "rot" haengt bei einer Positionszeile an der ganzen Zeile (Rechen-/
+// Pflichtpruefung je Zeile, nicht je Zelle), darum hier: naechste leere.
+function liNaechsteZelle(ri, col) {
+  const std = LI_STD.map(([k]) => k);
+  const extra = liCols(STATE.lineItems).filter(c => !std.includes(c) && c !== 'pos');
+  const cols = [...std, ...extra];
+  const it = STATE.lineItems[ri] || {};
+  const next = cols.slice(cols.indexOf(col) + 1).find(c => !it[c]);
+  if (!next) { STATE.zielLiCell = null; liRedraw(); return; }
+  selLiZelle(ri, next);
+  liRedraw();
+  const el = document.getElementById(`li-cell-${ri}-${next}`);
+  if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
 // Spalten, die nicht aus dem PDF gelesen sind, sondern Vorschlaege des
 // Programms (Kategorie) -- werden nicht als Tabellen-Korrektur gespeichert
 // (sonst koennte learn.py die Tabelle nie im PDF wiederfinden).
@@ -1416,8 +1560,11 @@ function renderLiPreviewBox(items) {
         const hcls = (h === 'errechnet' || h === 'kopf' || h === 'eine_position') ? h : '';
         let v = it[c];
         if (typeof v === 'number' && c !== 'menge' && c !== 'mwst_satz') v = fmtWert(v, 'amount');
-        return `<td class="${typeof it[c] === 'number' ? 'num' : ''}"><input
-                  class="${hcls}" value="${esc(nz(v))}" ${h ? `title="${esc(h)}"` : ''} ${fest ? 'readonly' : ''}
+        const istZiel = STATE.zielLiCell && STATE.zielLiCell.ri === ri && STATE.zielLiCell.col === c;
+        return `<td class="${typeof it[c] === 'number' ? 'num' : ''}"><input id="li-cell-${ri}-${c}"
+                  class="${hcls}${istZiel ? ' li-cell-ziel' : ''}" value="${esc(nz(v))}"
+                  ${h ? `title="${esc(h)}"` : ''} ${fest ? 'readonly' : ''}
+                  onclick="${fest ? '' : `selLiZelle(${ri}, '${c}')`}"
                   onchange="liSetCell(${ri}, '${esc(c)}', this.value)"></td>`;
       }).join('')}${stCell(pr[ri])}
       <td>${fest ? '' : `<button class="danger" style="padding:0 4px" title="Zeile löschen" onclick="liDelRow(${ri})">×</button>`}</td></tr>`).join('')}
@@ -1661,6 +1808,7 @@ function clickWord(page, i, ev) {
     return;
   }
   if (RAHMEN_KLICK_SPERRE) return;   // Klick am Ende einer Rahmen-Auswahl
+  if (STATE.zielLiCell) { liZelleWortToggle(page, i); return; }
   if (STATE.zielInput) { zielWoerter(page, [i], false); return; }
   if (!STATE.selField) { $('#msg').textContent = 'erst ein Feld anklicken, dann den Wert in der Rechnung markieren'; return; }
   const a = STATE.assign[STATE.selField] || { page, anchor: null, values: [] };
@@ -1784,14 +1932,16 @@ function rahmenAuswahl(wrap, page) {
     const s0 = start; start = null;
     if (!box) return;
     const r = box.getBoundingClientRect(); box.remove(); box = null;
+    RAHMEN_KLICK_SPERRE = true; setTimeout(() => { RAHMEN_KLICK_SPERRE = false; }, 50);
+    if (STATE.tabRahmen.active) { tabRahmenBoxGezogen(wrap, page, r); return; }
     const treffer = [];
     wrap.querySelectorAll('.w').forEach((el, i) => {
       const b = el.getBoundingClientRect();
       const cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2;
       if (cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) treffer.push(i);
     });
-    RAHMEN_KLICK_SPERRE = true; setTimeout(() => { RAHMEN_KLICK_SPERRE = false; }, 50);
-    if (!treffer.length) { ausschnittLesen(wrap, page, r); return; }
+    if (!treffer.length) { if (!STATE.zielLiCell) ausschnittLesen(wrap, page, r); return; }
+    if (STATE.zielLiCell) { liZelleRahmen(page, treffer); return; }
     if (STATE.zielInput) { zielWoerter(page, treffer, true); return; }
     if (!STATE.selField) { $('#msg').textContent = 'erst ein Feld anklicken, dann den Wert in der Rechnung markieren'; return; }
     const a = { page, anchor: (STATE.assign[STATE.selField] || {}).anchor ?? null, values: treffer };
@@ -1976,6 +2126,18 @@ document.addEventListener('keydown', (ev) => {
   if (!STATE || !STATE.file) return;
   ev.preventDefault();
   sendeRechnung();
+});
+
+// Esc bricht das Tabelle-Rahmen-Ziehen bzw. die Zellen-Zielauswahl ab
+// (Baustein 2, Aaron 12.10.2026) -- Markierte Rahmen bleiben im PDF stehen.
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape' || !STATE) return;
+  if (STATE.tabRahmen.active) { toggleTabRahmen(); return; }
+  if (STATE.zielLiCell) {
+    STATE.zielLiCell = null;
+    document.querySelectorAll('.li-cell-ziel').forEach(e => e.classList.remove('li-cell-ziel'));
+    document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+  }
 });
 
 /* ================= Betriebsmodus ================= */
