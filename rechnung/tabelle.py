@@ -478,3 +478,88 @@ def tabelle_text(doc: Document, pages: list[int] | None = None,
     for _page, line in _zeilen_unter_kopf(doc, page_idxs, header_page, header_line):
         zeilen.append(" ".join(w.text for w in sorted(line, key=lambda w: w.x0)))
     return "\n".join(zeilen)
+
+
+# ---- Zeilen-/Spaltenzusammenhang nutzen (Aaron 12.10.2026, Baustein 3) ----
+# "Wenn das Programm einen Wert als Teil eines Artikels erkennt, stehen sehr
+# wahrscheinlich links und rechts davon in der gleichen Zeile die restlichen
+# Informationen zu diesem Artikel." Markiert der Mensch per Rahmen EINE
+# Zelle der Positionstabelle (Baustein 2, ``liZelleRahmen`` im UI), schlaegt
+# ``zeilen_vorschlag`` die uebrigen LI_STD-Spalten DERSELBEN Zeile vor:
+# Woerter auf derselben Grundlinie (+/- Toleranz) werden -- in der festen
+# kanonischen Reihenfolge Beschreibung < Menge < Einzelpreis < Gesamt <
+# MwSt-Satz < Waehrung -- den noch leeren Spalten links/rechts der
+# bestaetigten Zelle zugeordnet, ueber dieselbe Wortluecken-Segmentierung
+# wie beim Rahmen-Ziehen der ganzen Tabelle (``_spaltenluecken``). Ein
+# Vorschlag ist nie sicher -- siehe ``zeilen_vorschlag_zulaessig`` (Baustein
+# 4 muss ihn freigeben, bevor er im UI uebernehmbar angezeigt wird).
+_REIHENFOLGE = ("beschreibung", "menge", "einzelpreis_netto", "gesamt_netto",
+               "mwst_satz", "waehrung")
+
+
+def _segmenttext(woerter: list[Word], x0: float, x1: float) -> str:
+    return " ".join(w.text for w in sorted((w for w in woerter if x0 <= w.cx < x1),
+                                           key=lambda w: w.x0)).strip()
+
+
+def zeilen_vorschlag(doc: Document, page: int, indices: list[int], ziel_spalte: str,
+                     bekannt: dict | None = None) -> dict[str, str]:
+    """Ausgehend von den Woertern EINER per Rahmen bestaetigten Zelle
+    (``indices`` in ``doc.pages[page].words``, Zielspalte ``ziel_spalte``)
+    die uebrigen, noch leeren LI_STD-Spalten DERSELBEN Zeile vorschlagen (->
+    Spaltenname -> Rohtext). Rein deterministisch aus dem Wort-Layout, keine
+    Validierung hier (siehe ``zeilen_vorschlag_zulaessig``)."""
+    if ziel_spalte not in _REIHENFOLGE or not (0 <= page < len(doc.pages)):
+        return {}
+    pg = doc.pages[page]
+    zelle = [pg.words[i] for i in indices if 0 <= i < len(pg.words)]
+    if not zelle:
+        return {}
+    bekannt_ok = {k for k, v in (bekannt or {}).items() if v not in (None, "")}
+    cy = sum(w.cy for w in zelle) / len(zelle)
+    h = _line_h(zelle)
+    zx0, zx1 = min(w.x0 for w in zelle), max(w.x1 for w in zelle)
+    zelle_ids = {id(w) for w in zelle}
+    zeile = [w for w in pg.words if id(w) not in zelle_ids and abs(w.cy - cy) <= h * 0.9]
+    idx = _REIHENFOLGE.index(ziel_spalte)
+    out: dict[str, str] = {}
+
+    links = sorted((w for w in zeile if w.x1 <= zx0 + 1), key=lambda w: w.x0)
+    if links:
+        zahl_cols = list(_REIHENFOLGE[1:idx])  # Spalten zwischen Beschreibung und Zelle
+        segs = _spaltenluecken(links, links[0].x0, zx0) if zahl_cols else []
+        k = min(len(zahl_cols), len(segs))
+        zahl_segs = segs[len(segs) - k:] if k else []
+        zahl_ziele = zahl_cols[len(zahl_cols) - k:] if k else []
+        for (sx0, sx1), col in zip(zahl_segs, zahl_ziele):
+            text = _segmenttext(links, sx0, sx1)
+            if text:
+                out[col] = text
+        if idx > 0:  # es gibt ueberhaupt eine Beschreibungs-Spalte links der Zelle
+            besch_grenze = zahl_segs[0][0] if zahl_segs else zx0
+            besch = _segmenttext(links, links[0].x0 - 1, besch_grenze)
+            if besch:
+                out["beschreibung"] = besch
+
+    rechts = sorted((w for w in zeile if w.x0 >= zx1 - 1), key=lambda w: w.x0)
+    rechts_cols = list(_REIHENFOLGE[idx + 1:])
+    if rechts and rechts_cols:
+        segs = _spaltenluecken(rechts, zx1, rechts[-1].x1 + 1)
+        for (sx0, sx1), col in zip(segs, rechts_cols):
+            text = _segmenttext(rechts, sx0, sx1)
+            if text:
+                out[col] = text
+
+    return {k: v for k, v in out.items() if k not in bekannt_ok}
+
+
+def zeilen_vorschlag_zulaessig(vorschlag: dict, bekannt: dict, ziel_spalte: str, wert) -> bool:
+    """Baustein-4-Gate (SPEC Baustein 3: "Vorschlaege nur uebernehmen, wenn
+    die Zeilenpruefung aufgeht"): die bestaetigte Zelle + der Vorschlag +
+    die schon bekannten Werte der Zeile zusammen duerfen die Rechen-Pruefung
+    (``validate.line_item_row``) nicht WIDERLEGEN. ``None`` (nicht pruefbar,
+    z.B. fehlt die Menge) gilt als zulaessig -- nur ein klares ``False``
+    sperrt den Vorschlag."""
+    probe = {**(bekannt or {}), **vorschlag, ziel_spalte: wert}
+    ok, _grund = line_item_row(probe)
+    return ok is not False

@@ -162,6 +162,20 @@ class TabelleMarkierenPost(BaseModel):
     mapping: list[str | None] | None = None
 
 
+class ZeileVorschlagPost(BaseModel):
+    """Baustein 3 (Aaron 12.10.2026): ausgehend von EINER per Rahmen
+    bestaetigten Positions-Zelle (``indices`` in ``doc.pages[page].words``,
+    Zielspalte ``ziel_spalte``, Wert ``wert``) die uebrigen Spalten
+    DERSELBEN Zeile vorschlagen -- Zeilen-/Spaltenzusammenhang. ``zeile``:
+    schon bekannte Werte dieser Zeile (fuer die Baustein-4-Pruefung)."""
+    file: str
+    page: int
+    indices: list[int]
+    ziel_spalte: str
+    wert: object = ""
+    zeile: dict = {}
+
+
 class PruefenPost(BaseModel):
     """Aktueller (ggf. noch ungespeicherter) Stand im UI fuer die Live-
     Anzeige der Rechen-Pruefungen."""
@@ -1295,9 +1309,25 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                      "x1": float(b["x1"]), "bottom": float(b["bottom"])} for b in body.boxes]
         except (KeyError, TypeError, ValueError):
             raise HTTPException(400, "Rahmen ungültig")
-        grid = tabelle.markiere_tabelle(doc, boxes)
+        grid = tabelle.markiere_tabelle(doc, boxes, woerterbuch=store.spaltenwoerter())
         items = tabelle.anwenden_markierung(grid, body.mapping)
         return JSONResponse({"columns": grid["columns"], "rows": grid["rows"], "items": items})
+
+    @app.post("/api/tabelle/zeile_vorschlag")
+    def zeile_vorschlag_ep(body: ZeileVorschlagPost) -> JSONResponse:
+        """Baustein 3 (Aaron 12.10.2026): "stehen sehr wahrscheinlich links
+        und rechts davon in der gleichen Zeile die restlichen Informationen
+        zu diesem Artikel" -- ausgehend von einer per Rahmen bestaetigten
+        Zelle die uebrigen Spalten der Zeile vorschlagen. Reine Vorschau
+        (speichert nichts); ``zulaessig=False`` heisst: die Rechen-Pruefung
+        (Baustein 4) widerlegt den Vorschlag, das UI darf ihn nicht
+        anbieten."""
+        doc = _load(_resolve(body.file))
+        wert = _zelle(body.wert)
+        vorschlag = tabelle.zeilen_vorschlag(doc, body.page, body.indices, body.ziel_spalte,
+                                             body.zeile)
+        zulaessig = tabelle.zeilen_vorschlag_zulaessig(vorschlag, body.zeile, body.ziel_spalte, wert)
+        return JSONResponse({"vorschlag": vorschlag if zulaessig else {}, "zulaessig": zulaessig})
 
     @app.post("/api/pruefen")
     def pruefen_ep(body: PruefenPost) -> JSONResponse:

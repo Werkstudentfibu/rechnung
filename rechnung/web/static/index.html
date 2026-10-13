@@ -49,6 +49,11 @@
   .tabrahmen-box { position: absolute; border: 2px solid #9b59b6; background: rgba(155,89,182,.08);
                    pointer-events: none; }
   .li-cell-ziel { outline: 2px solid #2f6fd0; }
+  /* Baustein 3 (Aaron 12.10.2026): Vorschlag fuer die uebrigen Spalten
+     derselben Zeile -- gelb, ein Klick uebernimmt ihn. */
+  .li-vorschlag { display: inline-block; margin-left: 2px; padding: 0 4px; border-radius: 4px;
+                  background: #ffe9a8; border: 1px solid #d9b94a; cursor: pointer; font-size: 11px; }
+  .li-vorschlag:hover { background: #ffdd70; }
 
   .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #ddd; }
   .badge.auto { background: #c9ecd6; } .badge.review { background: #ffe5b4; }
@@ -467,6 +472,9 @@ function applyInvoiceData(d) {
     // Einzelne Positions-Zelle als Rahmen-Ziel ausgewaehlt (wie ein
     // Kopffeld, STATE.zielInput) -- {ri, col} oder null.
     zielLiCell: null,
+    // Baustein 3: Vorschlag fuer die uebrigen Spalten derselben Zeile nach
+    // dem Fuellen EINER Zelle per Rahmen -- {ri, vorschlag} oder null.
+    liVorschlag: null,
   };
   // vorhandene Positionsspalten übernehmen
   if (d.template_line_items) {
@@ -1436,8 +1444,34 @@ function liZelleRahmen(page, indices) {
   const z = STATE.zielLiCell;
   z.page = page; z.values = indices;
   paintZielLiCell(page);
-  liSetCell(z.ri, z.col, woerterText(page, indices).replace(/\n/g, ' ').trim());
+  const text = woerterText(page, indices).replace(/\n/g, ' ').trim();
+  liSetCell(z.ri, z.col, text);
+  liVorschlagHolen(page, indices, z.ri, z.col, text);
   liNaechsteZelle(z.ri, z.col);
+}
+// SPEC Baustein 3 (Aaron 12.10.2026): "stehen sehr wahrscheinlich links und
+// rechts davon in der gleichen Zeile die restlichen Informationen zu diesem
+// Artikel" -- nach dem Fuellen EINER Zelle per Rahmen die uebrigen, noch
+// leeren Spalten derselben Zeile vorschlagen (gelb, mit einem Klick
+// uebernehmbar; nur wenn die Rechen-Pruefung/Baustein 4 nicht widerspricht).
+async function liVorschlagHolen(page, indices, ri, col, wert) {
+  const zeile = Object.fromEntries(Object.entries(STATE.lineItems[ri] || {})
+    .filter(([k]) => !k.startsWith('_')));
+  const r = await api('/api/tabelle/zeile_vorschlag', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, page, indices, ziel_spalte: col, wert, zeile }),
+  });
+  STATE.liVorschlag = (r && r.zulaessig && Object.keys(r.vorschlag || {}).length)
+    ? { ri, vorschlag: r.vorschlag } : null;
+  liRedraw();
+}
+function liVorschlagUebernehmen(ri, col) {
+  const v = STATE.liVorschlag;
+  if (!v || v.ri !== ri || !(col in v.vorschlag)) return;
+  liSetCell(ri, col, v.vorschlag[col]);
+  delete v.vorschlag[col];
+  if (!Object.keys(v.vorschlag).length) STATE.liVorschlag = null;
+  liRedraw();
 }
 // Nach dem Fuellen per Rahmen gleich zur naechsten leeren Zelle DERSELBEN
 // Zeile (SPEC: "automatisch zur naechsten leeren/roten Zelle der Zeile") --
@@ -1561,11 +1595,18 @@ function renderLiPreviewBox(items) {
         let v = it[c];
         if (typeof v === 'number' && c !== 'menge' && c !== 'mwst_satz') v = fmtWert(v, 'amount');
         const istZiel = STATE.zielLiCell && STATE.zielLiCell.ri === ri && STATE.zielLiCell.col === c;
+        // Baustein 3: Vorschlag aus derselben Zeile (gelb) fuer eine noch
+        // leere Zelle -- ein Klick uebernimmt ihn (``liVorschlagUebernehmen``).
+        const vLiVorschlag = (STATE.liVorschlag && STATE.liVorschlag.ri === ri && !v)
+          ? STATE.liVorschlag.vorschlag[c] : null;
+        const vorschlagHtml = vLiVorschlag != null
+          ? ` <span class="li-vorschlag" title="Vorschlag aus derselben Zeile – Klick übernimmt"
+                onclick="liVorschlagUebernehmen(${ri}, '${esc(c)}')">${esc(vLiVorschlag)}</span>` : '';
         return `<td class="${typeof it[c] === 'number' ? 'num' : ''}"><input id="li-cell-${ri}-${c}"
                   class="${hcls}${istZiel ? ' li-cell-ziel' : ''}" value="${esc(nz(v))}"
                   ${h ? `title="${esc(h)}"` : ''} ${fest ? 'readonly' : ''}
                   onclick="${fest ? '' : `selLiZelle(${ri}, '${c}')`}"
-                  onchange="liSetCell(${ri}, '${esc(c)}', this.value)"></td>`;
+                  onchange="liSetCell(${ri}, '${esc(c)}', this.value)">${vorschlagHtml}</td>`;
       }).join('')}${stCell(pr[ri])}
       <td>${fest ? '' : `<button class="danger" style="padding:0 4px" title="Zeile löschen" onclick="liDelRow(${ri})">×</button>`}</td></tr>`).join('')}
     </table></div>
@@ -1592,7 +1633,7 @@ function liSetCell(ri, col, value) {
   if (it._herkunft && col in it._herkunft) delete it._herkunft[col];
   liTouched();
 }
-function liDelRow(ri) { STATE.lineItems.splice(ri, 1); liTouched(); }
+function liDelRow(ri) { STATE.liVorschlag = null; STATE.lineItems.splice(ri, 1); liTouched(); }
 function liAddRow() {
   const cols = liCols(STATE.lineItems).filter(c => !LI_NICHT_SPEICHERN.includes(c));
   const row = {}; (cols.length ? cols : LI_STD.map(([k]) => k)).forEach(c => row[c] = '');
