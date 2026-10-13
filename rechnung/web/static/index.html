@@ -901,9 +901,12 @@ function renderInvoice(d) {
   rd.innerHTML = `<div class="ab-h">Rechnungsdaten</div>
     <div class="ab-row2">${fBox('rechnungsnummer', 'Rechnungsnummer')}${fBox('rechnungsdatum', 'Rechnungsdatum')}</div>`;
   fbox.appendChild(rd);
-  fbox.appendChild(gruppe('Sonstige Daten',
-    `<div class="ab-row2">${fBox('faelligkeit', 'Fälligkeitsdatum')}${fBox('einkaeufer', 'Einkäufer')}</div>
-     <div class="ab-row2">${fBox('leistungsdatum', 'Leistungsdatum')}</div>`));
+  // Block "Sonstige Daten" entfernt (Aaron 13.10.2026). Nur noch sichtbar, wenn eines der
+  // Felder per RECHNUNG_FELDER_AUS ausdruecklich wieder eingeschaltet ist.
+  const sonst = [['faelligkeit', 'Fälligkeitsdatum'], ['einkaeufer', 'Einkäufer'], ['leistungsdatum', 'Leistungsdatum']]
+    .filter(([n]) => STATE.defs[n]);
+  if (sonst.length) fbox.appendChild(gruppe('Sonstige Daten',
+    `<div class="ab-row2">${sonst.map(([n, l]) => fBox(n, l)).join('')}</div>`));
 
   // Beträge
   const rc = ((STATE.current.reverse_charge || {}).value || '') === 'ja';
