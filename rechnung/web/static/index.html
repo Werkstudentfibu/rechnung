@@ -1747,10 +1747,18 @@ async function saveTabelle(art) {
   const quelleVorher = art === 'ust'
     ? ((STATE.current.ust_aufstellung || {}).source || null)
     : (STATE.positionenKorrigiert ? 'manual' : (STATE.tid ? 'template' : 'llm'));
+  // SPEC Baustein 5 (Aaron 12.10.2026): die per Rahmen-Markierung bestaetigte
+  // Spalten-Zuordnung (Kopfwort -> LI_STD-Spalte) wandert ins globale
+  // Spaltenwoerterbuch -- nur wenn dieses Tool tatsaechlich benutzt wurde.
+  const spaltenZuordnung = (art === 'positionen' && STATE.tabRahmen.columns.length)
+    ? STATE.tabRahmen.columns
+        .map((c, i) => ({ header_text: c.header_text, ziel: STATE.tabRahmen.mapping[i] }))
+        .filter(z => z.header_text && z.ziel && z.ziel !== 'ignorieren')
+    : undefined;
   const r = await api('/api/tabelle', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ file: STATE.file, art, rows, template_id: STATE.tid || null,
-                          quelle_vorher: quelleVorher }),
+                          quelle_vorher: quelleVorher, spalten_zuordnung: spaltenZuordnung }),
   });
   if (!r.ok) { $('#msg').textContent = 'Fehler beim Speichern der Tabelle'; return; }
   // Neu laden: Markierungen/Pruefungen/Status kommen frisch vom Server

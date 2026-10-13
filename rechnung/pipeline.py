@@ -38,7 +38,7 @@ from .identify import (DEFAULT_CURRENCY, EXPECTED_RATES, FIXED_FIELD_TYPES, IBAN
                        _address_scope_reason, _detect_currency, cross_check,
                        extract_identifiers, identify_einvoice, identify_with_reason, kandidaten)
 from .store import Store
-from .suggest import suggest_category
+from .suggest import similar_suppliers, suggest_category
 from .template import (STANDARD_FIELDS, FieldResult, Template, apply_line_items,
                        apply_template)
 from .textnorm import coerce, compact, find_ibans, norm
@@ -1029,6 +1029,70 @@ def _gegencheck(res: "Result", doc, tpl: Template, store: Store, timer: StageTim
         res.hold_reasons.append("Gegencheck Vorlage/KI weicht ab: " + "; ".join(abweichungen))
 
 
+_TABELLENRANG_VERSION_RE = re.compile(r"__v(\d+)$")
+
+
+def _tabellenrang_version(tpl: Template) -> int:
+    m = _TABELLENRANG_VERSION_RE.search(tpl.id)
+    return int(m.group(1)) if m else 0
+
+
+def _eigene_tabellen_specs(store: Store, supplier_id: str) -> list[Template]:
+    """Alle Templates MIT Positionstabelle dieses Lieferanten, neueste
+    Version zuerst -- auch als veraltet markierte (SPEC Baustein 5:
+    "gelernte Spec dieses Lieferanten (neuere Rechnungen staerker, wegen
+    Layoutwechseln)"). Eine aktive (nicht veraltete) Vorlage haette
+    ``_pick_template`` schon ausgewaehlt -- landet hier also nur, wenn ALLE
+    Vorlagen dieses Lieferanten veraltet sind: besser eine frueher gelernte
+    Spec probieren als gleich auf Schluesselwoerter/KI zurueckzufallen."""
+    tpls = [t for t in store.templates_for(supplier_id) if t.line_items is not None]
+    return sorted(tpls, key=lambda t: (not t.stale, _tabellenrang_version(t)), reverse=True)
+
+
+def _tabelle_rangfolge(doc, supplier, store: Store, netto: float | None, brutto: float | None,
+                       text: str, pages: list[int] | None
+                       ) -> tuple[list[dict] | None, str]:
+    """Rangfolge der Positionstabellen-Erkennung bei einem Lieferanten ohne
+    aktives Template (SPEC Baustein 5, Aaron 12.10.2026, Grundsatz: "Wissen
+    ueber DENSELBEN Lieferanten wiegt staerker als uebertragenes"). EINE
+    Stelle statt verstreuter Sonderfaelle:
+
+        1. eigene (ggf. veraltete) Spec(s) dieses Lieferanten
+        2. Layout-Familie: Spec eines nach Kopf-Fingerprint aehnlichen
+           Lieferanten (``suggest.similar_suppliers`` -- derselbe
+           Mechanismus wie beim manuellen "Vorlage kopieren")
+        3. eingebaute Schluesselwoerter + globales Spaltenwoerterbuch
+           (``tabelle.extract``)
+
+    Jede Stufe nur, wenn die Rechen-Pruefung (Baustein 4, ``tabelle.
+    pruefe_kandidat``) nicht widerspricht -- sonst weiter zur naechsten,
+    nie geraten. -> (Positionen oder ``None``, Herkunfts-Hinweis fuers UI
+    als ``res.hinweise``-Eintrag, leer bei Stufe 3/kein Treffer -- der
+    normale, nicht extra erklaerungsbeduerftige Weg). Speichert nichts --
+    eine fremde Spec wird nie automatisch fuer einen Lieferanten
+    uebernommen (erst durch eine Bestaetigung, ``learn.learn_from_confirmed``)."""
+    if supplier is not None:
+        for tpl in _eigene_tabellen_specs(store, supplier.id):
+            kandidat = tabelle.pruefe_kandidat(apply_line_items(doc, tpl.line_items),
+                                               netto, brutto, text, quelle="tabelle_eigene_spec")
+            if kandidat:
+                return kandidat, f"Positionstabelle aus frueher gelernter Vorlage ({tpl.id})"
+
+    fp = extract_identifiers(doc)["fingerprint"]
+    exclude_id = supplier.id if supplier is not None else None
+    kandidaten_lieferanten = [s for s in store.suppliers() if s.id != exclude_id]
+    for s, _score in similar_suppliers(fp, kandidaten_lieferanten):
+        for tpl in _eigene_tabellen_specs(store, s.id):
+            kandidat = tabelle.pruefe_kandidat(apply_line_items(doc, tpl.line_items),
+                                               netto, brutto, text, quelle="tabelle_layout_familie")
+            if kandidat:
+                return kandidat, (f"Positionstabelle wie bei Lieferant {s.name or s.id} erkannt "
+                                  f"(Vorschlag, noch nicht gespeichert)")
+
+    return tabelle.extract(doc, netto=netto, brutto=brutto, text=text, pages=pages,
+                           woerterbuch=store.spaltenwoerter()), ""
+
+
 def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
                         extra_checks: list[Check] | None = None,
                         timer: StageTimer | None = None,
@@ -1054,10 +1118,16 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
     tbl_pages = (list(range(max(0, len(doc.pages) - _ZUSAMMENFASSUNG_SCHLUSSSEITEN),
                             len(doc.pages)))
                 if modus == POSITIONSMODUS_ZUSAMMENFASSUNG else None)
-    tbl_items = (tabelle.extract(doc, text=doc.text, pages=tbl_pages)
-                if modus != POSITIONSMODUS_EINE_POSITION else None)
+    # SPEC Baustein 5 (Aaron 12.10.2026): Rangfolge statt nur eingebauter
+    # Schluesselwoerter -- eigene (ggf. veraltete) Spec dieses Lieferanten
+    # vor Layout-Familie vor Schluesselwoerter/-woerterbuch.
+    tbl_items, tbl_herkunft = (_tabelle_rangfolge(doc, supplier, store, None, None, doc.text,
+                                                  tbl_pages)
+                               if modus != POSITIONSMODUS_EINE_POSITION else (None, ""))
     if tbl_items:
         res.line_items = positionen.normalize_columns(tbl_items)
+        if tbl_herkunft:
+            res.hinweise.append(tbl_herkunft)
     if use_llm:
         with timer.stage("ki"):
             _llm_full(res, doc, modus, variante, skip_items=bool(tbl_items))
@@ -1104,14 +1174,16 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
         if (not manuell_korrigiert and not res.line_items
                 and modus != POSITIONSMODUS_EINE_POSITION):
             netto_fr, brutto_fr = res.fields.get("netto"), res.fields.get("brutto")
-            retry = tabelle.extract(doc, netto=_to_amount(netto_fr.value) if netto_fr else None,
-                                    brutto=_to_amount(brutto_fr.value) if brutto_fr else None,
-                                    text=doc.text, pages=tbl_pages)
+            retry, retry_herkunft = _tabelle_rangfolge(
+                doc, supplier, store, _to_amount(netto_fr.value) if netto_fr else None,
+                _to_amount(brutto_fr.value) if brutto_fr else None, doc.text, tbl_pages)
             if retry:
                 rk2 = rechnen.rechne(res.fields, positionen.normalize_columns(retry), doc.text)
                 res.fields, res.line_items, res.tax_breakdown = (
                     rk2.fields, rk2.line_items, rk2.tax_breakdown)
                 res.hinweise.extend(g for g in rk2.gruende if g not in res.hinweise)
+                if retry_herkunft and retry_herkunft not in res.hinweise:
+                    res.hinweise.append(retry_herkunft)
         _positionsmodus_abschliessen(res, supplier, manuell_korrigiert)
         res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, extra, qr)
         _set_dublette(res, store, doc)

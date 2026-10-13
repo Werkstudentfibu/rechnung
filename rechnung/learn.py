@@ -345,14 +345,20 @@ def _match_header_words(header_line: list[Word], col_spans: dict[str, list[Word]
     return out
 
 
-def learn_line_items(doc: Document, items: list[dict]) -> LineItemSpec | None:
+def learn_line_items(doc: Document, items: list[dict], store=None) -> LineItemSpec | None:
     """``LineItemSpec`` aus bestaetigten Positionen ableiten: jede Position
     im PDF wiederfinden (Werte -> Zeile), daraus die Kopfzeile (Label-
     Woerter oberhalb der ersten Position), Spalten-x-Bereiche
     (``template.build_line_item_spec``, Mitte zum Nachbarn) und das
     Stoppwort (erste Zeile unterhalb der letzten Position). Nur wenn der
     Probelauf (``apply_line_items``) die bestaetigten Positionen exakt
-    reproduziert -- sonst ``None`` statt geraten."""
+    reproduziert -- sonst ``None`` statt geraten.
+
+    ``store``: optional (SPEC Baustein 5, Aaron 12.10.2026) -- gelingt das
+    Lernen, wandert jedes Kopfwort der erkannten Spalten automatisch ins
+    globale Spaltenwoerterbuch (``store.spaltenwort_lernen``); gilt als
+    "bestaetigt", weil der Probelauf unten die Positionen exakt reproduziert
+    (SPEC: "Einmal korrigieren = gelernt (ohne Extraschritt)")."""
     if not items:
         return None
     lines = _lines(doc)
@@ -391,6 +397,9 @@ def learn_line_items(doc: Document, items: list[dict]) -> LineItemSpec | None:
     spec = build_line_item_spec(header_cols, stop_words, page_w)
     if not _items_equiv(apply_line_items(doc, spec), items):
         return None
+    if store is not None:
+        for key, w in header_map.items():
+            store.spaltenwort_lernen(w.text, key)
     return spec
 
 
@@ -560,6 +569,7 @@ def learn_template(doc: Document, supplier_id: str, values: dict[str, object],
                    template_id: str | None = None,
                    line_items: list[dict] | None = None,
                    taxblock: list[dict] | None = None,
+                   store=None,
                    ) -> tuple[Template | None, LearnOutcome]:
     """Aus bestaetigten Werten ein Template ableiten bzw. ``existing`` ergaenzen.
     Speichert nichts -- liefert das Template (oder None, wenn sich nichts
@@ -568,7 +578,9 @@ def learn_template(doc: Document, supplier_id: str, values: dict[str, object],
     markierte Vorlage fuer dieselbe Variante schon die Standard-Id belegt
     (SPEC §7p: Layoutwechsel erkennen). ``line_items``/``taxblock``:
     bestaetigte Positionstabelle/USt-Aufstellung -- Postfach-Baustein 11a,
-    siehe ``learn_line_items``/``learn_taxblock``."""
+    siehe ``learn_line_items``/``learn_taxblock``. ``store``: optional,
+    durchgereicht an ``learn_line_items`` fuers globale Spaltenwoerterbuch
+    (SPEC Baustein 5)."""
     tid = existing.id if existing else (template_id or f"{supplier_id}__{variant}")
     outcome = LearnOutcome(template_id=tid, created=existing is None)
     tpl = (Template.from_dict(existing.to_dict()) if existing
@@ -627,7 +639,7 @@ def learn_template(doc: Document, supplier_id: str, values: dict[str, object],
         elif tpl.line_items is not None and tpl.secured:
             outcome.skipped["_positionen"] = "gesichertes Template liefert andere Positionen"
         else:
-            spec_li = learn_line_items(doc, line_items)
+            spec_li = learn_line_items(doc, line_items, store=store)
             if spec_li is None:
                 outcome.skipped["_positionen"] = "nicht reproduzierbar/nicht gefunden"
             else:
@@ -833,7 +845,7 @@ def learn_from_confirmed(store, res, doc: Document, operator: str = "") -> Learn
                       else None)
     tpl, outcome = learn_template(doc, res.supplier_id, confirmed_values(res.fields),
                                   existing, variant, template_id=tid_override,
-                                  line_items=gelesene_items, taxblock=taxblock)
+                                  line_items=gelesene_items, taxblock=taxblock, store=store)
 
     if used_tpl is not None and used_tpl.secured:
         _track_field_corrections(store, used_tpl, outcome, res, operator)

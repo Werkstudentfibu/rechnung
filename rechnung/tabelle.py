@@ -16,6 +16,7 @@ eine falsche Tabelle."""
 from __future__ import annotations
 
 from .pdf import Document, Page, Word
+from .spaltenwoerter import hinweis as _woerterbuch_hinweis
 from .template import FieldResult
 from .textnorm import coerce, norm
 from .validate import check_line_items_total, line_item_row
@@ -65,10 +66,20 @@ _SEITENWECHSEL_WOERTER = ("zwischensumme", "uebertrag", "ubertrag")
 _TEXT_SPALTEN = ("beschreibung", "waehrung")
 
 
-def _match_header_word(text: str) -> str | None:
+def _match_header_word(text: str, woerterbuch: dict | None = None) -> str | None:
+    """Kopfwort -> kanonische Spalte. Rangfolge (SPEC Baustein 5): das
+    globale, lieferantenuebergreifende Spaltenwoerterbuch (nur bestaetigte,
+    nicht widersprochene Zuordnungen, siehe ``spaltenwoerter.hinweis``) VOR
+    den fest eingebauten Schluesselwoertern -- wird bei einem unbekannten
+    Lieferanten mitgegeben (``woerterbuch``), bei einem bereits gelernten
+    Lieferanten bleibt der Aufruf ohne Woerterbuch (dessen eigene Spec
+    entscheidet, siehe ``pipeline._tabelle_rangfolge``)."""
     n = norm(text)
     if not n:
         return None
+    gelernt = _woerterbuch_hinweis(woerterbuch, text)
+    if gelernt in _HEADER_HINWEISE:
+        return gelernt
     for canon, keys in _HEADER_HINWEISE.items():
         if n in keys:
             return canon
@@ -102,7 +113,8 @@ def _cluster_rows(words: list[Word], line_h: float, row_gap: float = 1.8) -> lis
     return rows
 
 
-def _header_candidates(page: Page) -> list[tuple[list[Word], dict[str, Word]]]:
+def _header_candidates(page: Page, woerterbuch: dict | None = None
+                       ) -> list[tuple[list[Word], dict[str, Word]]]:
     """Alle Zeilen der Seite, die wie eine Tabellen-Kopfzeile aussehen, oben
     zuerst."""
     if not page.words:
@@ -112,7 +124,7 @@ def _header_candidates(page: Page) -> list[tuple[list[Word], dict[str, Word]]]:
     for line in _cluster_rows(page.words, line_h):
         matches: dict[str, Word] = {}
         for w in line:
-            canon = _match_header_word(w.text)
+            canon = _match_header_word(w.text, woerterbuch)
             if canon and canon not in matches:
                 matches[canon] = w
         if len(matches) >= _MIN_SPALTEN and all(c in matches for c in _PFLICHT_SPALTEN):
@@ -193,7 +205,7 @@ def _merge_fortsetzungen(rows: list[dict]) -> list[dict]:
 
 
 def _validieren(items: list[dict], netto: float | None, brutto: float | None,
-                text: str) -> list[dict] | None:
+                text: str, quelle: str = "tabelle") -> list[dict] | None:
     """Nur uebernehmen, wenn menge * einzelpreis ≈ gesamt (je pruefbarer
     Zeile) ODER die Summe der Gesamt-Spalte zum Netto (bzw. Brutto bei
     Bruttopreisen) passt -- dieselbe Rechen-Pruefung wie ``validate.py``,
@@ -212,11 +224,25 @@ def _validieren(items: list[dict], netto: float | None, brutto: float | None,
         return None
     for i, it in enumerate(items, 1):
         it.setdefault("pos", i)
-        it["_quelle"] = "tabelle"
+        it["_quelle"] = quelle
     return items
 
 
-def _finde_kopf(doc: Document, page_idxs: list[int]
+def pruefe_kandidat(items: list[dict] | None, netto: float | None, brutto: float | None,
+                    text: str = "", quelle: str = "tabelle_vorlage") -> list[dict] | None:
+    """Oeffentliche Form von ``_validieren`` fuer Tabellen-Kandidaten aus
+    ANDEREN Quellen als der eigenen Kopfzeilen-Erkennung dieses Moduls --
+    die gelernte Spec desselben Lieferanten (noch nicht aktiv, z.B. als
+    veraltet markiert) oder eines aehnlichen Lieferanten der gleichen
+    Layout-Familie (SPEC Baustein 5 "Rangfolge", siehe
+    ``pipeline._tabelle_rangfolge``). Dieselbe Rechen-Pruefung wie
+    ``extract()`` -- kein Sonderfall, nur ``None`` statt geraten."""
+    if not items:
+        return None
+    return _validieren([dict(it) for it in items], netto, brutto, text, quelle)
+
+
+def _finde_kopf(doc: Document, page_idxs: list[int], woerterbuch: dict | None = None
                 ) -> tuple[int, list[Word], dict[str, Word]] | None:
     """Erste Kopfzeile ueber die gegebenen Seiten -> (Seitenindex, Kopfzeile,
     Spalten-Treffer), oder ``None``. Gemeinsam fuer ``extract()`` und
@@ -224,7 +250,7 @@ def _finde_kopf(doc: Document, page_idxs: list[int]
     for i in page_idxs:
         if i < 0 or i >= len(doc.pages):
             continue
-        cands = _header_candidates(doc.pages[i])
+        cands = _header_candidates(doc.pages[i], woerterbuch)
         if cands:
             header_line, matches = cands[0]
             return i, header_line, matches
@@ -257,7 +283,8 @@ def _zeilen_unter_kopf(doc: Document, page_idxs: list[int], header_page: int,
 
 
 def extract(doc: Document, netto: float | None = None, brutto: float | None = None,
-            text: str = "", pages: list[int] | None = None) -> list[dict] | None:
+            text: str = "", pages: list[int] | None = None,
+            woerterbuch: dict | None = None) -> list[dict] | None:
     """Positionstabelle deterministisch aus dem Wort-Layout lesen, oder
     ``None`` (keine stimmige Tabelle gefunden -- dann greift KI bzw. bleibt
     leer, SPEC Baustein 2).
@@ -266,9 +293,11 @@ def extract(doc: Document, netto: float | None = None, brutto: float | None = No
     ``summen.py``, ohne KI) fuer die Summenpruefung, falls die Zeilen
     selbst nicht alle pruefbar sind (z.B. keine Mengen-Spalte). ``pages``:
     nur diese Seiten durchsuchen (Positionsmodus "zusammenfassung" --
-    Uebersichtstabelle steht am Rechnungsende)."""
+    Uebersichtstabelle steht am Rechnungsende). ``woerterbuch``: globales
+    Spaltenwoerterbuch (SPEC Baustein 5, ``store.spaltenwoerter()``) als
+    zusaetzlicher Hinweis bei einem Lieferanten ohne eigene Spec."""
     page_idxs = pages if pages is not None else list(range(len(doc.pages)))
-    kopf = _finde_kopf(doc, page_idxs)
+    kopf = _finde_kopf(doc, page_idxs, woerterbuch)
     if kopf is None:
         return None
     header_page, header_line, matches = kopf
@@ -328,7 +357,7 @@ def _words_in_box(doc: Document, box: dict) -> list[Word]:
             if box["top"] <= w.cy <= box["bottom"] and box["x0"] <= w.cx <= box["x1"]]
 
 
-def markiere_tabelle(doc: Document, boxes: list[dict]) -> dict:
+def markiere_tabelle(doc: Document, boxes: list[dict], woerterbuch: dict | None = None) -> dict:
     """Rahmen (je ``{"page","x0","top","x1","bottom"}`` in PDF-Punkten) ->
     ``{"columns": [{"index","x0","x1","header_text","guess"}], "rows": [[zelltext,...]]}``.
     Spaltenbereiche (``x0``/``x1`` als Seitenanteile der ERSTEN Seite) aus
@@ -365,7 +394,7 @@ def markiere_tabelle(doc: Document, boxes: list[dict]) -> dict:
     cols = []
     for i, (cx0, cx1) in enumerate(luecken):
         hwords = sorted((w for w in header_line if cx0 <= w.cx < cx1), key=lambda w: w.x0)
-        guess = next((g for w in hwords if (g := _match_header_word(w.text))), None)
+        guess = next((g for w in hwords if (g := _match_header_word(w.text, woerterbuch))), None)
         cols.append({"index": i, "x0": round(cx0 / page0.width, 4), "x1": round(cx1 / page0.width, 4),
                     "header_text": " ".join(w.text for w in hwords), "guess": guess})
 
@@ -432,7 +461,8 @@ def anwenden_markierung(grid: dict, mapping: list[str | None] | None = None) -> 
     return items
 
 
-def tabelle_text(doc: Document, pages: list[int] | None = None) -> str:
+def tabelle_text(doc: Document, pages: list[int] | None = None,
+                 woerterbuch: dict | None = None) -> str:
     """Nur der Tabellenbereich als Text (Kopfzeile bis zum Stopp) -- fuer
     Variante B (``semantic.positions_block``, SPEC Baustein 3): die KI
     bekommt dort NICHT die ganze Rechnung, nur diesen Ausschnitt. Leer, wenn
@@ -440,7 +470,7 @@ def tabelle_text(doc: Document, pages: list[int] | None = None) -> str:
     Summenpruefung scheitert, kann dieser Ausschnitt trotzdem etwas taugen
     -- er haengt nicht an der Validierung, nur am Kopfzeilen-Fund)."""
     page_idxs = pages if pages is not None else list(range(len(doc.pages)))
-    kopf = _finde_kopf(doc, page_idxs)
+    kopf = _finde_kopf(doc, page_idxs, woerterbuch)
     if kopf is None:
         return ""
     header_page, header_line, _matches = kopf

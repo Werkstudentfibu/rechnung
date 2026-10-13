@@ -143,6 +143,11 @@ class TabellePost(BaseModel):
     rows: list[dict]
     template_id: str | None = None
     quelle_vorher: str | None = None
+    # SPEC Baustein 5 (Aaron 12.10.2026): Kopfwort -> Zielspalte je Spalte der
+    # Rahmen-Markierung (Baustein 2), wie vom Menschen im Dropdown bestaetigt
+    # -- wandert ins globale, lieferantenuebergreifende Spaltenwoerterbuch
+    # (nur bei ``art == "positionen"``, siehe ``spaltenwoerter.py``).
+    spalten_zuordnung: list[dict] | None = None
 
 
 class TabelleMarkierenPost(BaseModel):
@@ -1249,6 +1254,14 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             # Standardnamen abbilden (SPEC Baustein 1) -- validate.py und
             # das Lernen (learn_line_items) kennen nur noch Standardnamen.
             rows = positionen.normalize_columns(rows)
+            # SPEC Baustein 5: die vom Menschen bestaetigte Spalten-Zuordnung
+            # der Rahmen-Markierung (Baustein 2) wandert ins globale
+            # Spaltenwoerterbuch -- gilt als bestaetigt, sobald der Mensch
+            # "Positionen uebernehmen" klickt (keine Extra-Bestaetigung).
+            for eintrag in body.spalten_zuordnung or []:
+                text, ziel_spalte = eintrag.get("header_text"), eintrag.get("ziel")
+                if text and ziel_spalte:
+                    store.spaltenwort_lernen(text, ziel_spalte, op)
         else:
             key = "ust_aufstellung"
             rows = [z for z in (_ust_zeile(r) for r in body.rows) if z is not None]

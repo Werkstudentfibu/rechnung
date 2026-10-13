@@ -9,6 +9,7 @@ import shutil
 import time
 from pathlib import Path
 
+from . import spaltenwoerter as spaltenwoerter_mod
 from .billing import BillingAddress
 from .identify import Supplier
 from .positionen import ordered_columns
@@ -112,6 +113,7 @@ class Store:
         self._archive = self.root / "archive"
         self._corrections = self.root / "corrections"
         self._categories = self.root / "categories.json"
+        self._spaltenwoerter = self.root / "spaltenwoerter.json"
         self._confirmations_log = self.root / "confirmations.jsonl"
         self._shadow = self.root / "shadow.jsonl"
         self._events = self.root / "events.jsonl"
@@ -377,6 +379,22 @@ class Store:
             removed = rows.pop(key)
             _atomic_write(self._categories, json.dumps(rows, indent=2, ensure_ascii=False))
             self.audit("category-delete", {"key": key, **removed}, operator)
+
+    # ---- Spaltenwoerterbuch (SPEC Baustein 5, Aaron 12.10.2026) -----
+    # Lieferantenuebergreifend: Kopfwort (norm()) -> {Zielspalte -> Anzahl
+    # Bestaetigungen}. Siehe ``spaltenwoerter.py`` fuer die Entscheidungs-
+    # regel (ab 2 Bestaetigungen, nie gegen einen Widerspruch).
+    def spaltenwoerter(self) -> dict[str, dict[str, int]]:
+        return _read_json_safe(self._spaltenwoerter, {})
+
+    def spaltenwort_lernen(self, text: str, ziel_spalte: str | None,
+                           operator: str = "") -> None:
+        bisher = self.spaltenwoerter()
+        neu = spaltenwoerter_mod.lernen(bisher, text, ziel_spalte)
+        if neu is bisher:
+            return
+        _atomic_write(self._spaltenwoerter, json.dumps(neu, indent=2, ensure_ascii=False))
+        self.audit("spaltenwort-lernen", {"text": text, "ziel": ziel_spalte}, operator)
 
     def write_output(self, name: str, data: dict) -> Path:
         p = self.root / "out" / f"{name}.json"
