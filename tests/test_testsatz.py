@@ -146,8 +146,11 @@ def test_unbekannte_variante_ist_fehler(tmp_path):
     store = Store(tmp_path / "data")
     with pytest.raises(ValueError):
         testsatz.laufen(store, variante="D")
+    # C ist vorgesehen (Ueberblick + Bloecke), aber noch nicht gebaut --
+    # B (Positionen als eigener Block, Baustein 3) ist es seit Aaron
+    # 12.10.2026.
     with pytest.raises(NotImplementedError):
-        testsatz.laufen(store, variante="B")
+        testsatz.laufen(store, variante="C")
     assert cli_main(["--data", str(store.root), "testsatz", "--variante", "X"]) == 2
     from rechnung.pipeline import process
     with pytest.raises(ValueError):

@@ -29,6 +29,7 @@ from .. import rechnen
 from .. import semantic
 from .. import split
 from .. import shadow
+from .. import tabelle
 from .. import testsatz
 from .. import vorlernen
 from ..billing import BillingAddress
@@ -142,6 +143,37 @@ class TabellePost(BaseModel):
     rows: list[dict]
     template_id: str | None = None
     quelle_vorher: str | None = None
+    # SPEC Baustein 5 (Aaron 12.10.2026): Kopfwort -> Zielspalte je Spalte der
+    # Rahmen-Markierung (Baustein 2), wie vom Menschen im Dropdown bestaetigt
+    # -- wandert ins globale, lieferantenuebergreifende Spaltenwoerterbuch
+    # (nur bei ``art == "positionen"``, siehe ``spaltenwoerter.py``).
+    spalten_zuordnung: list[dict] | None = None
+
+
+class TabelleMarkierenPost(BaseModel):
+    """Baustein 2 (Aaron 12.10.2026): der Mensch zieht im PDF einen Rahmen
+    um die Positionstabelle (bei mehrseitigen Tabellen: je Seite einer) --
+    ``boxes`` in PDF-Punkten der jeweiligen Seite. ``mapping`` (optional):
+    vom Menschen geaenderte Spalten-Zuordnung (Index wie die Antwort-
+    Spalten des vorigen Aufrufs); fehlt sie, gilt der Vorschlag (``guess``)
+    je Spalte."""
+    file: str
+    boxes: list[dict]
+    mapping: list[str | None] | None = None
+
+
+class ZeileVorschlagPost(BaseModel):
+    """Baustein 3 (Aaron 12.10.2026): ausgehend von EINER per Rahmen
+    bestaetigten Positions-Zelle (``indices`` in ``doc.pages[page].words``,
+    Zielspalte ``ziel_spalte``, Wert ``wert``) die uebrigen Spalten
+    DERSELBEN Zeile vorschlagen -- Zeilen-/Spaltenzusammenhang. ``zeile``:
+    schon bekannte Werte dieser Zeile (fuer die Baustein-4-Pruefung)."""
+    file: str
+    page: int
+    indices: list[int]
+    ziel_spalte: str
+    wert: object = ""
+    zeile: dict = {}
 
 
 class PruefenPost(BaseModel):
@@ -1236,6 +1268,14 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             # Standardnamen abbilden (SPEC Baustein 1) -- validate.py und
             # das Lernen (learn_line_items) kennen nur noch Standardnamen.
             rows = positionen.normalize_columns(rows)
+            # SPEC Baustein 5: die vom Menschen bestaetigte Spalten-Zuordnung
+            # der Rahmen-Markierung (Baustein 2) wandert ins globale
+            # Spaltenwoerterbuch -- gilt als bestaetigt, sobald der Mensch
+            # "Positionen uebernehmen" klickt (keine Extra-Bestaetigung).
+            for eintrag in body.spalten_zuordnung or []:
+                text, ziel_spalte = eintrag.get("header_text"), eintrag.get("ziel")
+                if text and ziel_spalte:
+                    store.spaltenwort_lernen(text, ziel_spalte, op)
         else:
             key = "ust_aufstellung"
             rows = [z for z in (_ust_zeile(r) for r in body.rows) if z is not None]
@@ -1256,6 +1296,38 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                                    file=path.name, template_id=body.template_id,
                                    quelle_vorher=body.quelle_vorher)
         return JSONResponse({"ok": True, "rows": rows})
+
+    @app.post("/api/tabelle/markieren")
+    def tabelle_markieren_ep(body: TabelleMarkierenPost) -> JSONResponse:
+        """Baustein 2: Rahmen(e) um die Positionstabelle -> erkannte Spalten
+        (mit Zuordnungs-Vorschlag) + die daraus gelesenen Positionen. Reine
+        Vorschau (speichert nichts) -- "Positionen uebernehmen" (/api/tabelle)
+        macht aus dem Ergebnis danach eine normale Korrektur."""
+        doc = _load(_resolve(body.file))
+        try:
+            boxes = [{"page": int(b["page"]), "x0": float(b["x0"]), "top": float(b["top"]),
+                     "x1": float(b["x1"]), "bottom": float(b["bottom"])} for b in body.boxes]
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "Rahmen ungültig")
+        grid = tabelle.markiere_tabelle(doc, boxes, woerterbuch=store.spaltenwoerter())
+        items = tabelle.anwenden_markierung(grid, body.mapping)
+        return JSONResponse({"columns": grid["columns"], "rows": grid["rows"], "items": items})
+
+    @app.post("/api/tabelle/zeile_vorschlag")
+    def zeile_vorschlag_ep(body: ZeileVorschlagPost) -> JSONResponse:
+        """Baustein 3 (Aaron 12.10.2026): "stehen sehr wahrscheinlich links
+        und rechts davon in der gleichen Zeile die restlichen Informationen
+        zu diesem Artikel" -- ausgehend von einer per Rahmen bestaetigten
+        Zelle die uebrigen Spalten der Zeile vorschlagen. Reine Vorschau
+        (speichert nichts); ``zulaessig=False`` heisst: die Rechen-Pruefung
+        (Baustein 4) widerlegt den Vorschlag, das UI darf ihn nicht
+        anbieten."""
+        doc = _load(_resolve(body.file))
+        wert = _zelle(body.wert)
+        vorschlag = tabelle.zeilen_vorschlag(doc, body.page, body.indices, body.ziel_spalte,
+                                             body.zeile)
+        zulaessig = tabelle.zeilen_vorschlag_zulaessig(vorschlag, body.zeile, body.ziel_spalte, wert)
+        return JSONResponse({"vorschlag": vorschlag if zulaessig else {}, "zulaessig": zulaessig})
 
     @app.post("/api/pruefen")
     def pruefen_ep(body: PruefenPost) -> JSONResponse:

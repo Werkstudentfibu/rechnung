@@ -73,8 +73,10 @@ def test_rechen_pruefungen_live_markiert_genau_die_falsche_zeile():
                                              [{"satz": 19.0, "netto": 300.0, "ust": 57.0},
                                               {"satz": 7.0, "netto": 200.0, "ust": 15.0}],
                                              "", 1.0, "manual")}
-    items = [{"menge": "2", "einzelpreis_netto": 150.0, "gesamt_netto": 300.0, "mwst_satz": "19"},
-             {"menge": "1", "einzelpreis_netto": 200.0, "gesamt_netto": 210.0, "mwst_satz": "7"}]
+    items = [{"beschreibung": "Wartung Server", "menge": "2", "einzelpreis_netto": 150.0,
+              "gesamt_netto": 300.0, "mwst_satz": "19"},
+             {"beschreibung": "Ersatzteil", "menge": "1", "einzelpreis_netto": 200.0,
+              "gesamt_netto": 210.0, "mwst_satz": "7"}]
     out = rechen_pruefungen(fields, items)
     assert [z["ok"] for z in out["positionen"]] == [True, False]
     assert [z["ok"] for z in out["ust"]] == [True, False]
@@ -142,8 +144,10 @@ def test_pruefen_endpoint_zeigt_falsche_zeile(tmp_path: Path):
     r = client.post("/api/pruefen", json={
         "file": "a.pdf",
         "fields": {"netto": "500,00", "ust_betrag": "71,00", "brutto": "571,00"},
-        "line_items": [{"menge": "2", "einzelpreis": "150,00", "gesamtpreis": "300,00"},
-                       {"menge": "1", "einzelpreis": "200,00", "gesamtpreis": "250,00"}],
+        "line_items": [{"beschreibung": "Wartung Server", "menge": "2", "einzelpreis": "150,00",
+                        "gesamtpreis": "300,00"},
+                       {"beschreibung": "Ersatzteil", "menge": "1", "einzelpreis": "200,00",
+                        "gesamtpreis": "250,00"}],
         "ust_aufstellung": [{"satz": "19", "netto": "300,00", "ust": "57,00"},
                             {"satz": "7", "netto": "200,00", "ust": "14,00"}],
     }).json()

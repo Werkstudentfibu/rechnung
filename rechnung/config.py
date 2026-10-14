@@ -181,6 +181,14 @@ def iban_mode() -> str:
     return v if v in ("mensch", "warnen") else "mensch"
 
 
+def ki_variante() -> str:
+    """Extraktionsvariante der KI-Stufe fuer die echte Verarbeitung
+    (``RECHNUNG_KI_VARIANTE``, Aaron 12.10.2026: A bleibt Standard, bis
+    gemessen). Keine eigene Pruefung hier -- ``semantic.pruefe_variante``
+    entscheidet, ob der Wert ueberhaupt gebaut ist."""
+    return os.environ.get("RECHNUNG_KI_VARIANTE", "A").strip().upper()
+
+
 def operator() -> str:
     """Wer bedient das Programm gerade – fuer den Audit-Trail."""
     return (os.environ.get("RECHNUNG_OPERATOR")

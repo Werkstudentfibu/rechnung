@@ -36,6 +36,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 
 from .config import llm as _llm_cfg
@@ -53,10 +54,18 @@ from .textnorm import coerce, compact, find_ustids, iban_valid, norm, value_in_t
 # durchgereicht -- eine unbekannte oder noch nicht gebaute Variante ist ein
 # Fehler, nie ein stiller Rueckfall auf A (kein Raten).
 VARIANTE_A = "A"
+VARIANTE_B = "B"
+# B (Aaron 12.10.2026, Schwerpunkt Positionen): die Positionstabelle wird --
+# wenn Baustein 2 (tabelle.py) sie nicht schon ohne KI gefunden hat -- mit
+# einer EIGENEN kleinen Anfrage gelesen, nur mit dem Tabellenausschnitt
+# (``tabelle.tabelle_text``) statt der ganzen Rechnung (``_positions_block``
+# unten). Kopf/Parteien laufen weiterhin wie Variante A in einer Anfrage --
+# die bestehende Kopf-Erkennung ist bereits gut (Rueckmeldung Aaron
+# 12.10.2026), ein eigener Block dafuer ist (noch) nicht gebaut.
 VARIANTEN = {"A": "eine KI-Anfrage ueber die ganze Rechnung",
-             "B": "KI-Anfragen je Block (noch nicht gebaut)",
+             "B": "Positionen als eigener kleiner Block, Kopf/Parteien wie A",
              "C": "Ueberblick + Bloecke (noch nicht gebaut)"}
-VARIANTEN_GEBAUT = frozenset({VARIANTE_A})
+VARIANTEN_GEBAUT = frozenset({VARIANTE_A, VARIANTE_B})
 
 
 def pruefe_variante(variante: str | None) -> str:
@@ -415,6 +424,35 @@ def verify_in_text(text: str, value, value_type: str) -> bool:
     return value_in_text(text, value, value_type)
 
 
+# ---- Plausibilitaet VOR der Beleg-Pruefung (SPEC Baustein 4, Schwerpunkt
+# Aaron 12.10.2026 -- Befund: das kleine Modell schlug auf einer echten
+# Rechnung rechnungsdatum "0" vor). Ein Wert, der im Text zufaellig
+# vorkommt, aber offensichtlich falsch ist (Datum 1900 oder 2099), soll
+# nicht erst die Beleg-Pruefung bestehen, bevor er auffaellt -- deshalb VOR
+# ``verify_in_text``, nicht danach. Bewusst schmal: nur die Datumsbereichs-
+# Pruefung, NICHT die funktionierende Kopf-Erkennung umbauen.
+_DATUM_JAHRE_ZURUECK = 2
+_DATUM_TAGE_VORAUS = 1
+
+
+def _datum_plausibel(iso: str) -> str | None:
+    """``None`` = plausibel, sonst der Ablehnungsgrund."""
+    try:
+        d = date.fromisoformat(iso)
+    except ValueError:
+        return "Datum nicht lesbar"
+    heute = date.today()
+    if d > heute + timedelta(days=_DATUM_TAGE_VORAUS):
+        return f"Datum {iso} liegt in der Zukunft"
+    try:
+        grenze = heute.replace(year=heute.year - _DATUM_JAHRE_ZURUECK)
+    except ValueError:  # 29. Februar
+        grenze = heute.replace(year=heute.year - _DATUM_JAHRE_ZURUECK, day=28)
+    if d < grenze:
+        return f"Datum {iso} liegt mehr als {_DATUM_JAHRE_ZURUECK} Jahre zurueck"
+    return None
+
+
 def _check_value(text: str, name: str, val, vtype: str) -> tuple[object, str]:
     """-> (geparster Wert, "") oder (None, Grund fuer das Verwerfen)."""
     if isinstance(val, bool) or not isinstance(val, (str, int, float)):
@@ -425,6 +463,10 @@ def _check_value(text: str, name: str, val, vtype: str) -> tuple[object, str]:
     if vtype == "number" and compact(value) != compact(val):
         # coerce() hat nur einen Teil uebernommen ("RE 2026 1" -> "RE")
         return None, "Nummer nicht eindeutig lesbar"
+    if vtype == "date":
+        grund = _datum_plausibel(value)
+        if grund:
+            return None, grund
     if not verify_in_text(text, value, vtype):
         return None, "nicht im PDF gefunden"
     return value, ""
@@ -500,6 +542,91 @@ _SUPPLIER_DETAIL_KEYS = {"lieferant_anschrift": "address_lines", "lieferant_bank
                          "lieferant_kontakt": "contact"}
 _LINE_KEYS = {"beschreibung": "text", "menge": "amount", "einzelpreis": "amount",
               "netto": "amount", "ust_satz": "amount"}
+
+
+# ---- Variante B, Positions-Block (SPEC Baustein 3, Schwerpunkt Aaron
+# 12.10.2026: "nur die Tabelle ist noch nicht gut") ---------------------
+# Eigener, kleiner Prompt NUR fuer die Positionstabelle -- der Prompt bekommt
+# NICHT die ganze Rechnung, sondern nur den Tabellenausschnitt
+# (``tabelle.tabelle_text``, Kopfzeile bis Summenblock). Kuerzerer Prompt als
+# Variante A heisst: kleineres ``num_ctx`` (``_dynamic_num_ctx``), also
+# schneller auf einem CPU-Laptop -- und ein kurzes Beispiel (few-shot) statt
+# nur einer Feldliste, damit das kleine Modell (qwen2.5:1.5b) das Tabellen-
+# Format auch ohne Vorlage trifft.
+_POSITIONEN_SCHEMA: dict = {
+    "type": "object",
+    "properties": {"positionen": {"type": "array", "items": {
+        "type": "object", "properties": {k: {"type": ["string", "number", "null"]}
+                                          for k in _LINE_KEYS}}}},
+    "additionalProperties": False,
+}
+
+_PROMPT_POSITIONEN = """Du liest NUR den Tabellenausschnitt einer Rechnung (Artikel/Leistungen mit \
+Mengen und Preisen) und gibst NUR ein JSON-Objekt zurueck, keinen Fliesstext.
+
+Gib jeden Wert GENAU so wieder, wie er im Ausschnitt steht -- nichts raten, nichts umrechnen, keine \
+Zwischensummen/Uebertraege als Position. Zeilen ohne erkennbaren Gesamtbetrag weglassen.
+
+Beispiel:
+Tabellenausschnitt:
+Beschreibung Menge Einzelpreis Gesamtpreis MwSt
+Ersatzteile Serie X200 1 550,00 550,00 19%
+Antwort: {{"positionen": [{{"beschreibung": "Ersatzteile Serie X200", "menge": 1, \
+"einzelpreis": 550.00, "netto": 550.00, "ust_satz": 19}}]}}
+
+Tabellenausschnitt:
+---
+{text}
+---
+
+JSON-Schema der Antwort:
+{schema}"""
+
+
+def _positions_block(table_text: str, verify_text: str, cfg) -> tuple[list[dict], dict[str, str]]:
+    """Variante B: Positionen separat erfragen, mit kleinerem Ausschnitt und
+    eigenem Few-Shot-Prompt statt im grossen Rundum-Prompt (Variante A)
+    untergebracht zu sein. Belegt wird wie ueberall gegen den VOLLEN Text
+    (``verify_text``), nie nur gegen den Ausschnitt -- Beleg-Pflicht gilt
+    unveraendert. Leer, wenn kein Tabellenausschnitt vorliegt oder die
+    Antwort nicht brauchbar war."""
+    rejected: dict[str, str] = {}
+    if not table_text.strip():
+        return [], rejected
+    prompt = _PROMPT_POSITIONEN.format(
+        text=table_text, schema=json.dumps(_POSITIONEN_SCHEMA, ensure_ascii=False))
+    parsed = _parse_json(_call(cfg, prompt, _POSITIONEN_SCHEMA))
+    if parsed is None:
+        return [], rejected
+    data = _validate(parsed, _POSITIONEN_SCHEMA, rejected)
+    out: list[dict] = []
+    dropped = 0
+    for it in data.get("positionen") or []:
+        item: dict = {}
+        for k, vtype in _LINE_KEYS.items():
+            if it.get(k) in (None, ""):
+                continue
+            item[k], ok = coerce(str(it[k]), vtype)
+            if not ok:
+                item.pop(k, None)
+        if item.get("netto") is None or not value_in_text(verify_text, item["netto"], "amount"):
+            dropped += 1
+            continue
+        item["_quelle"] = "llm"
+        out.append(item)
+    if dropped:
+        rejected["positionen"] = f"{dropped} Position(en) ohne belegten Betrag verworfen"
+    return out, rejected
+
+
+def positions_block(table_text: str, verify_text: str) -> tuple[list[dict], dict[str, str]]:
+    """Oeffentliche Form von ``_positions_block`` (Variante B, Baustein 3) --
+    prueft selbst, ob der Fallback aktiv/erreichbar ist (wie ``extract``/
+    ``extract_full``)."""
+    cfg = _llm_cfg()
+    if not cfg.enabled or not table_text.strip() or not available():
+        return [], {}
+    return _positions_block(table_text, verify_text, cfg)
 
 
 def _schema(with_lines: bool) -> dict:
@@ -698,7 +825,79 @@ def _extract_full_once(prompt_text: str, verify_text: str, cfg, schema: dict,
     elif want_lines and not res.line_items:
         # sichtbar machen statt still leer (Befund Aaron 12.10.2026)
         res.rejected["positionen"] = "KI hat keine Positionen geliefert"
+    _plausibilitaet_nach_extraktion(res)
     return res
+
+
+# Toleranz wie ``validate.check_line_items_total`` (0,02 Grundtoleranz + 0,01
+# je Position fuer Rundung) -- hier etwas grosszuegiger (0,02 je Position),
+# da eine KI-gelesene Tabelle mehr Rundungsstreuung hat als eine gerechnete.
+_POS_SUMME_TOL = 0.02
+
+
+def positionen_plausibel(items: list[dict], netto: float | None) -> tuple[list[dict], str | None]:
+    """SPEC Baustein 4 (Schwerpunkt Aaron 12.10.2026): KI-Positionen nur
+    behalten, wenn ihre Summe zum gelesenen Netto passt -- sonst lieber
+    keine Positionen als eine falsch summierende Tabelle. Oeffentlich, damit
+    sowohl die Rundum-Anfrage (Variante A, unten) als auch der separate
+    Positions-Block (Variante B, ``_positions_block``) dieselbe Pruefung
+    nutzen. Ohne bekanntes Netto wird nicht geprueft (kein Fehlurteil ohne
+    Vergleichswert) -> (Positionen oder [], Ablehnungsgrund oder ``None``)."""
+    if not items or netto is None:
+        return items, None
+    total = round(sum(it["netto"] for it in items if isinstance(it.get("netto"), (int, float))), 2)
+    tol = _POS_SUMME_TOL + 0.02 * len(items)
+    if abs(total - netto) > tol:
+        return [], (f"Positionssumme {total:.2f} passt nicht zu Netto {netto:.2f} "
+                    "-- Positionen verworfen")
+    return items, None
+
+
+def _plausibilitaet_nach_extraktion(res: "FullExtraction") -> None:
+    """Zusaetzlich zur Positionspruefung (``positionen_plausibel``): Netto/
+    USt-Betrag duerfen nicht groesser als Brutto sein, Faelligkeit nicht vor
+    dem Rechnungsdatum liegen -- jeweils verworfen statt stillschweigend
+    uebernommen."""
+    netto_fr = res.fields.get("netto")
+    if res.line_items and netto_fr is not None:
+        try:
+            netto_wert = float(netto_fr.value)
+        except (TypeError, ValueError):
+            netto_wert = None
+        items, grund = positionen_plausibel(res.line_items, netto_wert)
+        res.line_items = items
+        if grund:
+            res.rejected["positionen"] = grund
+
+    brutto_fr = res.fields.get("brutto")
+    if brutto_fr is not None:
+        try:
+            brutto_wert = float(brutto_fr.value)
+        except (TypeError, ValueError):
+            brutto_wert = None
+        if brutto_wert is not None:
+            for key in ("netto", "ust_betrag"):
+                fr = res.fields.get(key)
+                if fr is None:
+                    continue
+                try:
+                    wert = float(fr.value)
+                except (TypeError, ValueError):
+                    continue
+                if wert > brutto_wert + 0.02:
+                    res.rejected[key] = f"{wert:.2f} groesser als Brutto {brutto_wert:.2f} -- verworfen"
+                    res.fields.pop(key, None)
+
+    fael_fr, datum_fr = res.fields.get("faelligkeit"), res.fields.get("rechnungsdatum")
+    if fael_fr is not None and datum_fr is not None:
+        try:
+            vor = date.fromisoformat(str(fael_fr.value)) < date.fromisoformat(str(datum_fr.value))
+        except ValueError:
+            vor = False
+        if vor:
+            res.rejected["faelligkeit"] = (
+                f"{fael_fr.value} liegt vor dem Rechnungsdatum {datum_fr.value} -- verworfen")
+            res.fields.pop("faelligkeit", None)
 
 
 def extract_full(text: str, want_line_items: bool | None = None) -> FullExtraction:
