@@ -258,6 +258,14 @@ def test_plain_pdf_is_not_einvoice(tmp_path):
     assert einvoice.load(p) is None
 
 
+def test_ignore_env_switches_off_stufe_0(tmp_path, monkeypatch):
+    p = tmp_path / "re.xml"
+    p.write_bytes(cii())
+    assert einvoice.load(p) is not None
+    monkeypatch.setenv(einvoice.IGNORE_ENV, "1")
+    assert einvoice.load(p) is None
+
+
 # ---------------------------------------------------------------- Pipeline
 
 def test_xrechnung_xml_known_supplier_is_auto(tmp_path, store):

@@ -20,11 +20,18 @@ noch externe Entities. Zusaetzlich eine Groessengrenze.
 
 from __future__ import annotations
 
+import os
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
 MAX_XML_BYTES = 100 * 1024 * 1024   # Peppol-"Large Invoice" mit eingebetteten Anhaengen ~25 MB
+
+# Nur fuer die Korpus-Messung (tools/korpus_bericht.py, Baustein 2): Stufe 0
+# abschalten, um zu messen, wie gut reines PDF-Lesen (Text/Tabelle/KI) ohne
+# das eingebettete XML waere -- wie bei einem Scan/Ausdruck ohne E-Rechnung.
+# Im echten Betrieb nie gesetzt.
+IGNORE_ENV = "RECHNUNG_IGNORE_EINVOICE"
 
 # Dateinamen eingebetteter Rechnungs-XML laut ZUGFeRD-/Factur-X-Spezifikation
 # (Gross-/Kleinschreibung variiert in freier Wildbahn).
@@ -142,6 +149,8 @@ def embedded_xml(path: str | Path) -> tuple[str, bytes] | None:
 
 def load(path: str | Path) -> EInvoice | None:
     """Datei (``.xml`` oder ``.pdf``) -> EInvoice, sonst None."""
+    if os.environ.get(IGNORE_ENV) == "1":
+        return None
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix == ".xml":
