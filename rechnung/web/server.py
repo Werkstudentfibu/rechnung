@@ -22,6 +22,7 @@ from .. import einvoice
 from .. import eventlog
 from .. import human
 from .. import jobrouter
+from .. import keine_rechnung
 from .. import learn
 from .. import pdf as pdfmod
 from .. import positionen
@@ -342,7 +343,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
 
     def _resolve(file: str) -> Path:
         """Erst der Eingangsordner, dann die Arbeitskopien im Ordner
-        "Menschliche Bearbeitung" (human.py)."""
+        "Menschliche Bearbeitung" (human.py), dann im Ordner "Keine
+        Rechnung" (keine_rechnung.py) -- fuer die Vorschau dort."""
         name = human.file_name(file)
         p = (samples / name).resolve()
         if p.exists() and samples.resolve() in p.parents:
@@ -350,6 +352,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         hp = human.datei_pfad(store, name)
         if hp is not None:
             return hp
+        kp = keine_rechnung.datei_pfad(store, name)
+        if kp is not None:
+            return kp
         raise HTTPException(404, "Datei nicht gefunden")
 
     def _address_scope(doc, override: str | None = None):
@@ -1581,6 +1586,62 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         (Gruende, betroffene Felder, Vorschlagswerte mit Herkunft)."""
         return JSONResponse({"ordner": str(human.human_dir(store.root)),
                              "offen": human.offen(store)})
+
+    # ---- Ordner "Keine Rechnung" (Entscheidung Aaron 14.10.2026) -------
+    @app.get("/api/keine-rechnung")
+    def keine_rechnung_ep() -> JSONResponse:
+        """Ordner "Keine Rechnung": aussortierte Dokumente (Datei, Grund,
+        Absender/Betreff, Zeitpunkt)."""
+        return JSONResponse({"ordner": str(keine_rechnung.ordner(store.root)),
+                             "offen": keine_rechnung.offen(store)})
+
+    @app.post("/api/keine-rechnung/zurueck")
+    def keine_rechnung_zurueck(body: dict) -> JSONResponse:
+        """Knopf "Doch eine Rechnung": die Regel lag falsch -- Datei zurueck
+        in den Eingang, wird normal verarbeitet (zaehlt als
+        Fehlsortierung)."""
+        from ..config import operator as _operator
+
+        rec = keine_rechnung.zurueck_in_eingang(store, body.get("sha256", ""), samples,
+                                                operator=_operator())
+        if rec is None:
+            raise HTTPException(404, "Nicht im Ordner 'Keine Rechnung' gefunden")
+        return JSONResponse(rec)
+
+    @app.post("/api/keine-rechnung/von-hand")
+    def keine_rechnung_von_hand(body: dict) -> JSONResponse:
+        """Knopf "Keine Rechnung" in der Pruefmaske einer offenen Rechnung
+        (Ordner "Menschliche Bearbeitung"): der Mensch sortiert von Hand
+        aus."""
+        from ..config import operator as _operator
+
+        rec = keine_rechnung.von_hand_aussortieren(store, body.get("file", ""),
+                                                   operator=_operator())
+        if rec is None:
+            raise HTTPException(404, "Nicht in 'Menschliche Bearbeitung' gefunden")
+        return JSONResponse(rec)
+
+    @app.get("/api/keine-rechnung/datei")
+    def keine_rechnung_datei(file: str) -> Response:
+        """Vorschau/Download einer aussortierten Datei (PDF inline, .eml/.txt
+        als Download) -- bewusst ein eigener, einfacher Endpunkt statt der
+        vollen Rechnungs-Pruefmaske: diese Dateien sind keine Rechnungen."""
+        p = keine_rechnung.datei_pfad(store, file)
+        if p is None:
+            raise HTTPException(404, "Datei nicht gefunden")
+        media = "application/pdf" if p.suffix.lower() == ".pdf" else "application/octet-stream"
+        return Response(p.read_bytes(), media_type=media)
+
+    @app.post("/api/keine-rechnung/loeschen")
+    def keine_rechnung_loeschen(body: dict) -> JSONResponse:
+        """Endgueltig loeschen (Nachtrag 14.10.2026) -- einzeln oder
+        Mehrfachauswahl. Bestaetigung passiert im UI vor diesem Aufruf."""
+        from ..config import operator as _operator
+
+        namen = body.get("namen") or ([body["name"]] if body.get("name") else [])
+        if not namen:
+            raise HTTPException(400, "Kein Dateiname angegeben")
+        return JSONResponse(keine_rechnung.loeschen(store, namen, operator=_operator()))
 
     @app.get("/api/shadow")
     def shadow_stats() -> JSONResponse:

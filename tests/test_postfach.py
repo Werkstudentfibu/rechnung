@@ -9,7 +9,7 @@ from email.message import EmailMessage
 
 import pytest
 
-from rechnung import human, ingest
+from rechnung import human, ingest, keine_rechnung
 from rechnung.config import ImapConfig
 from rechnung.store import Store
 
@@ -83,22 +83,24 @@ def _run(fake, cfg, store, inbox, monkeypatch):
     return ingest.fetch(cfg, inbox, store=store)
 
 
-def test_mail_ohne_anhang_geht_an_mensch_nicht_verloren(env, monkeypatch):
+def test_mail_ohne_anhang_geht_nicht_verloren(env, monkeypatch):
     """Regression: Mail ohne Anhang wurde per RFC822 als gelesen markiert und
-    dann uebersprungen -> nie wieder gesehen."""
+    dann uebersprungen -> nie wieder gesehen. Seit Entscheidung Aaron
+    14.10.2026 landet eine Mail ganz ohne Anhang/Rechnungs-Hinweis im Ordner
+    "Keine Rechnung", nicht mehr bei "Menschliche Bearbeitung"."""
     cfg, store, inbox = env
     fake = FakeImap({b"1": _mail("Guten Tag, kurze Rueckfrage zu Ihrem Angebot.",
                                  subject="Rueckfrage")})
     res = _run(fake, cfg, store, inbox, monkeypatch)
     assert all("PEEK" in c for c in fake.fetch_cmds)
     assert res.mails == 1 and res.saved == []
-    offen = human.offen(store)
+    assert human.offen(store) == []
+    offen = keine_rechnung.offen(store)
     assert len(offen) == 1
     rec = offen[0]
     assert rec["datei"].endswith(".eml")
-    assert rec["gruende"][0]["grund"] == ingest.MAIL_OHNE_ANHANG
-    assert rec["gruende"][0]["art"] == human.ART_MAIL
-    eml = human.human_dir(store.root) / rec["datei"]
+    assert rec["grund"] == ingest.MAIL_OHNE_ANHANG
+    eml = keine_rechnung.ordner(store.root) / rec["datei"]
     assert eml.read_bytes() == fake.mails[b"1"]
     # erst nach dem Ablegen gelesen markiert
     assert "\\Seen" in fake.flags[b"1"]
@@ -148,7 +150,8 @@ def test_nicht_verwertbarer_anhang_wird_genannt(env, monkeypatch):
     fake = FakeImap({b"4": _mail(attachments=[("angebot.docx", b"PK..", "application/msword")],
                                  subject="Angebot")})
     _run(fake, cfg, store, inbox, monkeypatch)
-    grund = human.offen(store)[0]["gruende"][0]["grund"]
+    assert human.offen(store) == []
+    grund = keine_rechnung.offen(store)[0]["grund"]
     assert grund.startswith(ingest.MAIL_OHNE_ANHANG) and "angebot.docx" in grund
 
 
@@ -181,4 +184,4 @@ def test_gleiche_mail_zweimal_nur_ein_eintrag(env, monkeypatch):
     raw = _mail("Nur ein Gruss.", subject="Hallo")
     for _ in range(2):
         _run(FakeImap({b"1": raw}), cfg, store, inbox, monkeypatch)
-    assert len(human.offen(store)) == 1
+    assert len(keine_rechnung.offen(store)) == 1

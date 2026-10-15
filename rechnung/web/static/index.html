@@ -180,6 +180,11 @@
   .chk.ok { color: #389e0d; } .chk.bad { color: #cf1322; } .chk.na { color: #888; }
   .chk.warn { color: #ad6800; background: #fffbe6; padding: 0 4px; border-radius: 3px; }
   .li-col { display: inline-block; background: #eef4fb; border: 1px solid #cfe0f4; border-radius: 4px; padding: 2px 6px; margin: 2px; }
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+  .modal-box { background: #fff; border-radius: 8px; padding: 18px 22px; max-width: 480px; box-shadow: 0 4px 24px rgba(0,0,0,.25); }
+  .modal-box h3 { margin: 0 0 8px; color: #b22; }
+  .modal-box .files { margin: 8px 0; max-height: 160px; overflow: auto; font-size: 13px; background: #fafafa; border: 1px solid #eee; border-radius: 4px; padding: 6px 8px; }
+  .modal-box .actions { margin-top: 14px; text-align: right; }
 </style>
 </head>
 <body>
@@ -187,6 +192,7 @@
   <b>Rechnung</b>
   <button id="nav-scan" class="active" onclick="show('scan')">Rechnungen</button>
   <button id="nav-human" onclick="show('human')">Menschliche Bearbeitung <span id="human-count"></span></button>
+  <button id="nav-keine-rechnung" onclick="show('keine-rechnung')">Keine Rechnung <span id="keine-rechnung-count"></span></button>
   <button id="nav-suppliers" onclick="show('suppliers')">Lieferanten <span id="sup-unconfirmed-count"></span></button>
   <button id="nav-addresses" onclick="show('addresses')">Rechnungsadressen</button>
   <button id="nav-categories" onclick="show('categories')">Kategorien</button>
@@ -220,6 +226,17 @@
       prüfen/korrigieren und bestätigen: die Rechnung verlässt die Liste, das Programm lernt
       daraus und kann die nächste Rechnung dieses Lieferanten selbst.</p>
     <div id="human-table"></div>
+  </div>
+
+  <div id="v-keine-rechnung" class="view pane">
+    <h2>Keine Rechnung</h2>
+    <p class="hint">Dokumente, die das Programm anhand woertlicher Merkmale (Titel/Beschriftung,
+      kein Rechnungsnummer-/Summen-Label) als <b>keine Rechnung</b> erkannt hat -- Lieferscheine,
+      Angebote, AGB, Mails ganz ohne Rechnungsanhang ... (Ordner <code id="keine-rechnung-dir"></code>).
+      War die Regel falsch, „Doch eine Rechnung“ -- die Datei geht zurueck in den Eingang und wird
+      normal verarbeitet. Hier darf auch endgueltig geloescht werden (das Postfach selbst wird dabei
+      nie angefasst).</p>
+    <div id="keine-rechnung-table"></div>
   </div>
 
   <div id="v-suppliers" class="view pane">
@@ -354,6 +371,7 @@ function show(v) {
   document.querySelectorAll('header button').forEach(e => e.classList.remove('active'));
   $('#nav-'+v).classList.add('active');
   if (v === 'human') loadHuman();
+  if (v === 'keine-rechnung') loadKeineRechnung();
   if (v === 'suppliers') loadSuppliers();
   if (v === 'addresses') loadAddresses();
   if (v === 'categories') loadCategories();
@@ -373,6 +391,8 @@ async function loadList() {
   $('#stats').textContent = `${d.results.length} PDF · ${auto} auto`;
   api('/api/menschlich').then(h =>
     $('#human-count').textContent = h.offen.length ? `(${h.offen.length})` : '');
+  api('/api/keine-rechnung').then(k =>
+    $('#keine-rechnung-count').textContent = k.offen.length ? `(${k.offen.length})` : '');
   loadModus();
   LIST_FILES = d.results.map(r => r.file);
   const list = $('#list'); list.innerHTML = '';
@@ -993,6 +1013,7 @@ function renderInvoice(d) {
     <button class="ghost" onclick="addCustomField()">+ eigenes Feld</button>
     <button class="ghost" onclick="toggleLi()">Positionstabelle ${STATE.li.active ? 'ausblenden' : 'anlernen'}</button>
     <button class="ghost danger" onclick="ausEingangEntfernen()" title="Z.B. Testmail oder Spam – wird nicht gelöscht, sondern nach data\\entfernt verschoben">Aus Eingang entfernen</button>
+    <button class="ghost danger" onclick="keineRechnungVonHand()" title="Diese Rechnung ist gar keine Rechnung (z.B. Lieferschein/Angebot) – von Hand in den Ordner 'Keine Rechnung' verschieben">Keine Rechnung</button>
     <div class="hint">Feld anklicken, dann in der Rechnung Wort anklicken (weitere dazu/weg) oder Rahmen um mehrere Wörter ziehen = Wert ins Feld (wird gelernt) · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = senden + nächste' : ''}</div>
     <div id="msg" class="hint"></div>`;
   fbox.appendChild(bar);
@@ -2243,6 +2264,18 @@ async function ausEingangEntfernen() {
   loadList();
 }
 
+async function keineRechnungVonHand() {
+  if (!STATE.file) return;
+  if (!confirm(`„${STATE.file}“ ist keine Rechnung (z.B. Lieferschein/Angebot) und soll in den Ordner 'Keine Rechnung' verschoben werden?`)) return;
+  const r = await fetch('/api/keine-rechnung/von-hand', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file }) });
+  if (!r.ok) { alert('Nicht möglich: ' + ((await r.json()).detail || r.status)); return; }
+  STATE.file = null;
+  $('#work').innerHTML = '<p class="hint">Als "keine Rechnung" aussortiert. Links eine Rechnung wählen.</p>';
+  loadList();
+  loadKeineRechnung();
+}
+
 async function postfachBericht() {
   show('scan');
   const w = $('#work'); w.className = '';
@@ -2391,6 +2424,84 @@ async function loadHuman() {
     t.appendChild(tr);
   }
   $('#human-table').innerHTML = ''; $('#human-table').appendChild(t);
+}
+
+/* ================= Keine Rechnung (Entscheidung Aaron 14.10.2026) ======= */
+async function loadKeineRechnung() {
+  const d = await api('/api/keine-rechnung');
+  $('#keine-rechnung-dir').textContent = d.ordner;
+  $('#keine-rechnung-count').textContent = d.offen.length ? `(${d.offen.length})` : '';
+  if (!d.offen.length) {
+    $('#keine-rechnung-table').innerHTML = '<p class="hint">Nichts aussortiert.</p>';
+    return;
+  }
+  const t = document.createElement('table');
+  t.innerHTML = `<tr><th><input type="checkbox" onchange="krToggleAll(this)"></th>
+    <th>Datei</th><th>Grund</th><th>Absender/Betreff</th><th>seit</th><th></th></tr>`;
+  for (const r of d.offen) {
+    const herk = r.herkunft || {};
+    const absender = [herk.von, herk.betreff].filter(Boolean).join(' – ');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><input type="checkbox" class="kr-sel" value="${esc(r.datei)}"></td>
+      <td><a href="/api/keine-rechnung/datei?file=${encodeURIComponent(r.datei)}" target="_blank">${esc(r.datei)}</a></td>
+      <td>${esc(r.grund || '')}${r.beschriftung ? `<br><span class="hint">erkannt als „${esc(r.beschriftung)}“</span>` : ''}</td>
+      <td>${esc(absender)}</td>
+      <td>${esc((r.abgelegt || '').slice(0, 16).replace('T', ' '))}</td>
+      <td><button class="ghost" onclick="keineRechnungZurueck('${esc(r.sha256)}')" title="Die Regel lag falsch">Doch eine Rechnung</button>
+          <button class="danger" onclick="keineRechnungLoeschen(['${esc(r.datei)}'])">Löschen</button></td>`;
+    t.appendChild(tr);
+  }
+  $('#keine-rechnung-table').innerHTML = '';
+  $('#keine-rechnung-table').appendChild(t);
+  const bar = document.createElement('div'); bar.className = 'actionbar';
+  bar.innerHTML = `<button class="danger" onclick="krLoeschenAusgewaehlte()">Ausgewählte löschen</button>`;
+  $('#keine-rechnung-table').appendChild(bar);
+}
+
+function krToggleAll(cb) {
+  document.querySelectorAll('.kr-sel').forEach(x => x.checked = cb.checked);
+}
+
+async function keineRechnungZurueck(sha256) {
+  if (!confirm('Doch eine Rechnung? Die Datei geht zurück in den Eingang und wird normal verarbeitet.')) return;
+  const r = await fetch('/api/keine-rechnung/zurueck', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sha256 }) });
+  if (!r.ok) { alert('Nicht möglich: ' + ((await r.json()).detail || r.status)); return; }
+  loadKeineRechnung();
+  loadList();
+}
+
+function keineRechnungLoeschen(namen) {
+  // Eigener Dialog statt confirm(): hier endgueltig geloescht wird, soll
+  // sichtbar bleiben WELCHE Dateien betroffen sind (Nachtrag 14.10.2026).
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-box">
+      <h3>Endgültig löschen?</h3>
+      <p>${namen.length} Datei(en) werden unwiderruflich aus dem Ordner „Keine Rechnung“ entfernt.
+         Das Postfach selbst wird dabei nicht verändert.</p>
+      <div class="files">${namen.map(esc).join('<br>')}</div>
+      <div class="actions">
+        <button class="ghost" id="kr-del-abbrechen">Abbrechen</button>
+        <button class="danger" id="kr-del-bestaetigen">Endgültig löschen</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#kr-del-abbrechen').onclick = () => overlay.remove();
+  overlay.querySelector('#kr-del-bestaetigen').onclick = async () => {
+    const r = await fetch('/api/keine-rechnung/loeschen', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ namen }) });
+    overlay.remove();
+    if (!r.ok) { alert('Löschen nicht möglich: ' + ((await r.json()).detail || r.status)); return; }
+    loadKeineRechnung();
+  };
+}
+
+function krLoeschenAusgewaehlte() {
+  const namen = [...document.querySelectorAll('.kr-sel:checked')].map(x => x.value);
+  if (!namen.length) { alert('Nichts ausgewählt.'); return; }
+  keineRechnungLoeschen(namen);
 }
 
 /* ================= Lieferanten ================= */

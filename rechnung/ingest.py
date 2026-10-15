@@ -245,6 +245,12 @@ class MailOutcome:
     # kein eigener Beleg, sondern an jeden Beleg dieser Mail gehaengt
     # (Postfach-Baustein 8): (Dateiname, Inhalt, Anlagenart)
     anlagen: list[tuple[str, bytes, str]] = field(default_factory=list)
+    # Nicht-Rechnung aussortieren (keine_rechnung.py, Entscheidung Aaron
+    # 14.10.2026): True, wenn ``human_reason`` NICHT nach "Menschliche
+    # Bearbeitung" soll, sondern in den Ordner "Keine Rechnung" -- Mail ganz
+    # ohne Anhang/Rechnungs-Hinweis, oder Mail deren Anhaenge ALLE eindeutig
+    # Nicht-Beleg sind (kein einziger unzuordenbarer/Beleg-Anhang dabei).
+    keine_rechnung: bool = False
 
 
 def _classify_attachment(att: Attachment) -> tuple[str, str | None, str]:
@@ -327,6 +333,13 @@ def analyse_mail(raw: bytes, extensions: tuple[str, ...] = (".pdf",)) -> MailOut
             zusatz = f" (nur: {', '.join(teile)})" if teile else \
                 " (nicht zuzuordnen)" if unklar else ""
             out.human_reason = MAIL_OHNE_BELEG_ANHANG + zusatz
+            if anlage and not unklar:
+                # ALLE Anhaenge eindeutig als Nicht-Beleg beschriftet (AGB,
+                # Lieferschein, ...) und kein einziger unzuordenbarer Anhang
+                # dabei (der koennte eine Rechnung sein) -> aussortieren statt
+                # "Menschliche Bearbeitung" (Entscheidung Aaron 14.10.2026).
+                out.keine_rechnung = True
+                out.anlagen = anlage
             return out
         out.attachments = beleg
         out.anlagen = anlage
@@ -345,7 +358,12 @@ def analyse_mail(raw: bytes, extensions: tuple[str, ...] = (".pdf",)) -> MailOut
         out.human_reason = MAIL_TEXT_RECHNUNG
         out.body_text = body
     else:
+        # Mail ganz ohne Anhang und ohne Rechnungs-Hinweis im Text ->
+        # aussortieren statt "Menschliche Bearbeitung" (Entscheidung Aaron
+        # 14.10.2026) -- anders als MAIL_NUR_LINK/MAIL_TEXT_RECHNUNG oben,
+        # die eine Rechnung sein KOENNTEN.
         out.human_reason = MAIL_OHNE_ANHANG
+        out.keine_rechnung = True
     if out.ignored:
         out.human_reason += " (nicht verwertbare Anhaenge: " + ", ".join(out.ignored) + ")"
     return out
@@ -488,6 +506,7 @@ def handle_mail(raw: bytes, cfg: ImapConfig, dest: Path, store=None,
     gelesen markiert werden."""
     from . import anlagen as anlagen_mod
     from . import human
+    from . import keine_rechnung
     from .store import Store
 
     out = analyse_mail(raw, cfg.extensions)
@@ -519,6 +538,22 @@ def handle_mail(raw: bytes, cfg: ImapConfig, dest: Path, store=None,
     if out.human_reason:
         if dry_run:
             to_human.append(f"(dry) {out.human_reason} <- {out.from_addr}")
+        elif out.keine_rechnung and keine_rechnung.aktiv():
+            store = store or Store(data_dir())
+            if out.anlagen:
+                # ALLE Anhaenge eindeutig Nicht-Beleg -- jeder einzeln (plus
+                # die Mail als .eml-Beilage), damit im Ordner "Keine
+                # Rechnung" sichtbar bleibt, welche Datei es war.
+                for fname, content, art in out.anlagen:
+                    rec = keine_rechnung.ablegen_datei(
+                        store, fname, content, grund=out.human_reason, beschriftung=art,
+                        beilagen={".eml": raw}, herkunft=herkunft)
+                    to_human.append(f"{rec['datei'] if rec else fname}: {out.human_reason}")
+            else:
+                name = _mail_name(out)
+                rec = keine_rechnung.ablegen_datei(
+                    store, name + ".eml", raw, grund=out.human_reason, herkunft=herkunft)
+                to_human.append(f"{rec['datei'] if rec else name}: {out.human_reason}")
         else:
             store = store or Store(data_dir())
             grund = [{"art": human.ART_MAIL, "grund": out.human_reason, "felder": []}]

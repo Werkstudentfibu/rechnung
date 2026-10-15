@@ -83,6 +83,13 @@ ANLAGEN: dict[str, tuple[str, ...]] = {
     "Anschreiben": ("anschreiben", "begleitschreiben", "cover-letter"),
     "Widerrufsbelehrung": ("widerrufsbelehrung", "widerruf", "datenschutz",
                            "datenschutzerklaerung", "privacy"),
+    # Erweiterung Nicht-Rechnung-Aussortierung (Entscheidung Aaron
+    # 14.10.2026): nur woertliche Treffer, mit eigenen Tests.
+    "Newsletter": ("newsletter", "rundschreiben", "mailing"),
+    "Werbung": ("werbung", "werbeschreiben", "advertisement", "promotion", "aktion",
+               "sonderangebot"),
+    "Kontoauszug": ("kontoauszug", "bankauszug", "account-statement", "statement-of-account"),
+    "Vertrag": ("vertrag", "vertragsunterlagen", "contract", "agreement", "vereinbarung"),
 }
 
 _BEZUG_RE = re.compile(

@@ -120,6 +120,32 @@ def _draw_items_table(c: canvas.Canvas, h: float, y_top: float, items: list[dict
     return y - 4 * mm
 
 
+def make_plain_doc(path: str | Path, *, titel: str, zeilen: list[str] | None = None,
+                   seite2_titel: str | None = None) -> Path:
+    """Einfaches PDF nur mit Titelzeile + ein paar Textzeilen -- fuer Tests
+    rund um "Nicht-Rechnung aussortieren" (Lieferschein, Angebot, ...), ohne
+    den ganzen Aufbau von ``make_invoice``. ``seite2_titel``: optional eine
+    zweite Seite mit eigenem Titel (Test "Rechnung + Lieferschein in einem
+    PDF" -- ``dubletten.title_text`` sieht ohnehin nur Seite 1)."""
+    path = Path(path)
+    c = canvas.Canvas(str(path), pagesize=A4)
+    w, h = A4
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(20 * mm, h - 25 * mm, titel)
+    c.setFont("Helvetica", 10)
+    y = h - 45 * mm
+    for zeile in zeilen or []:
+        c.drawString(20 * mm, y, zeile)
+        y -= 7 * mm
+    c.showPage()
+    if seite2_titel:
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(20 * mm, h - 25 * mm, seite2_titel)
+        c.showPage()
+    c.save()
+    return path
+
+
 def make_invoice(path: str | Path, *, lieferant="Muster Handels GmbH",
                  strasse="Industriestr. 5", ort="50667 Koeln",
                  ustid="DE123456789", iban="DE89370400440532013000",

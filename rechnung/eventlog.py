@@ -37,6 +37,11 @@ HUMAN_PLACED = "abgelegt"
 HUMAN_DONE = "erledigt"
 # Lieferanten-Entwurf (pipeline.confirm_supplier/discard_supplier)
 TYPE_SUPPLIER = "lieferant"
+# Ordner "Keine Rechnung" (keine_rechnung.py, Entscheidung Aaron 14.10.2026)
+TYPE_KEINE_RECHNUNG = "keine_rechnung"
+KR_AUSSORTIERT = "aussortiert"
+KR_ZURUECKGEHOLT = "zurueckgeholt"       # "Doch eine Rechnung" -- Fehlsortierung
+KR_GELOESCHT = "geloescht"               # Nachtrag 14.10.2026: endgueltig geloescht
 
 # wie viele Beispiel-Rechnungen je Haeufungs-Gruppe im Fehlerbericht stehen
 MAX_EXAMPLES = 5
@@ -127,6 +132,26 @@ def record_human(store, rec: dict, aktion: str, operator: str = "") -> dict:
                     for g in rec.get("gruende") or []],
         "korrigiert": rec.get("korrigiert") or [],
         "freigabe": rec.get("freigabe"),
+        "operator": operator or "?",
+    }
+    store.event_append(ev)
+    return ev
+
+
+def record_keine_rechnung(store, rec: dict, aktion: str, operator: str = "") -> dict:
+    """Ordner "Keine Rechnung" (keine_rechnung.py): ein Dokument wurde
+    aussortiert (``KR_AUSSORTIERT``), zurueckgeholt (``KR_ZURUECKGEHOLT`` --
+    die Regel lag falsch, zaehlt als Fehlsortierung) oder endgueltig
+    geloescht (``KR_GELOESCHT``, Nachtrag 14.10.2026) -- ohne Inhalt."""
+    ev = {
+        "type": TYPE_KEINE_RECHNUNG,
+        "aktion": aktion,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "sha256": rec.get("sha256"),
+        "file": rec.get("datei", ""),
+        "grund": rec.get("grund"),
+        "beschriftung": rec.get("beschriftung"),
+        "herkunft": (rec.get("herkunft") or {}).get("quelle"),
         "operator": operator or "?",
     }
     store.event_append(ev)

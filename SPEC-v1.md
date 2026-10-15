@@ -1348,6 +1348,81 @@ Entscheidung Aaron 10.10.2026 ("alle 5 Punkte"). Reiter "Qualität" im UI.
    Rechnungen und Anteil ≥ 0,5, Empfehlung je Feldart. Im Nachtlauf-Bericht
    (`fehlerstatistik`) und in `rechnung nacht` (Top 5).
 
+## 7ad. Nicht-Rechnungen aussortieren (Entscheidung Aaron 14.10.2026, Nachtrag 18:14)
+
+`rechnung/keine_rechnung.py`. Vorgabe: "Dokumente, die keine Rechnungen
+sind, werden in einen Ordner aussortiert" -- bis dahin landeten sie
+gemischt mit echten Problemrechnungen in "Menschliche Bearbeitung"; dort
+sollen nur noch Rechnungen liegen, an denen ein Mensch etwas tun muss.
+Grundsatz wie bei §7u: **nur woertliche, nachvollziehbare Regeln, keine
+KI-Entscheidung**; eine echte Rechnung darf nie hier landen -- im Zweifel
+bleibt alles wie bisher bei "Menschliche Bearbeitung" (Fehlalarm-Freiheit
+vor Abdeckung). Schalter `RECHNUNG_KEINE_RECHNUNG_ORDNER=0` (`aktiv()`)
+schaltet exakt auf das alte Verhalten zurueck. Ordner `RECHNUNG_KEINE_RECHNUNG`,
+Standard `<data>/keine-rechnung/` -- ein normaler Dateiordner wie
+`menschlich/`.
+
+Zwei Quellen:
+
+- **Postfach** (`ingest.analyse_mail`/`handle_mail`): `MailOutcome.keine_rechnung`
+  wird gesetzt bei einer Mail ganz ohne Anhang und ohne Rechnungs-Hinweis im
+  Text (Grund `MAIL_OHNE_ANHANG`; **nicht** bei `MAIL_TEXT_RECHNUNG`/
+  `MAIL_NUR_LINK` -- die koennten eine Rechnung sein), oder bei einer Mail,
+  deren Anhaenge ALLE eindeutig als Nicht-Beleg beschriftet sind
+  (`belegart.ANLAGEN`, erweitert um Newsletter, Werbung, Kontoauszug,
+  Vertrag) und kein einziger unzuordenbarer/Beleg-Anhang dabei ist (sonst
+  bleibt die ganze Mail bei "Menschliche Bearbeitung" -- ein unklarer Anhang
+  koennte eine Rechnung sein). Anlagen, die neben einem echten Beleg in
+  derselben Mail stecken, bleiben wie in §Postfach-Baustein 8 am Beleg.
+- **Pipeline** (`pipeline._process`, `keine_rechnung.pruefe_pipeline`, vor
+  Lieferant/Vorlage/KI): ALLE Bedingungen muessen zutreffen -- Titelbereich
+  Seite 1 traegt eine bekannte Nicht-Beleg-Beschriftung
+  (`belegart.anlage_aus_titel`), KEINE Belegart im Titel
+  (`belegart.aus_titel`), kein Schweizer QR-Zahlteil, und weder eine
+  Rechnungsnummer hinter einem Rechnungs-Label noch ein Bruttobetrag hinter
+  einem Summen-Label (`summen.summen_aus_kontext`) im ganzen Text gefunden.
+  Neuer `Result.status = KEINE_RECHNUNG`. Jeder Zweifel -> `None`, normaler
+  Weg.
+
+Ablegen (`ablegen_pipeline`/`ablegen_datei`, aufgerufen aus
+`pipeline.dispatch` bzw. `ingest.handle_mail`): Datei (bei der Pipeline aus
+dem Eingang verschoben, nicht kopiert -- es ist keine Rechnung) + Begleitdatei
+`<datei>.grund.json` (sha256, Grund, erkannte Beschriftung, bei Mails
+Absender/Betreff/Message-ID, Zeitpunkt), Audit + Ereignis
+(`eventlog.TYPE_KEINE_RECHNUNG`, Aktion `KR_AUSSORTIERT`) im
+Ereignisprotokoll. Geht nicht an JobRouter. Tagesbericht
+(`nightly.tagesbericht`): `nicht_rechnung_aussortiert` + `nicht_rechnung_liste`.
+
+Bedienung (Web-UI, Reiter "Keine Rechnung", `GET /api/keine-rechnung`):
+Liste (Datei, Grund, Absender/Betreff, Zeitpunkt), Vorschau
+(`GET /api/keine-rechnung/datei`). Knopf **"Doch eine Rechnung"**
+(`POST /api/keine-rechnung/zurueck`, `zurueck_in_eingang`) -- die Regel lag
+falsch: Datei zurueck in den Eingang, wird normal verarbeitet, Ereignis
+`KR_ZURUECKGEHOLT`, zaehlt im Tagesbericht als `fehlsortierungen`. Knopf
+**"Keine Rechnung"** in der Pruefmaske einer offenen Rechnung
+(`POST /api/keine-rechnung/von-hand`, `von_hand_aussortieren`, mit
+Bestaetigungsdialog im UI) -- Mensch sortiert von Hand aus, verlaesst
+`menschlich/`, landet hier mit Grund "von Hand aussortiert (<Bearbeiter>)".
+
+Nachtrag (Aaron 14.10.2026, 18:14): "Das reicht im Programm ... aber man
+soll sie loeschen koennen." Knopf **"Loeschen"** je Eintrag plus
+Mehrfachauswahl "Ausgewaehlte loeschen" (`POST /api/keine-rechnung/loeschen`,
+`loeschen`), eigener Bestaetigungsdialog im UI mit Dateiliste. Entfernt Datei
++ Begleitdatei + Beilagen endgueltig -- das ersetzt "nie loeschen" aus §7u
+NUR fuer diesen Ordner, nirgends sonst; das Postfach (IONOS/IMAP) wird dabei
+nicht angefasst. Protokoll bleibt trotzdem: Ereignis/Audit
+`KR_GELOESCHT`/`keine_rechnung_geloescht` mit Dateiname, sha256, Grund,
+Bearbeiter, Zeitpunkt (ohne Inhalt); Tagesbericht `nicht_rechnung_geloescht`.
+Sicherheitsnetz `keine_rechnung._sicherer_pfad`: loeschen nur fuer Dateien,
+die tatsaechlich in diesem Ordner liegen (kein Path-Traversal ueber die API);
+eine Datei mit demselben sha256 im Archiv/als verarbeitete Rechnung bleibt
+unberuehrt.
+
+Bekannte Grenzen: ein unzuordenbarer Postfach-Anhang bleibt bewusst bei
+"Menschliche Bearbeitung" (koennte eine Rechnung sein); die Beschriftungsliste
+(`belegart.ANLAGEN`) ist nicht vollstaendig -- unbekannte Formulierungen
+landen weiterhin normal bei "Menschliche Bearbeitung", nicht faelschlich hier.
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).
