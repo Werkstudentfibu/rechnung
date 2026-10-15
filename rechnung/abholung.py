@@ -20,12 +20,20 @@ from typing import Callable
 
 class Abholer:
     def __init__(self, dest: Path, minuten: float, fetch: Callable | None = None,
-                 bei_neuen: Callable | None = None):
+                 bei_neuen: Callable | None = None,
+                 mailboxes: list[tuple[str, object, str | None]] | None = None,
+                 store=None):
         self.dest = Path(dest)
         # z.B. Vorverarbeitung im Hintergrund anstossen (vorverarbeitung.py)
         self.bei_neuen = bei_neuen
         self.minuten = minuten
         self._fetch = fetch
+        # Mehrere Postfaecher (Entscheidung Aaron 15.10.2026, ~50 IONOS-
+        # Postfaecher): [(Anzeigename, ImapConfig, Mandant-Id oder None)].
+        # ``None`` (Standardfall, ein einzelnes ENV-Postfach) laesst das
+        # Verhalten/den Status-Umfang unveraendert wie vor dieser Erweiterung.
+        self.mailboxes = mailboxes
+        self.store = store
         self._lock = threading.Lock()
         self._jetzt = threading.Event()
         self._stop = threading.Event()
@@ -37,8 +45,42 @@ class Abholer:
     def _call_fetch(self):
         if self._fetch is not None:
             return self._fetch(self.dest)
+        if self.mailboxes:
+            return self._fetch_alle_postfaecher()
         from .ingest import fetch
         return fetch(dest=self.dest, warten=False)
+
+    def _fetch_alle_postfaecher(self):
+        """Alle konfigurierten Postfaecher NACHEINANDER (nicht parallel --
+        schwacher Laptop, SPEC-Vorgabe). Ein kaputtes Postfach (Login falsch,
+        Server weg) blockiert die anderen nicht -- der Fehler wird je
+        Postfach vermerkt (``self.status['postfaecher']``), die Schleife
+        laeuft weiter."""
+        from .ingest import FetchResult, fetch
+
+        saved: list[str] = []
+        human: list[str] = []
+        mails = 0
+        fehler_teile: list[str] = []
+        je_postfach: list[dict] = []
+        for label, cfg, mandant_id in self.mailboxes:
+            try:
+                r = fetch(cfg=cfg, dest=self.dest, warten=False, store=self.store,
+                         mandant_address_id=mandant_id)
+                je_postfach.append({"postfach": label, "ok": not r.error,
+                                    "fehler": r.error, "neu": len(r.saved), "mails": r.mails})
+                saved += r.saved
+                human += r.human
+                mails += r.mails
+                if r.error:
+                    fehler_teile.append(f"{label}: {r.error}")
+            except Exception as e:  # noqa: BLE001 -- ein Postfach darf die anderen nie blockieren
+                msg = f"{type(e).__name__}: {e}"
+                je_postfach.append({"postfach": label, "ok": False, "fehler": msg,
+                                    "neu": 0, "mails": 0})
+                fehler_teile.append(f"{label}: {msg}")
+        self.status["postfaecher"] = je_postfach
+        return FetchResult(saved, mails, False, "; ".join(fehler_teile), human)
 
     def _jobrouter_nachschicken(self) -> None:
         """Freigegebene Rechnungen an JobRouter -- nur mit echter Anbindung
@@ -117,10 +159,24 @@ class Abholer:
         self._jetzt.set()
 
 
-def aus_konfiguration(dest: Path, bei_neuen: Callable | None = None) -> Abholer | None:
-    """Abholer fuer die App -- nur, wenn das Postfach eingerichtet ist."""
+def aus_konfiguration(dest: Path, store=None, bei_neuen: Callable | None = None) -> Abholer | None:
+    """Abholer fuer die App -- nur, wenn mindestens ein Postfach eingerichtet
+    ist (ENV-Postfach 1 und/oder in ``store`` gepflegte, Entscheidung Aaron
+    15.10.2026). Ohne ``store`` (z.B. bestehende Tests) wird nur das alte
+    ENV-Postfach geprueft -- unveraendertes Verhalten."""
     from .config import ImapConfig, imap_poll_minutes
 
-    if not ImapConfig().configured:
+    if store is not None:
+        from .config import postfaecher as postfaecher_cfg
+        mailboxes = postfaecher_cfg(store)
+    else:
+        mailboxes = [("Postfach 1 (ENV)", ImapConfig(), None)] if ImapConfig().configured else []
+    if not mailboxes:
         return None
-    return Abholer(dest, imap_poll_minutes(), bei_neuen=bei_neuen)
+    minuten = imap_poll_minutes()
+    if len(mailboxes) == 1 and mailboxes[0][2] is None:
+        # Einzelnes ENV-Postfach ohne Mandant-Zuordnung -- Verhalten wie vor
+        # der Mehrfach-Postfach-Erweiterung (bestehende Tests pruefen genau
+        # dieses Verhalten ueber ``self.status`` ohne ``postfaecher``-Key).
+        return Abholer(dest, minuten, bei_neuen=bei_neuen)
+    return Abholer(dest, minuten, bei_neuen=bei_neuen, mailboxes=mailboxes, store=store)

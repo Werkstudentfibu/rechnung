@@ -500,10 +500,18 @@ def _mail_name(out: MailOutcome) -> str:
 
 
 def handle_mail(raw: bytes, cfg: ImapConfig, dest: Path, store=None,
-                dry_run: bool = False) -> dict:
+                dry_run: bool = False, mandant_address_id: str | None = None) -> dict:
     """Eine Mail verarbeiten -> ``{"saved": [...], "human": [...]}``. Wirft
     nur bei echten Fehlern (Platte voll ...) -- dann darf die Mail NICHT als
-    gelesen markiert werden."""
+    gelesen markiert werden.
+
+    ``mandant_address_id`` (Entscheidung Aaron 15.10.2026, mehrere
+    Postfaecher): der Mandant (BillingAddress.id), dem DIESES Postfach
+    zugeordnet ist -- wird je gespeichertem Anhang als starker Hinweis
+    unter ``store.set_datei_mandant`` vermerkt (``pipeline.py`` entscheidet
+    anhand der Rechnungsadresse auf der Rechnung selbst, ob dieser Hinweis
+    uebernommen wird oder ein Widerspruch vorliegt -- hier wird nur
+    vermerkt, nie etwas Fachliches entschieden)."""
     from . import anlagen as anlagen_mod
     from . import human
     from . import keine_rechnung
@@ -523,6 +531,9 @@ def handle_mail(raw: bytes, cfg: ImapConfig, dest: Path, store=None,
         if gespeichert is None:   # identische Rechnung schon da
             continue
         saved.append(str(gespeichert))
+        if mandant_address_id:
+            store = store or Store(data_dir())
+            store.set_datei_mandant(hashlib.sha256(att.content).hexdigest(), mandant_address_id)
         if out.anlagen:
             store = store or Store(data_dir())
             anlagen_mod.save(store, hashlib.sha256(att.content).hexdigest(), out.anlagen)
@@ -635,7 +646,7 @@ def _ids(M, crit: str) -> list[bytes]:
 
 def fetch(cfg: ImapConfig | None = None, dest: Path | None = None,
           dry_run: bool = False, limit: int = 0, store=None,
-          warten: bool = True) -> FetchResult:
+          warten: bool = True, mandant_address_id: str | None = None) -> FetchResult:
     cfg = cfg or ImapConfig()
     dest = Path(dest) if dest else inbox_dir()
     if not cfg.configured:
@@ -676,7 +687,8 @@ def fetch(cfg: ImapConfig | None = None, dest: Path | None = None,
                 errors.append(f"Mail {num!r}: nicht abrufbar")
                 continue
             try:
-                r = handle_mail(raw, cfg, dest, store, dry_run)
+                r = handle_mail(raw, cfg, dest, store, dry_run,
+                               mandant_address_id=mandant_address_id)
             except OSError as e:
                 # Ergebnis nicht gesichert -> Mail bleibt ungelesen, naechster Lauf
                 errors.append(f"Mail {num!r}: {type(e).__name__}: {e}")

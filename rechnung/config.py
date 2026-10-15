@@ -247,6 +247,32 @@ def imap() -> ImapConfig:
     return ImapConfig()
 
 
+def postfaecher(store) -> list[tuple[str, ImapConfig, str | None]]:
+    """Alle konfigurierten Postfaecher (Entscheidung Aaron 15.10.2026: ~50
+    IONOS-Postfaecher, je Mandant eines): das alte Einzelpostfach ueber
+    ``RECHNUNG_IMAP_*`` (``ImapConfig()``, Standard-ENV-Konfiguration) bleibt
+    als "Postfach 1 (ENV)" voll funktionsfaehig -- plus alle in der
+    Bibliothek gepflegten (Excel-Stammdaten-Import, ``store.postfaecher()``).
+    -> [(Anzeigename, ImapConfig, Mandant-BillingAddress-Id oder ``None``)],
+    ENV-Postfach immer zuerst -- Reihenfolge ist wichtig fuer die
+    sequentielle (nicht parallele) Abholung auf dem schwachen Laptop."""
+    from . import secrets as secrets_mod
+
+    out: list[tuple[str, ImapConfig, str | None]] = []
+    env_cfg = ImapConfig()
+    if env_cfg.configured:
+        out.append(("Postfach 1 (ENV)", env_cfg, None))
+    for p in store.postfaecher():
+        if not p.aktiv or not p.user:
+            continue
+        cfg = ImapConfig(host=p.host, port=p.port, user=p.user,
+                         password=secrets_mod.get_password(store, p.id),
+                         ssl=p.ssl, source_folder=p.source_folder,
+                         done_folder=p.done_folder)
+        out.append((p.label, cfg, p.mandant_id or None))
+    return out
+
+
 def jobrouter() -> JobRouterConfig:
     return JobRouterConfig()
 

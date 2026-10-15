@@ -111,6 +111,11 @@ class Result:
     template_secured: bool = False
     billing_address_id: str | None = None
     billing_address_name: str | None = None
+    # Mandant aus dem Postfach (Entscheidung Aaron 15.10.2026), falls im Text
+    # selbst KEINE Rechnungsadresse erkannt wurde -- reiner gelber Vorschlag,
+    # nie automatisch uebernommen (siehe pipeline._mailbox_mandant_check).
+    billing_address_suggestion_id: str | None = None
+    billing_address_suggestion_name: str | None = None
     fields: dict[str, FieldResult] = field(default_factory=dict)
     line_items: list[dict] = field(default_factory=list)
     tax_breakdown: list[dict] = field(default_factory=list)
@@ -192,6 +197,8 @@ class Result:
             "template_secured": self.template_secured,
             "billing_address_id": self.billing_address_id,
             "billing_address_name": self.billing_address_name,
+            "billing_address_suggestion_id": self.billing_address_suggestion_id,
+            "billing_address_suggestion_name": self.billing_address_suggestion_name,
             "status": self.status,
             "status_label": STATUS_LABELS.get(self.status, self.status),
             "hold_reasons": self.hold_reasons,
@@ -435,6 +442,33 @@ def _billing_check(text: str, store: Store, res: "Result") -> Check:
     res.billing_address_id = hit[0].id
     res.billing_address_name = hit[0].name
     return Check("rechnungsadresse", True, hit[0].name)
+
+
+def _mailbox_mandant_check(res: "Result", store: Store) -> None:
+    """Mandant aus dem Postfach (Entscheidung Aaron 15.10.2026, mehrere
+    IONOS-Postfaecher, je Mandant eines): starker HINWEIS fuer den
+    Geschaeftsbereich, nie eine stille Entscheidung.
+
+    - Erkennt die Rechnung selbst (per Text, ``_billing_check`` oben)
+      eindeutig eine ANDERE Rechnungsadresse als die des Postfachs ->
+      zurueckstellen mit Grund (nicht raten, welche davon stimmt).
+    - Stimmen beide ueberein -> keine Aenderung (schon gruen).
+    - Keine Rechnungsadresse im Text erkannt -> der Postfach-Mandant wird
+      nur als GELBER VORSCHLAG angeboten (``billing_address_suggestion_*``),
+      NICHT automatisch als ``billing_address_id`` gesetzt."""
+    mandant_id = store.datei_mandant(res.sha256)
+    if not mandant_id:
+        return
+    mandant = store.address(mandant_id)
+    mandant_name = mandant.name if mandant else mandant_id
+    if res.billing_address_id:
+        if res.billing_address_id != mandant_id:
+            res.hold_reasons.append(
+                f"Postfach Mandant {mandant_name}, Rechnungsadresse "
+                f"{res.billing_address_name or res.billing_address_id} -- bitte entscheiden")
+    else:
+        res.billing_address_suggestion_id = mandant_id
+        res.billing_address_suggestion_name = mandant_name
 
 
 def _apply_hold(res: "Result") -> None:
@@ -743,6 +777,7 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
         # Lieferanten gesucht, nie uebergreifend.
         pdf_text = _einvoice_pdf_text(path, inv)
         addr_check = _billing_check("\n".join([inv.kaeufer_name, pdf_text]), store, res)
+        _mailbox_mandant_check(res, store)
         has_addr = bool(store.addresses())
         candidates = kandidaten(store.suppliers(), res.billing_address_id, has_addr)
         match = identify_einvoice(inv, candidates)
@@ -1451,6 +1486,7 @@ def _process(path: str | Path, store: Store, use_llm: bool = True,
     # dazu passende Kandidatenmenge des Index mitgegeben).
     with timer.stage("lieferant"):
         addr_check = _billing_check(doc.text, store, res)
+        _mailbox_mandant_check(res, store)
         has_addr = bool(store.addresses())
         match, why = identify_with_reason(
             doc, store.suppliers(), index=store.supplier_index(res.billing_address_id),

@@ -388,7 +388,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if samples.is_dir():
             vorverarbeiter.einreihen(invoice_files(samples))
 
-    abholer = aus_konfiguration(samples,
+    abholer = aus_konfiguration(samples, store=store,
                                 bei_neuen=vorverarbeiter.einreihen if vorverarbeiter else None)
     if abholer is not None:
         abholer.start()
