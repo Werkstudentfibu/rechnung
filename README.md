@@ -226,6 +226,48 @@ Vorlage/Variante, und Ablage wie Erledigung stehen im Fehlerprotokoll
 (`events.jsonl`, Fehlerbericht-Abschnitt „An Mensch gegeben“). Die Originale
 im Eingangsordner bleiben unverändert.
 
+## Ordner „Keine Rechnung“ (Entscheidung Aaron 14.10.2026)
+
+Dokumente, die keine Rechnungen sind (Lieferschein, Auftragsbestätigung,
+Angebot, AGB, Newsletter, Werbung, Kontoauszug, Vertrag, Mail ganz ohne
+Anhang/Rechnungs-Hinweis …), landen in einem eigenen Ordner
+(`RECHNUNG_KEINE_RECHNUNG`, Standard `data/keine-rechnung/`) statt gemischt
+mit echten Problemrechnungen bei „Menschliche Bearbeitung“ – dort liegen
+seitdem nur noch Rechnungen, an denen ein Mensch etwas tun muss. Es gilt
+derselbe Grundsatz wie oben: nur wörtliche, nachvollziehbare Regeln, keine
+KI-Entscheidung; im Zweifel bleibt alles beim Alten. Schalter
+`RECHNUNG_KEINE_RECHNUNG_ORDNER=0` stellt exakt das frühere Verhalten wieder
+her.
+
+Aussortiert wird im Postfach eine Mail ganz ohne Anhang und ohne
+Rechnungs-Hinweis im Text, oder eine Mail, deren Anhänge **alle** eindeutig
+als Nicht-Beleg beschriftet sind und kein einziger unklarer/Beleg-Anhang
+dabei ist. In der Pipeline wird ein Dokument nur aussortiert, wenn der Titel
+auf Seite 1 eine bekannte Nicht-Beleg-Beschriftung trägt, keine Belegart im
+Titel steht, kein Schweizer QR-Zahlteil vorliegt und weder eine
+Rechnungsnummer hinter einem Rechnungs-Label noch ein Betrag hinter einem
+Summen-Label im Text gefunden wurde.
+
+Nie still: Datei + Begleitdatei `<datei>.grund.json` (Grund, erkannte
+Beschriftung, bei Mails Absender/Betreff, Zeitpunkt), Ereignis im
+Ereignisprotokoll, Zähler im Tagesbericht. Geht nicht an JobRouter.
+
+Reiter „Keine Rechnung“ im Training-UI (`GET /api/keine-rechnung`): Liste
+mit Vorschau. Knopf **„Doch eine Rechnung“** – falls die Regel falsch lag,
+geht die Datei zurück in den Eingang und wird normal verarbeitet (zählt im
+Tagesbericht als Fehlsortierung). Knopf **„Keine Rechnung“** in der
+Prüfmaske einer offenen Rechnung – ein Mensch sortiert von Hand aus
+(Bestätigungsdialog).
+
+Nachtrag (Aaron 14.10.2026, 18:14): In diesem einen Ordner darf endgültig
+**gelöscht** werden (Knopf je Eintrag plus Mehrfachauswahl, mit
+Bestätigungsdialog) – das Postfach (IONOS/IMAP) wird dabei nicht angefasst.
+Protokoll bleibt trotzdem: Ereignis/Audit mit Dateiname, sha256, Grund,
+Bearbeiter, Zeitpunkt (ohne Inhalt); Zähler im Tagesbericht. Löschen ist
+strikt auf Dateien begrenzt, die tatsächlich im Ordner „Keine Rechnung“
+liegen (kein Pfad-Traversal über die API) – eine Datei mit demselben sha256
+im Archiv/als verarbeitete Rechnung bleibt unberührt.
+
 ## Texterkennung für Scans (OCR)
 
 PDFs ohne Textebene sowie Bild-Anhänge (`.jpg`, `.jpeg`, `.png`, `.tif`,
