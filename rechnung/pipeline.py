@@ -16,6 +16,7 @@ from . import billing
 from . import dubletten
 from . import einvoice
 from . import jobrouter
+from . import keine_rechnung
 from . import ocr
 from . import pdf as pdfmod
 from . import pflicht
@@ -57,6 +58,10 @@ UNKNOWN = DEFERRED
 SCAN = "scan_no_textlayer"      # historisch, wird nicht mehr vergeben -- Scans
                                  # laufen seit Stufe 3 automatisch durch ocr.py
 UNSUPPORTED = "unsupported_file"  # weder PDF noch lesbare E-Rechnung (z.B. fremdes XML)
+# Keine Rechnung (keine_rechnung.py, Entscheidung Aaron 14.10.2026): Titel
+# traegt eine bekannte Nicht-Beleg-Beschriftung, keine Belegart, kein
+# QR-Zahlteil, kein Rechnungsnummer-/Summen-Label im Text -- wird aussortiert.
+KEINE_RECHNUNG = "keine_rechnung"
 
 # Anzeigetexte fuer die Oberflaeche
 STATUS_LABELS = {
@@ -66,6 +71,7 @@ STATUS_LABELS = {
     DEFERRED: "zurückgestellt – menschlich bearbeiten",
     SCAN: "Scan ohne Text",
     UNSUPPORTED: "nicht lesbar",
+    KEINE_RECHNUNG: "keine Rechnung – aussortiert",
 }
 
 # Woher die Feldwerte stammen (Result.extraction)
@@ -164,6 +170,9 @@ class Result:
     # Pflichtangaben-Pruefung (pflicht.py, Aaron 10.10.2026): reine
     # Hinweis-Gruppe {regelwerk, punkte, fehlt}, nie ein Rueckstellgrund
     pflichtangaben: dict | None = None
+    # Nicht-Rechnung (keine_rechnung.py, Entscheidung Aaron 14.10.2026):
+    # {"grund", "beschriftung"}, gesetzt nur bei status == KEINE_RECHNUNG
+    keine_rechnung: dict | None = None
     # Rechnungstext fuer die Nachlauf-Pruefungen in ``process`` -- wird dort
     # wieder geleert (nicht mit dem Ergebnis herumtragen)
     _pruef_text: str = field(default="", repr=False)
@@ -194,6 +203,7 @@ class Result:
             "qr": self.qr,
             "anlagen": self.anlagen,
             "pflichtangaben": self.pflichtangaben,
+            "keine_rechnung": self.keine_rechnung,
             "duration_s": self.duration_s,
             "aborted": self.aborted,
             "stufenzeiten": self.stufenzeiten,
@@ -1404,6 +1414,16 @@ def _process(path: str | Path, store: Store, use_llm: bool = True,
     qr_obj = swissqr.read(path) if swissqr.likely(doc.text) else None
     res.qr = qr_obj.to_dict() if qr_obj else None
 
+    # Nicht-Rechnung aussortieren (keine_rechnung.py, Entscheidung Aaron
+    # 14.10.2026): rein woertliche Regel, laeuft vor Lieferant/Vorlage/KI --
+    # fuer ein Dokument ohne jedes Beleg-Merkmal lohnt sich das ohnehin nicht.
+    kr = keine_rechnung.pruefe_pipeline(doc, qr_obj)
+    if kr is not None:
+        res.keine_rechnung = kr
+        res.status = KEINE_RECHNUNG
+        res.stufenzeiten = timer.times
+        return res
+
     # Andere beschriftete Anhaenge derselben Mail (anlagen.py, Postfach-
     # Baustein 8), falls beim Postfach-Abholen welche an diesen Beleg
     # (sha256 der Originaldatei) gehaengt wurden.
@@ -1656,6 +1676,9 @@ def dispatch(res: Result, store: Store) -> dict:
 
     if res.sha256 and store.seen_sha(res.sha256):
         out = {"aktion": "bereits_uebernommen"}
+    elif res.status == KEINE_RECHNUNG:
+        rec = keine_rechnung.ablegen_pipeline(store, res)
+        out = {"aktion": "keine_rechnung", "grund": res.keine_rechnung, "abgelegt": rec}
     elif gruende := human.gruende(res):
         human.ablegen(store, res, gruende)
         out = {"aktion": "mensch", "gruende": gruende}

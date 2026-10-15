@@ -12,7 +12,7 @@ import io
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
-from rechnung import anlagen, human, ingest, jobrouter
+from rechnung import anlagen, human, ingest, jobrouter, keine_rechnung
 from rechnung.config import ImapConfig
 from rechnung.pipeline import process
 from rechnung.store import Store
@@ -56,7 +56,10 @@ def test_rechnung_mit_agb_und_lieferschein_wird_ein_beleg_mit_zwei_anlagen(tmp_p
     assert len(files) == 2 and all(f.exists() for f in files)
 
 
-def test_mail_nur_mit_agb_geht_an_mensch(tmp_path, monkeypatch):
+def test_mail_nur_mit_agb_geht_nach_keine_rechnung(tmp_path, monkeypatch):
+    """ALLE Anhaenge eindeutig Nicht-Beleg (AGB) und kein Beleg dabei ->
+    Ordner "Keine Rechnung" statt "Menschliche Bearbeitung" (Entscheidung
+    Aaron 14.10.2026) -- die Anhaenge selbst UND die Mail (.eml) landen dort."""
     monkeypatch.delenv("RECHNUNG_MENSCHLICH", raising=False)
     store = Store(tmp_path / "data")
     raw = _mail(attachments=[("AGB.pdf", _pdf("Allgemeine Geschaeftsbedingungen"),
@@ -66,10 +69,15 @@ def test_mail_nur_mit_agb_geht_an_mensch(tmp_path, monkeypatch):
     ingest.fetch(CFG, tmp_path / "inbox", store=store)
 
     assert not (tmp_path / "inbox").exists() or list((tmp_path / "inbox").iterdir()) == []
-    offen = human.offen(store)
+    assert human.offen(store) == []
+    offen = keine_rechnung.offen(store)
     assert len(offen) == 1
-    assert ingest.MAIL_OHNE_BELEG_ANHANG in offen[0]["gruende"][0]["grund"]
-    assert "AGB" in offen[0]["gruende"][0]["grund"]
+    assert offen[0]["datei"] == "AGB.pdf"
+    assert ingest.MAIL_OHNE_BELEG_ANHANG in offen[0]["grund"]
+    assert "AGB" in offen[0]["grund"]
+    assert offen[0]["beschriftung"] == "AGB"
+    folder = keine_rechnung.ordner(store.root)
+    assert (folder / "AGB.pdf.eml").exists()
 
 
 def test_unbeschrifteter_anhang_wird_als_rechnung_verarbeitet(tmp_path, monkeypatch):
