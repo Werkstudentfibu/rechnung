@@ -17,19 +17,26 @@ def _p(name: str, status: str, detail: str = "", hilfe: str = "") -> dict:
 
 def pruefen(store, samples: Path) -> list[dict]:
     from . import ingest, jobrouter, lernbericht, ocr, selbstupdate, semantic, sicherung
-    from .config import ImapConfig, LlmConfig, jobrouter as jr_cfg
+    from .config import LlmConfig, jobrouter as jr_cfg
+    from .config import postfaecher as postfaecher_cfg
 
     out = []
     v = selbstupdate.version()
     out.append(_p("Programmstand", OK if v.get("commit") else WARN,
                   f"{v.get('commit', '?')} vom {v.get('datum', '?')}"))
 
-    imap = ImapConfig()
-    if not imap.configured:
-        out.append(_p("Postfach (IONOS)", FEHLER, "nicht eingerichtet", "RECHNUNG_IMAP_USER/_PASSWORD in rechnung.env"))
+    # Mehrere Postfaecher (Entscheidung Aaron 15.10.2026, ~50 IONOS-
+    # Postfaecher): je Postfach eine eigene Zeile statt einer einzigen
+    # Sammelzeile -- ein kaputtes Postfach darf im Bild nicht untergehen.
+    mailboxes = postfaecher_cfg(store)
+    if not mailboxes:
+        out.append(_p("Postfach (IONOS)", FEHLER, "nicht eingerichtet",
+                      "RECHNUNG_IMAP_USER/_PASSWORD in rechnung.env, oder "
+                      "Excel-Stammdaten-Import im Reiter „Stammdaten“"))
     else:
-        c = ingest.check_connection(imap)
-        out.append(_p("Postfach (IONOS)", OK if c.get("ok") else FEHLER, c.get("detail", "")))
+        for label, cfg, _mandant in mailboxes:
+            c = ingest.check_connection(cfg)
+            out.append(_p(f"Postfach: {label}", OK if c.get("ok") else FEHLER, c.get("detail", "")))
 
     cfg = jr_cfg()
     if not cfg.live:
