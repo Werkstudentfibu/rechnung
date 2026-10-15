@@ -52,3 +52,10 @@ wird als offene Frage angezeigt, nie still übernommen/verworfen/"repariert".
   die brauchst du nicht.
 - Die echte Excel-Datei mit Kreditoren/Mandanten/IONOS-Zugangsdaten -- die war nie auf dem Server und bleibt
   es auch nicht.
+
+## Nachtrag 19:12 — Abschlussberichte ergänzt
+Aaron wollte zusätzlich alles, was eventuell noch brauchbar ist. Dazu `abschlussberichte/` mit den 5
+Worker-Berichten, die echten Inhalt hatten (reine Limit-Fehler-Logs ohne Inhalt blieben draußen): jeweils
+der volle Abschlussbericht des Workers inkl. geänderter Dateien/Tests, als Referenz zu den gleichnamigen,
+noch nicht gemergten Branches. Server-Orchestrierung (`kette-*.sh`, PIDs) bleibt draußen -- die ist
+Linux/systemd-spezifisch und auf dem Laptop nicht lauffähig, nicht nur "nicht nötig".
