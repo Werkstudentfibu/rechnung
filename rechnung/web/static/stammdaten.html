@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stammdaten aus Excel – Rechnung</title>
+<link rel="icon" href="data:,">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, sans-serif; color: #1a1a1a; background: #fff; }
+  header { padding: 8px 16px; background: #1c7550; color: #fff; display: flex; gap: 16px; align-items: center; }
+  header b { font-size: 15px; }
+  header a { color: #fff; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  h2 { margin: 0 0 8px; font-size: 18px; }
+  h3 { margin: 0; font-size: 15px; }
+  .hint { color: #555; font-size: 13px; }
+  .drop { border: 2px dashed #1c7550; border-radius: 8px; padding: 40px 16px; text-align: center; background: #f3f7f5; }
+  .drop.over { background: #e3efe9; }
+  button, select, input[type=text] { font: inherit; padding: 5px 10px; }
+  button { cursor: pointer; border: 1px solid #1c7550; background: #1c7550; color: #fff; border-radius: 4px; }
+  button.sek { background: #fff; color: #1c7550; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  :focus-visible { outline: 3px solid #f2b705; outline-offset: 1px; }
+  .card { border: 1px solid #d5ddd9; border-radius: 6px; margin: 14px 0; }
+  .card > .kopf { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap;
+                  padding: 10px 12px; background: #f3f7f5; border-bottom: 1px solid #d5ddd9; }
+  .card > .inhalt { padding: 10px 12px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #eee; vertical-align: top; }
+  th { font-size: 12px; color: #555; font-weight: 600; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+  .chip { padding: 3px 10px; border-radius: 12px; font-weight: 600; font-size: 13px; }
+  .chip.gruen { background: #dff3e6; color: #14653a; }
+  .chip.gelb { background: #fff2c6; color: #7a5a00; }
+  .chip.rot { background: #fbd9d6; color: #9a1c12; }
+  .chip.neutral { background: #e8ecea; color: #333; }
+  .punkt { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  .punkt.gruen { background: #1f9d55; } .punkt.gelb { background: #e0a800; } .punkt.rot { background: #c8352b; }
+  .frage { margin: 4px 0 8px; padding: 6px 8px; border-left: 3px solid #e0a800; background: #fffaf0; }
+  .frage.rot { border-left-color: #c8352b; background: #fff5f4; }
+  .frage.beantwortet { border-left-color: #1f9d55; background: #f4fbf6; }
+  .frage .zeile { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+  .frage input[type=text] { min-width: 260px; }
+  .nicht-gewaehlt { background: #fff5f4; }
+  .fehler { background: #fbd9d6; color: #9a1c12; padding: 8px 12px; border-radius: 4px; margin: 10px 0; }
+  .ok { background: #dff3e6; color: #14653a; padding: 10px 12px; border-radius: 4px; margin: 10px 0; }
+  .warn { background: #fff2c6; color: #5c4400; padding: 10px 12px; border-radius: 4px; margin: 10px 0; }
+  .leiste { position: sticky; bottom: 0; background: #fff; border-top: 1px solid #d5ddd9; padding: 10px 0; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .klein { font-size: 12px; color: #666; }
+  @media (prefers-reduced-motion: no-preference) { .drop { transition: background .15s; } }
+</style>
+</head>
+<body>
+<header><b>Rechnung – Stammdaten aus Excel</b><a href="/">← zurück zu den Rechnungen</a></header>
+<main id="app" aria-live="polite"></main>
+<script>
+const LABEL = {
+  name: 'Name', strasse: 'Straße', plz: 'PLZ', ort: 'Ort', land: 'Land', ustid: 'USt-IdNr / UID',
+  steuernummer: 'Steuernummer', iban: 'IBAN', bic: 'BIC', kreditorennummer: 'Kreditorennummer (Konto)',
+  mandant_verweis: 'Mandant (Nummer / Verweis)', email: 'E-Mail (Postfach)', passwort: 'Passwort',
+  server: 'Server', ordner: 'Ordner', name1: 'Name 1 (wird mit Name 2 zusammengesetzt)', name2: 'Name 2',
+  bezeichnung1: 'Bezeichnung 1 (nur zur Gegenprüfung)', postfach_kuerzel: 'Kürzel (aus Bezeichnung)',
+  postfach_name: 'Postfach-Name (komplett)', notiz: 'als Notiz ablegen'
+};
+const ART = { kreditor_de: 'Kreditoren Deutschland', kreditor_ch: 'Kreditoren Schweiz', mandant: 'Mandanten',
+  postfach: 'Postfächer', gemischt_land: 'Kreditoren (Land je Zeile entscheidet)', unklar: '— bitte wählen —' };
+const S = { sheets: null, zielfelder: [], arten: [], vor: null, antworten: {}, fehler: '', ergebnis: null,
+            busy: false, nurOffen: true, datei: '' };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const lbl = (k) => LABEL[k] || k;
+
+async function post(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  let j = null;
+  try { j = await r.json(); } catch (e) { /* leere Antwort */ }
+  if (!r.ok) throw new Error((j && j.detail) || ('Fehler ' + r.status));
+  return j;
+}
+
+function offeneWahl() {
+  const p = [];
+  for (const [name, b] of Object.entries(S.sheets || {})) {
+    const n = Object.values(b.mapping).filter((v) => !v).length;
+    if (n) p.push(`Blatt „${name}“: ${n} Spalte(n) noch ohne Zuordnung`);
+    if (!b.art || b.art === 'unklar') p.push(`Blatt „${name}“: Art der Zeilen wählen`);
+  }
+  return p;
+}
+const payloadSheets = () => Object.fromEntries(Object.entries(S.sheets).map(([n, b]) =>
+  [n, { headers: b.headers, rows: b.rows, mapping: b.mapping, art: b.art }]));
+// "korrigieren auf …" ohne Wert zaehlt als unbeantwortet -- sonst wuerde ein leerer Wert uebernommen
+const payloadAntworten = () => Object.fromEntries(Object.entries(S.antworten).filter(([, a]) =>
+  a.antwort && !(a.antwort.toLowerCase().startsWith('korrigieren') && !(a.wert || '').trim())));
+
+async function dateiLaden(base64, name) {
+  S.fehler = ''; S.ergebnis = null; S.busy = true; S.datei = name || ''; render();
+  try {
+    const res = await post('/api/stammdaten/parse', { inhalt: base64 });
+    S.sheets = res.sheets; S.zielfelder = res.zielfelder; S.arten = res.arten; S.antworten = {}; S.vor = null;
+    S.busy = false; render();
+    if (!offeneWahl().length) await pruefen();
+  } catch (e) { S.busy = false; S.sheets = null; S.fehler = e.message; render(); }
+}
+async function pruefen() {
+  if (offeneWahl().length) { S.vor = null; render(); return; }
+  S.busy = true; render();
+  try { S.vor = await post('/api/stammdaten/vorschau', { sheets: payloadSheets(), antworten: payloadAntworten() }); S.fehler = ''; }
+  catch (e) { S.fehler = e.message; S.vor = null; }
+  S.busy = false; render();
+}
+function setMapping(blatt, header, val) { S.sheets[blatt].mapping[header] = val === '' ? null : val; S.vor = null; return pruefen(); }
+function setArt(blatt, val) { S.sheets[blatt].art = val; S.vor = null; return pruefen(); }
+function setAntwort(key, antwort, vorschlag) {
+  if (!antwort) delete S.antworten[key];
+  else S.antworten[key] = { antwort, wert: antwort.toLowerCase().startsWith('korrigieren') ? (vorschlag || '') : undefined };
+  return pruefen();
+}
+function setWert(key, wert) { if (S.antworten[key]) S.antworten[key].wert = wert; return pruefen(); }
+function umschalten(v) { S.nurOffen = v; render(); }
+async function uebernehmen() {
+  const n = S.vor ? S.vor.zusammenfassung.bereit_zum_uebernehmen : 0;
+  if (!n || !confirm(`${n} Zeile(n) in die Bibliothek übernehmen?`)) return;
+  S.busy = true; render();
+  try { S.ergebnis = await post('/api/stammdaten/uebernehmen', { sheets: payloadSheets(), antworten: payloadAntworten() }); S.fehler = ''; }
+  catch (e) { S.fehler = e.message; }
+  S.busy = false; render();
+}
+function neu() { S.sheets = null; S.vor = null; S.antworten = {}; S.ergebnis = null; S.fehler = ''; render(); }
+
+function beispiel(b, i) {
+  const h = b.headers[i]; const z = b.rows.find((r) => (r[i] || '').trim());
+  if (!z) return '';
+  return b.mapping[h] === 'passwort' ? '••••••••' : z[i];
+}
+function mappingHtml(name, b) {
+  const offen = Object.values(b.mapping).filter((v) => !v).length;
+  const zf = S.zielfelder.map((k) => [k, lbl(k)]).sort((a, c) => a[1].localeCompare(c[1], 'de'));
+  const zeilen = b.headers.map((h, i) => {
+    const v = b.mapping[h] || '';
+    const opts = `<option value=""${v === '' ? ' selected' : ''}>— bitte wählen —</option>` +
+      zf.map(([k, l]) => `<option value="${esc(k)}"${v === k ? ' selected' : ''}>${esc(l)}</option>`).join('') +
+      `<option value="ignorieren"${v === 'ignorieren' ? ' selected' : ''}>Spalte ignorieren</option>`;
+    return `<tr class="${v === '' ? 'nicht-gewaehlt' : ''}"><td>${esc(h)}</td><td class="klein">${esc(beispiel(b, i))}</td>
+      <td><select aria-label="Zuordnung für Spalte ${esc(h)}" onchange='setMapping(${JSON.stringify(name)}, ${JSON.stringify(h)}, this.value)'>${opts}</select></td></tr>`;
+  }).join('');
+  const kopf = offen ? `<span style="color:#9a1c12">${offen} Spalte(n) bitte zuordnen</span>`
+    : `Spalten automatisch zugeordnet${b.gelernt ? ' (aus früherem Import gemerkt)' : ''} – ansehen/ändern`;
+  return `<details ${offen ? 'open' : ''}><summary>${kopf}</summary>
+    <table><tr><th>Spalte in der Excel-Datei</th><th>Beispiel</th><th>Wird übernommen als</th></tr>${zeilen}</table></details>`;
+}
+function zeileText(z) {
+  const w = z.werte || {}; const j = (a) => a.filter(Boolean).join(' · ');
+  if (z.art === 'mandant') return j([w.mandant_verweis, w.name]);
+  if (z.art === 'postfach') return j([w.mandant_verweis, w.email, w.kuerzel, w.postfach_name, w.passwort ? 'Passwort gesetzt' : '']);
+  return j([w.kreditorennummer, w.name, [w.strasse, [w.plz, w.ort].filter(Boolean).join(' ')].filter(Boolean).join(', '), w.land]);
+}
+function frageHtml(z, f) {
+  const key = z.schluessel + '|' + f.feld; const a = S.antworten[key]; const korr = a && a.antwort.toLowerCase().startsWith('korrigieren');
+  const opts = `<option value="">— bitte antworten —</option>` + f.antwortmoeglichkeiten.map((o) =>
+    `<option value="${esc(o)}"${a && a.antwort === o ? ' selected' : ''}>${esc(o)}</option>`).join('');
+  const vor = f.vorschlag ? ` <span class="klein">Vorschlag: <b>${esc(f.vorschlag)}</b></span>` : '';
+  return `<div class="frage ${z.status === 'rot' ? 'rot' : ''} ${a ? 'beantwortet' : ''}">${esc(f.grund)}${vor}
+    <div class="zeile"><select aria-label="Antwort" onchange='setAntwort(${JSON.stringify(key)}, this.value, ${JSON.stringify(f.vorschlag || '')})'>${opts}</select>
+    ${korr ? `<input type="text" aria-label="Korrigierter Wert" value="${esc(a.wert || '')}" onchange='setWert(${JSON.stringify(key)}, this.value)'>` : ''}</div></div>`;
+}
+function vorschauHtml() {
+  const v = S.vor; const zs = v.zusammenfassung;
+  const offen = Object.values(v.blaetter).reduce((n, b) => n + b.zeilen.filter((z) => !z.beantwortet && !z.weglassen).length, 0);
+  let h = `<div class="chips"><span class="chip gruen">${zs.gruen} grün</span><span class="chip gelb">${zs.gelb} gelb – Frage offen</span>
+    <span class="chip rot">${zs.rot} rot</span><span class="chip neutral">${offen} noch zu beantworten</span></div>
+    <label><input type="checkbox" ${S.nurOffen ? 'checked' : ''} onchange="umschalten(this.checked)"> nur Zeilen mit Fragen zeigen</label>`;
+  for (const [name, b] of Object.entries(v.blaetter)) {
+    const alle = b.zeilen; const sicht = alle.filter((z) => !S.nurOffen || z.status !== 'gruen' || z.fragen.length);
+    const zeigen = sicht.slice(0, 300);
+    h += `<div class="card"><div class="kopf"><h3>${esc(name)} – ${esc(ART[b.art] || b.art)}</h3><span class="klein">${alle.length} Zeilen, ${alle.filter((z) => z.status === 'gruen').length} grün</span></div><div class="inhalt">`;
+    if (!zeigen.length) h += `<p class="hint">Alle Zeilen sind eindeutig – keine Frage offen.</p>`;
+    else h += `<table><tr><th>Zeile</th><th>Status</th><th>Inhalt</th></tr>` + zeigen.map((z) => `<tr><td>${z.zeile}</td>
+      <td><span class="punkt ${z.status}"></span>${z.status === 'gruen' ? 'grün' : z.status === 'gelb' ? 'gelb' : 'rot'}</td>
+      <td>${esc(zeileText(z))}${(z.hinweise || []).map((x) => `<div class="klein">Hinweis: ${esc(x)}</div>`).join('')}
+      ${z.fragen.map((f) => frageHtml(z, f)).join('')}</td></tr>`).join('') + `</table>`;
+    if (sicht.length > zeigen.length) h += `<p class="hint">… und ${sicht.length - zeigen.length} weitere Zeilen (zuerst die gezeigten beantworten).</p>`;
+    h += `</div></div>`;
+  }
+  return h;
+}
+function render() {
+  let h = '';
+  if (S.fehler) h += `<div class="fehler" role="alert">${esc(S.fehler)}</div>`;
+  if (S.ergebnis) {
+    const e = S.ergebnis;
+    h += `<h2>Fertig</h2><div class="ok">Übernommen: ${e.kreditoren} Kreditoren, ${e.mandanten} Mandanten, ${e.postfaecher} Postfächer
+      (${e.uebersprungen} Zeile(n) nicht übernommen – Frage offen oder weggelassen).</div>`;
+    if (e.hinweis_passwoerter) h += `<div class="warn"><b>Wichtig:</b> ${esc(e.hinweis_passwoerter)}</div>`;
+    h += `<button onclick="neu()">Weitere Datei einlesen</button>`;
+  } else if (!S.sheets) {
+    h += `<h2>Excel-Liste einlesen</h2><p class="hint">Kreditoren (Deutschland/Schweiz), Mandanten und Postfächer – eine Datei, mehrere Blätter oder einzelne Dateien.
+      Das Programm erkennt die Listen an den Spaltenüberschriften und sortiert sie ein. Wo es nicht sicher ist, fragt es nach – es übernimmt nichts, was Sie nicht gesehen haben.</p>
+      <div class="drop" id="drop"><p>Excel-Datei (.xlsx) hierher ziehen</p><p><label><input id="datei" type="file" accept=".xlsx"> oder Datei auswählen</label></p></div>${S.busy ? '<p>Lese Datei …</p>' : ''}`;
+  } else {
+    h += `<h2>${esc(S.datei || 'Excel-Datei')}</h2>`;
+    for (const [name, b] of Object.entries(S.sheets)) {
+      const artOpts = S.arten.map((a) => `<option value="${esc(a)}"${b.art === a ? ' selected' : ''}>${esc(ART[a] || a)}</option>`).join('');
+      h += `<div class="card"><div class="kopf"><h3>Blatt „${esc(name)}“ <span class="klein">${b.rows.length} Zeilen</span></h3>
+        <label>Das sind: <select aria-label="Art der Zeilen in Blatt ${esc(name)}" onchange='setArt(${JSON.stringify(name)}, this.value)'>${artOpts}</select></label></div>
+        <div class="inhalt">${mappingHtml(name, b)}</div></div>`;
+    }
+    const probleme = offeneWahl();
+    if (probleme.length) h += `<div class="warn"><b>Bitte zuerst entscheiden:</b><ul>${probleme.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>
+      Unbekannte Spalten werden nie stillschweigend weggelassen – wählen Sie „Spalte ignorieren“, wenn sie nicht gebraucht wird.</div>`;
+    else if (S.vor) h += vorschauHtml();
+    else if (S.busy) h += `<p>Prüfe …</p>`;
+    const n = S.vor ? S.vor.zusammenfassung.bereit_zum_uebernehmen : 0;
+    h += `<div class="leiste"><button id="uebernehmen" onclick="uebernehmen()" ${n && !S.busy ? '' : 'disabled'}>${n} Zeile(n) übernehmen</button>
+      <button class="sek" onclick="neu()">Abbrechen</button>
+      <span class="klein">Übernommen werden grüne Zeilen und beantwortete Fragen. Alles andere bleibt unberührt.</span></div>`;
+  }
+  $('app').innerHTML = h;
+  const d = $('datei'); const dz = $('drop');
+  if (d) d.onchange = () => lesen(d.files[0]);
+  if (dz) {
+    dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('over'); };
+    dz.ondragleave = () => dz.classList.remove('over');
+    dz.ondrop = (e) => { e.preventDefault(); dz.classList.remove('over'); lesen(e.dataTransfer.files[0]); };
+  }
+}
+function lesen(file) {
+  if (!file) return;
+  const r = new FileReader();
+  r.onload = () => dateiLaden(String(r.result).split(',', 2)[1] || '', file.name);
+  r.readAsDataURL(file);
+}
+render();
+</script>
+</body>
+</html>
