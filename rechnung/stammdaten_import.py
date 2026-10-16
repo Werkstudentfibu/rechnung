@@ -26,6 +26,14 @@ dreistufig um:
    vorhandenen Datensatz mit abweichenden Werten wird nie stillschweigend
    ueberschrieben (siehe ``_konflikt_mit_bibliothek``).
 
+4. **Bekannte Layouts (16.10.2026, Aarons echte Listen)**: Kreditoren
+   (Konto/Name1/Name2/...), Mandanten (Mandanten Nr./Bezeichnung/WJ/LM) und
+   Postfaecher (MDT/E-Mail/Passwort/Bezeichnung/Name) werden an ihren
+   Ueberschriften erkannt (``BEKANNTE_LAYOUTS``) -- die Spaltenzuordnung wird
+   dann direkt vorgeschlagen, die Zeilenregeln (Name1+Name2, Kuerzel, PLZ)
+   greifen automatisch. Weiterhin nur ein Vorschlag mit Vorschau; was unklar
+   ist, bleibt eine Frage.
+
 Zustandslos zwischen den Web-Requests: die geparsten Zeilen reist der Client
 zwischen "Vorschau" und "Uebernehmen" mit (ueberschaubare Datenmengen -- ~50
 Mandanten/Postfaecher, eine Handvoll hundert Kreditoren), gemerkt wird nur die
@@ -72,8 +80,9 @@ ZIELFELDER: dict[str, list[str]] = {
              "supplier name", "vendor", "vendor name", "bezeichnung"],
     "strasse": ["strasse", "straße", "str", "adresse", "address", "street",
                 "anschrift"],
-    "plz": ["plz", "postleitzahl", "zip", "zip code", "postal code", "postcode"],
-    "ort": ["ort", "stadt", "city", "town"],
+    "plz": ["plz", "postleitzahl", "zip", "zip code", "postal code", "postcode",
+            "plzort", "plz ort"],
+    "ort": ["ort", "stadt", "city", "town", "ortsbezeichnung"],
     "land": ["land", "country", "staat", "country code", "laendercode"],
     "ustid": ["ustid", "ust-idnr", "ust-id", "ust id", "umsatzsteuer-id",
               "umsatzsteuer-identifikationsnummer", "vatid", "vat id", "vat",
@@ -87,7 +96,7 @@ ZIELFELDER: dict[str, list[str]] = {
                          "kred-nr", "kredno", "lieferantennummer",
                          "lieferanten-nr", "vendor id", "vendor no",
                          "vendor number", "creditor id", "creditor no",
-                         "lieferanten-id"],
+                         "lieferanten-id", "konto", "kreditorenkonto"],
     # Verweis auf einen Mandanten (bei Kreditor-/Postfach-Zeilen) ODER --
     # auf einem Mandanten-Blatt -- der eigene Mandanten-Code (s.
     # ``_mandant_zeile``). Dieselbe Spaltenueberschrift ("Mandant",
@@ -95,14 +104,34 @@ ZIELFELDER: dict[str, list[str]] = {
     "mandant_verweis": ["mandant", "gesellschaft", "business unit",
                         "geschaeftsbereich", "geschäftsbereich", "company code",
                         "buchungskreis", "firma (mandant)",
-                        "mandant/gesellschaft", "kostenstelle"],
+                        "mandant/gesellschaft", "kostenstelle", "mandanten nr",
+                        "mandanten nummer", "mandant nr", "mandantennummer", "mdt"],
     "email": ["email", "e-mail", "e-mail-adresse", "mail", "benutzer", "user",
               "login", "postfach", "postfach-adresse", "mailadresse"],
     "passwort": ["passwort", "password", "kennwort", "pwd", "pass"],
     "server": ["server", "host", "imap", "imap-server", "imap server",
               "mailserver"],
     "ordner": ["ordner", "folder", "quellordner"],
+    # Aarons echte Kreditorenliste (15./16.10.2026): Name steht in zwei festlangen
+    # Feldern; "Bezeichnung 1" ist nur die auf 40 Zeichen gekuerzte Fassung
+    # davon und dient ausschliesslich zur Gegenpruefung (siehe
+    # ``_kreditor_aufbereiten``), nie als Name.
+    "name1": ["name1", "name 1"],
+    "name2": ["name2", "name 2"],
+    "bezeichnung1": ["bezeichnung 1", "bezeichnung1"],
+    # Postfach-Blatt: aus "Bezeichnung" nur das Kuerzel, aus "Name" der volle
+    # Wert (Entscheidung Aaron 15.10.2026, 13:46) -- nur ueber das bekannte
+    # Layout vorgeschlagen, daher keine allgemeinen Synonyme.
+    "postfach_kuerzel": [],
+    "postfach_name": [],
+    # Rohwert der Spalte als Notiz ("Ueberschrift: Wert") -- nichts geht verloren,
+    # nichts bekommt eine eigene Bedeutung (z. B. SammelKt).
+    "notiz": ["sammelkt", "sammelkonto", "sammel konto", "sammelkto"],
 }
+
+# Ausdrueckliche Wahl "Spalte ignorieren" -- ``None`` heisst dagegen "noch nicht
+# entschieden" (das Web-UI laesst nicht zu, dass eine Spalte so stehen bleibt).
+IGNORIEREN = "ignorieren"
 
 _SYNONYM_TO_FIELD: dict[str, str] = {}
 for _canon, _syns in ZIELFELDER.items():
@@ -135,9 +164,51 @@ def vorschlag_fuer_spalte(header: str) -> str | None:
     return None
 
 
+# Aarons echte Listen (docs/uebergabe-laptop/echte-spaltenkoepfe-15-10.md).
+# Schluessel = ``_norm_header`` der Ueberschrift. ``pflicht``: diese
+# Ueberschriften muessen alle vorhanden sein, weitere Spalten sind erlaubt
+# (fuer sie gilt der allgemeine Vorschlag). WJ/LM: Aaron weiss nicht, was sie
+# bedeuten -> ignorieren (Entscheidung 15.10.2026, 13:42).
+BEKANNTE_LAYOUTS: list[dict] = [
+    {"name": "Kreditoren (Konto / Name1 / Name2 ...)",
+     "pflicht": {"konto", "name1", "name2"},
+     "mapping": {"konto": "kreditorennummer", "bezeichnung 1": "bezeichnung1",
+                 "name1": "name1", "name2": "name2", "sammelkt": "notiz",
+                 "strasse": "strasse", "land": "land", "plzort": "plz",
+                 "ortsbezeichnung": "ort"}},
+    {"name": "Mandanten (Mandanten Nr. / Bezeichnung / WJ / LM)",
+     "pflicht": {"mandanten nr", "bezeichnung"},
+     "ohne": {"e-mail", "passwort"},
+     "mapping": {"mandanten nr": "mandant_verweis", "bezeichnung": "name",
+                 "wj": IGNORIEREN, "lm": IGNORIEREN}},
+    {"name": "Postfächer (MDT / E-Mail / Passwort / Bezeichnung / Name)",
+     "pflicht": {"mdt", "e-mail", "passwort"},
+     "mapping": {"mdt": "mandant_verweis", "e-mail": "email", "passwort": "passwort",
+                 "bezeichnung": "postfach_kuerzel", "name": "postfach_name"}},
+]
+
+
+def layout_erkennen(headers: list[str]) -> dict | None:
+    """-> das bekannte Layout, zu dem die Ueberschriften passen, oder ``None``."""
+    norm_set = {_norm_header(h) for h in headers if (h or "").strip()}
+    for lay in BEKANNTE_LAYOUTS:
+        if lay["pflicht"] <= norm_set and not (lay.get("ohne", set()) & norm_set):
+            return lay
+    return None
+
+
 def spalten_vorschlag(headers: list[str]) -> dict[str, str | None]:
-    """Jede Spaltenueberschrift -> vorgeschlagenes Zielfeld (oder ``None``)."""
-    return {h: vorschlag_fuer_spalte(h) for h in headers}
+    """Jede Spaltenueberschrift -> vorgeschlagenes Zielfeld (oder ``None``).
+    Passt die Kopfzeile zu einer von Aarons bekannten Listen, gilt deren feste
+    Zuordnung; weitere Spalten bekommen den allgemeinen Wortlisten-Vorschlag."""
+    out = {h: vorschlag_fuer_spalte(h) for h in headers}
+    lay = layout_erkennen(headers)
+    if lay:
+        for h in headers:
+            ziel = lay["mapping"].get(_norm_header(h))
+            if ziel:
+                out[h] = ziel
+    return out
 
 
 # ---- Layout-Gedaechtnis (SPEC: "Zuordnung pro Datei-Layout merken") -------
@@ -206,6 +277,10 @@ def art_vorschlag(sheet_name: str, mapping: dict[str, str | None]) -> str:
         return ART_KREDITOR_CH
     if re.search(r"deutschland|\bde\b|germany", n):
         return ART_KREDITOR_DE
+    if {"mandant_verweis", "name"} <= felder and not (
+            {"land", "strasse", "plz", "ort", "iban", "ustid", "kreditorennummer",
+             "email", "name1", "name2"} & felder):
+        return ART_MANDANT   # nur Mandanten-Nr. + Name, z. B. Blatt "Tabelle1"
     if "land" in felder:
         return ART_GEMISCHT_LAND
     if "iban" in felder or "ustid" in felder or "kreditorennummer" in felder:
@@ -215,15 +290,37 @@ def art_vorschlag(sheet_name: str, mapping: dict[str, str | None]) -> str:
 
 # ---- Hilfsfunktionen --------------------------------------------------------
 
-def _zeile_zu_werten(headers: list[str], row: list[str],
-                     mapping: dict[str, str | None]) -> dict[str, str]:
+def _zeile_zu_werten_ex(headers: list[str], row: list[str],
+                        mapping: dict[str, str | None]):
+    """-> (werte, kollisionen). Zwei Spalten, die auf dasselbe Feld zeigen und
+    verschiedene Werte tragen, werden NICHT still ueberschrieben, sondern als
+    Kollision gemeldet (der erste Wert bleibt bis zur Antwort stehen).
+    ``ignorieren`` verwirft die Spalte; ``notiz`` sammelt "Ueberschrift: Wert"."""
     out: dict[str, str] = {}
+    quelle: dict[str, str] = {}
+    kollisionen: list[tuple] = []
+    notizen: list[str] = []
     for h, v in zip(headers, row):
         feld = mapping.get(h)
-        if not feld or not (v or "").strip():
+        v = (v or "").strip()
+        if not feld or feld == IGNORIEREN or not v:
             continue
-        out[feld] = v.strip()
-    return out
+        if feld == "notiz":
+            notizen.append(f"{h}: {v}")
+            continue
+        if feld in out and out[feld] != v:
+            kollisionen.append((feld, quelle[feld], out[feld], h, v))
+            continue
+        out[feld] = v
+        quelle[feld] = h
+    if notizen:
+        out["notiz"] = "\n".join(notizen)
+    return out, kollisionen
+
+
+def _zeile_zu_werten(headers: list[str], row: list[str],
+                     mapping: dict[str, str | None]) -> dict[str, str]:
+    return _zeile_zu_werten_ex(headers, row, mapping)[0]
 
 
 def _frage(feld: str, grund: str, vorschlag: str | None = None,
@@ -332,7 +429,10 @@ def _kreditor_pruefen(art: str, werte: dict[str, str]) -> list[dict]:
     plz = werte.get("plz", "")
     if plz and land and not _plz_format_ok(land, plz):
         erwartet = "5-stellig" if land == "DE" else "4-stellig"
-        fragen.append(_frage("plz", f"PLZ-Format fuer {land} erwartet {erwartet}: '{plz}'"))
+        vorschlag = "0" + plz.strip() if land == "DE" and re.fullmatch(r"\d{4}", plz.strip()) else None
+        fragen.append(_frage("plz", f"PLZ-Format fuer {land} erwartet {erwartet}: '{plz}'"
+                                    + (" (führende Null verloren?)" if vorschlag else ""),
+                             vorschlag=vorschlag))
 
     return fragen
 
@@ -352,10 +452,122 @@ def _postfach_pruefen(werte: dict[str, str]) -> list[dict]:
     fragen = []
     if not werte.get("email"):
         fragen.append(_frage("email", "Pflichtfeld fehlt: E-Mail-Adresse/Benutzer"))
+    if werte.get("email") and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", werte["email"]):
+        fragen.append(_frage("email", f"E-Mail-Adresse sieht ungültig aus: '{werte['email']}'"))
     if not werte.get("mandant_verweis"):
         fragen.append(_frage("mandant_verweis", "Pflichtfeld fehlt: Mandant (jedes Postfach "
                                                 "gehoert zu genau einem Mandanten)"))
     return fragen
+
+
+# ---- Zeilenregeln fuer Aarons echte Listen -----------------------------------
+
+def _ws(s: str) -> str:
+    return re.sub(r"\s+", " ", s or "").strip()
+
+
+def _kuerzel_und_klartext(s: str) -> tuple[str, str]:
+    """"ABC - Beispiel-Mandant" -> ("ABC", "Beispiel-Mandant"). Ohne Trenner
+    (" - ", " – ", " — ") gibt es kein Kuerzel: ("", Text)."""
+    s = _ws(s)
+    for sep in (" - ", " – ", " — "):
+        if sep in s:
+            k, rest = s.split(sep, 1)
+            return k.strip(), rest.strip()
+    return "", s
+
+
+def _kuerzel_aus_notiz(notes: str) -> str:
+    m = re.search(r"Kürzel:\s*(\S+)", notes or "")
+    return m.group(1) if m else ""
+
+
+def _mandant_key(s: str) -> str:
+    """Vergleichsschluessel fuer Mandanten-Nummern: ``001`` und ``1`` sind
+    derselbe Mandant (Excel verliert fuehrende Nullen bei Zahlenzellen)."""
+    k = norm(s)
+    return (k.lstrip("0") or "0") if k.isdigit() else k
+
+
+def _notizen_ergaenzen(alt: str, neu: str) -> str:
+    """Zeilenweise anhaengen, was noch nicht drinsteht -- mehrfaches Einspielen
+    derselben Datei dupliziert nichts."""
+    zeilen = (alt or "").splitlines()
+    for z in (neu or "").splitlines():
+        if z.strip() and z not in zeilen:
+            zeilen.append(z)
+    return "\n".join(zeilen).strip()
+
+
+def _kreditor_aufbereiten(werte: dict[str, str], fragen: list[dict],
+                          hinweise: list[str]) -> None:
+    """Name1 + Name2 -> ``name``. "Bezeichnung 1" (auf 40 Zeichen gekuerzt) wird
+    nur zur Gegenpruefung benutzt: passt sie zu keiner Zusammensetzung, ist es
+    eine Frage -- nie ein stilles Raten."""
+    n1, n2 = _ws(werte.pop("name1", "")), _ws(werte.pop("name2", ""))
+    bez = _ws(werte.pop("bezeichnung1", ""))
+    if not (n1 or n2) or werte.get("name"):
+        return
+    teile = [x for x in (n1, n2) if x]
+    mit, ohne, b = " ".join(teile), "".join(teile), bez.lower()
+
+    def passt(kandidat: str) -> bool:
+        return not b or kandidat.lower().startswith(b)
+
+    name, offen = mit, False
+    if len(teile) == 1:
+        offen = not passt(mit)
+    elif not passt(mit):
+        if passt(ohne):
+            name = ohne
+            hinweise.append("Name1 und Name2 ohne Leerzeichen zusammengesetzt "
+                            "(nur so passt die Zeile zu „Bezeichnung 1“)")
+        else:
+            offen = True
+    werte["name"] = name
+    if offen:
+        fragen.append(_frage(
+            "name", f"„Bezeichnung 1“ ('{bez}') passt nicht zu Name1 + Name2 ('{mit}') "
+                    "-- bitte den richtigen Namen angeben", vorschlag=mit))
+
+
+_PLZ_ORT_RE = re.compile(r"^(?:[A-Za-z]{1,3}[- ])?(\d{4,5})\s+(\S.*)$")
+
+
+def _plz_aufbereiten(werte: dict[str, str], fragen: list[dict], hinweise: list[str]) -> None:
+    """Spalte "PlzOrt" kann nur die PLZ ("12345") oder PLZ + Ort enthalten. Steht
+    ein Ort darin, wird er mit "Ortsbezeichnung" abgeglichen (Widerspruch = Frage)."""
+    plz = werte.get("plz", "")
+    if not plz or plz.isdigit():
+        return
+    m = _PLZ_ORT_RE.match(plz)
+    if not m:
+        return   # ``_kreditor_pruefen`` fragt wegen des Formats
+    werte["plz"], ort_aus_plz = m.group(1), m.group(2).strip()
+    if not werte.get("ort"):
+        werte["ort"] = ort_aus_plz
+        hinweise.append(f"Ort '{ort_aus_plz}' aus der PLZ-Spalte übernommen")
+    elif norm(werte["ort"]) != norm(ort_aus_plz):
+        fragen.append(_frage(
+            "ort", f"PLZ-Spalte nennt '{ort_aus_plz}', Ortsbezeichnung '{werte['ort']}' "
+                   "-- bitte entscheiden", vorschlag=ort_aus_plz))
+
+
+def _postfach_aufbereiten(werte: dict[str, str], fragen: list[dict]) -> None:
+    """Aus "Bezeichnung" nur das Kuerzel (steht vor " - "); ohne Trenner nur,
+    wenn die Zelle ein einzelnes Wort ist -- sonst Frage mit Vorschlag."""
+    roh = werte.pop("postfach_kuerzel", "")
+    if not roh:
+        return
+    k, _ = _kuerzel_und_klartext(roh)
+    if not k:
+        erstes = _ws(roh).split(" ")[0]
+        k = erstes
+        if " " in _ws(roh):
+            fragen.append(_frage(
+                "kuerzel", f"Bezeichnung '{roh}' enthält keinen Trenner ' - ' -- Kürzel "
+                           "nicht eindeutig", vorschlag=erstes))
+    werte["kuerzel"] = k
 
 
 # ---- Zeilen bauen -----------------------------------------------------------
@@ -374,11 +586,16 @@ def zeilen_aufbauen(store, blatt: str, headers: list[str], data_rows: list[list[
     danach -- hier nur die reine Zeilenpruefung."""
     out: list[dict] = []
     for i, row in enumerate(data_rows, start=1):
-        werte = _zeile_zu_werten(headers, row, mapping)
+        werte, kollisionen = _zeile_zu_werten_ex(headers, row, mapping)
         rohwerte = {h: v for h, v in zip(headers, row) if (v or "").strip()}
         schluessel = f"{blatt}:{i}"
         zeilen_art = art
         fragen: list[dict] = []
+        hinweise: list[str] = []
+        for feld, h_alt, v_alt, h_neu, v_neu in kollisionen:
+            fragen.append(_frage(
+                feld, f"Zwei Spalten zeigen auf dasselbe Feld: '{h_alt}' = '{v_alt}', "
+                      f"'{h_neu}' = '{v_neu}' -- bitte entscheiden", vorschlag=v_alt))
         if art == ART_GEMISCHT_LAND:
             land_spalte = _land_aus_text(werte.get("land", ""))
             if land_spalte:
@@ -401,10 +618,13 @@ def zeilen_aufbauen(store, blatt: str, headers: list[str], data_rows: list[list[
                 antworten=["als Kreditor DE übernehmen", "als Kreditor CH übernehmen",
                           "Zeile weglassen"]))
         elif zeilen_art in ARTEN_KREDITOR:
+            _kreditor_aufbereiten(werte, fragen, hinweise)
+            _plz_aufbereiten(werte, fragen, hinweise)
             fragen += _kreditor_pruefen(zeilen_art, werte)
         elif zeilen_art == ART_MANDANT:
             fragen += _mandant_pruefen(werte)
         elif zeilen_art == ART_POSTFACH:
+            _postfach_aufbereiten(werte, fragen)
             fragen += _postfach_pruefen(werte)
 
         rot = zeilen_art == ART_UNKLAR or any(
@@ -414,7 +634,7 @@ def zeilen_aufbauen(store, blatt: str, headers: list[str], data_rows: list[list[
         out.append({
             "blatt": blatt, "zeile": i, "art": zeilen_art, "werte": werte,
             "rohwerte": rohwerte, "status": status, "fragen": fragen,
-            "schluessel": schluessel,
+            "schluessel": schluessel, "hinweise": hinweise,
         })
     return out
 
@@ -432,15 +652,27 @@ def _kreditor_dubletten_schluessel(werte: dict[str, str]) -> set[str]:
     return keys
 
 
+def _dubletten_schluessel(z: dict) -> set[str]:
+    w = z["werte"]
+    if z["art"] in ARTEN_KREDITOR:
+        keys = _kreditor_dubletten_schluessel(w)
+        if w.get("kreditorennummer"):
+            keys.add("konto:" + w["kreditorennummer"].strip())
+        return keys
+    if z["art"] == ART_MANDANT and w.get("mandant_verweis"):
+        return {"mandant:" + _mandant_key(w["mandant_verweis"])}
+    if z["art"] == ART_POSTFACH and w.get("email"):
+        return {"email:" + norm(w["email"])}
+    return set()
+
+
 def _markiere_dubletten(zeilen: list[dict]) -> None:
     """Zwei Zeilen DIESES Imports mit gleichem Namen/UID/IBAN -> beide gelb,
     mit Frage und Verweis aufeinander (nie stillschweigend die eine
     bevorzugen)."""
     von_schluessel: dict[str, list[dict]] = {}
     for z in zeilen:
-        if z["art"] not in ARTEN_KREDITOR:
-            continue
-        for k in _kreditor_dubletten_schluessel(z["werte"]):
+        for k in _dubletten_schluessel(z):
             von_schluessel.setdefault(k, []).append(z)
     gemeldet: set[tuple[str, str]] = set()
     for k, treffer in von_schluessel.items():
@@ -540,9 +772,11 @@ def _mandant_referenz_pruefen(zeile: dict, alle_mandanten_namen: set[str], store
     ref = zeile["werte"].get("mandant_verweis")
     if not ref or zeile["art"] not in (ART_KREDITOR_DE, ART_KREDITOR_CH, ART_POSTFACH):
         return
-    bekannt = {norm(n) for n in alle_mandanten_namen} | {norm(a.name) for a in store.addresses()} \
-        | {norm(a.id) for a in store.addresses()}
-    if norm(ref) not in bekannt:
+    bekannt = ({norm(n) for n in alle_mandanten_namen} | {norm(a.name) for a in store.addresses()}
+               | {_mandant_key(a.id) for a in store.addresses()}
+               | {_mandant_key(a.company_code) for a in store.addresses() if a.company_code}
+               | set(zeile.get("_mandant_codes", ())))
+    if norm(ref) not in bekannt and _mandant_key(ref) not in bekannt:
         zeile["fragen"].append(_frage(
             "mandant_verweis", f"Mandant-Verweis '{ref}' nicht auffindbar (weder in "
                                "dieser Datei noch in der Bibliothek)",
@@ -550,6 +784,37 @@ def _mandant_referenz_pruefen(zeile: dict, alle_mandanten_namen: set[str], store
                       "korrigieren auf …", "Zeile weglassen"]))
         if zeile["status"] != STATUS_ROT:
             zeile["status"] = STATUS_GELB
+
+
+def _kuerzel_pruefen(zeilen: list[dict], store) -> None:
+    """Postfach-Bezeichnung (Kuerzel) gegen das Kuerzel des Mandanten, auf den
+    der MDT zeigt -- faengt einen vertippten MDT ab (Rechnungen landeten sonst
+    beim falschen Mandanten)."""
+    kuerzel: dict[str, str] = {}
+    for z in zeilen:
+        if z["art"] == ART_MANDANT and z["werte"].get("mandant_verweis"):
+            k = _kuerzel_und_klartext(z["werte"].get("name", ""))[0]
+            if k:
+                kuerzel[_mandant_key(z["werte"]["mandant_verweis"])] = k
+    for a in store.addresses():
+        k = _kuerzel_aus_notiz(a.notes)
+        for c in (a.id, a.company_code):
+            if k and c:
+                kuerzel.setdefault(_mandant_key(c), k)
+    for z in zeilen:
+        if z["art"] != ART_POSTFACH:
+            continue
+        pk, code = z["werte"].get("kuerzel"), z["werte"].get("mandant_verweis")
+        soll = kuerzel.get(_mandant_key(code)) if code else None
+        if pk and soll and norm(pk) != norm(soll):
+            z["fragen"].append(_frage(
+                "mandant_verweis",
+                f"MDT {code} gehört laut Mandantenliste zum Kürzel '{soll}', die "
+                f"Postfach-Bezeichnung sagt '{pk}' -- stimmt der MDT?",
+                antworten=["so übernehmen (MDT stimmt)", "korrigieren auf …",
+                           "Zeile weglassen"]))
+            if z["status"] != STATUS_ROT:
+                z["status"] = STATUS_GELB
 
 
 # ---- Antworten einmischen ---------------------------------------------------
@@ -621,6 +886,11 @@ def vorschau(store, sheets: dict[str, dict], antworten: dict | None = None) -> d
             mandanten_namen |= {z["werte"].get("name", "") for z in zeilen if z["werte"].get("name")}
 
     _markiere_dubletten(alle_zeilen)
+    _kuerzel_pruefen(alle_zeilen, store)
+    mandanten_codes = {_mandant_key(z["werte"]["mandant_verweis"]) for z in alle_zeilen
+                       if z["art"] == ART_MANDANT and z["werte"].get("mandant_verweis")}
+    for z in alle_zeilen:
+        z["_mandant_codes"] = mandanten_codes
     for z in alle_zeilen:
         _konflikt_mit_bibliothek(store, z)
         _mandant_referenz_pruefen(z, mandanten_namen, store)
@@ -629,6 +899,7 @@ def vorschau(store, sheets: dict[str, dict], antworten: dict | None = None) -> d
     zaehler = {STATUS_GRUEN: 0, STATUS_GELB: 0, STATUS_ROT: 0}
     bereit = 0
     for z in alle_zeilen:
+        z.pop("_mandant_codes", None)
         zaehler[z["status"]] += 1
         if not z["weglassen"] and z["beantwortet"]:
             bereit += 1
@@ -681,7 +952,10 @@ def _anwenden_kreditor(store, zeile: dict, operator: str) -> str:
             " ".join(x for x in (werte.get("plz", ""), werte.get("ort", "")) if x),
         ) if x]
         if zeile_adresse:
-            sup.address_lines = zeile_adresse
+            land_code = "CH" if zeile["art"] == ART_KREDITOR_CH else "DE"
+            sup.address_lines = zeile_adresse + [land_code]
+    if werte.get("notiz"):
+        sup.notes = _notizen_ergaenzen(sup.notes, werte["notiz"])
     if werte.get("ustid"):
         sup.ustids = sorted(set(sup.ustids) | {werte["ustid"]})
     if werte.get("iban"):
@@ -715,8 +989,15 @@ def _anwenden_mandant(store, zeile: dict, operator: str) -> str:
         addr = BillingAddress(id=aid, name=werte.get("name", ""))
     if werte.get("name"):
         addr.name = werte["name"]
-        if werte["name"] not in addr.match_terms:
+        kuerzel, klartext = _kuerzel_und_klartext(werte["name"])
+        if kuerzel and klartext:
+            # "ABC - Beispiel-Mandant": auf einer Rechnung steht nur der Klartext
+            addr.match_terms = sorted(set(addr.match_terms) | {klartext})
+            addr.notes = _notizen_ergaenzen(addr.notes, f"Kürzel: {kuerzel}")
+        elif werte["name"] not in addr.match_terms:
             addr.match_terms = sorted(set(addr.match_terms) | {werte["name"]})
+    if werte.get("notiz"):
+        addr.notes = _notizen_ergaenzen(addr.notes, werte["notiz"])
     zeile_adresse = [x for x in (
         werte.get("strasse", ""),
         " ".join(x for x in (werte.get("plz", ""), werte.get("ort", "")) if x),
@@ -740,7 +1021,8 @@ def _anwenden_postfach(store, zeile: dict, operator: str) -> str:
     ref = werte.get("mandant_verweis", "")
     mandant_id = ""
     for a in store.addresses():
-        if norm(a.name) == norm(ref) or norm(a.id) == norm(ref):
+        if (norm(a.name) == norm(ref) or _mandant_key(a.id) == _mandant_key(ref)
+                or (a.company_code and _mandant_key(a.company_code) == _mandant_key(ref))):
             mandant_id = a.id
             break
     pid = _slug(werte.get("email") or ref or werte.get("name", ""))
@@ -748,7 +1030,7 @@ def _anwenden_postfach(store, zeile: dict, operator: str) -> str:
     if pf is None:
         pf = Postfach(id=pid)
     pf.mandant_id = mandant_id
-    pf.mandant_name = ref
+    pf.mandant_name = werte.get("postfach_name") or ref
     pf.user = werte.get("email", pf.user)
     if werte.get("server"):
         server = werte["server"]
@@ -778,25 +1060,34 @@ def anwenden(store, sheets: dict[str, dict], antworten: dict | None, operator: s
     vor = vorschau(store, sheets, antworten)
     ergebnis = {"kreditoren": 0, "mandanten": 0, "postfaecher": 0,
                "uebersprungen": 0, "passwoerter_gesetzt": 0}
-    for blatt in vor["blaetter"].values():
-        for z in blatt["zeilen"]:
-            if z["weglassen"] or not (
-                    z["status"] == STATUS_GRUEN or (z["status"] == STATUS_GELB and z["beantwortet"])):
-                ergebnis["uebersprungen"] += 1
-                continue
-            if z["art"] in ARTEN_KREDITOR:
-                _anwenden_kreditor(store, z, operator)
-                ergebnis["kreditoren"] += 1
-            elif z["art"] == ART_MANDANT:
-                _anwenden_mandant(store, z, operator)
-                ergebnis["mandanten"] += 1
-            elif z["art"] == ART_POSTFACH:
-                _anwenden_postfach(store, z, operator)
-                ergebnis["postfaecher"] += 1
-                if z["werte"].get("passwort"):
-                    ergebnis["passwoerter_gesetzt"] += 1
-            else:
-                ergebnis["uebersprungen"] += 1
+    # Reihenfolge unabhaengig von der Blattreihenfolge: Postfaecher verweisen auf
+    # Mandanten, die dafuer schon in der Bibliothek stehen muessen.
+    reihenfolge = {ART_MANDANT: 0, ART_KREDITOR_DE: 1, ART_KREDITOR_CH: 1, ART_POSTFACH: 2}
+    alle = [z for blatt in vor["blaetter"].values() for z in blatt["zeilen"]]
+    alle.sort(key=lambda z: reihenfolge.get(z["art"], 9))
+    kreditor_ids: set[str] = set()
+    for z in alle:
+        if z["weglassen"] or not (
+                z["status"] == STATUS_GRUEN or (z["status"] == STATUS_GELB and z["beantwortet"])):
+            ergebnis["uebersprungen"] += 1
+            continue
+        if z["art"] in ARTEN_KREDITOR:
+            sid0 = _supplier_id(z["werte"])
+            if sid0 in kreditor_ids:
+                z["neu_anlegen"] = True   # gleiche Id in dieser Datei: nie ueberschreiben
+            kreditor_ids.add(sid0)
+            _anwenden_kreditor(store, z, operator)
+            ergebnis["kreditoren"] += 1
+        elif z["art"] == ART_MANDANT:
+            _anwenden_mandant(store, z, operator)
+            ergebnis["mandanten"] += 1
+        elif z["art"] == ART_POSTFACH:
+            _anwenden_postfach(store, z, operator)
+            ergebnis["postfaecher"] += 1
+            if z["werte"].get("passwort"):
+                ergebnis["passwoerter_gesetzt"] += 1
+        else:
+            ergebnis["uebersprungen"] += 1
     if any(blatt["zeilen"] and any(z["werte"].get("passwort") for z in blatt["zeilen"])
           for blatt in vor["blaetter"].values()):
         ergebnis["hinweis_passwoerter"] = (
