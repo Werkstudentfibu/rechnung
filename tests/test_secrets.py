@@ -1,11 +1,14 @@
 """Postfach-Passwoerter: nie im Klartext in den normalen Stammdaten, auf
-Linux klar markierter 0600-Fallback mit Warnung (DPAPI gibt es nur unter
-Windows -- hier nicht testbar, siehe secrets._dpapi_protect)."""
+POSIX klar markierter 0600-Fallback mit Warnung; Windows prueft DPAPI
+statt der dort absichtlich nicht vorhandenen Klartext-Fallbackdatei."""
 
 from __future__ import annotations
 
 import json
 import stat
+import sys
+
+import pytest
 from pathlib import Path
 
 from rechnung import secrets
@@ -33,6 +36,7 @@ def test_delete_password(tmp_path: Path):
     assert not secrets.has_password(store, "pf1")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows nutzt DPAPI, keinen POSIX-Klartext-Fallback")
 def test_linux_fallback_file_has_0600_permissions(tmp_path: Path):
     store = Store(tmp_path / "data")
     secrets.set_password(store, "pf1", "geheim")
@@ -65,3 +69,18 @@ def test_password_never_in_audit_log(tmp_path: Path):
     secrets.set_password(store, "pf1", "ganzGeheimesPasswort!")
     log_text = (store.root / "audit.jsonl").read_text("utf-8")
     assert "ganzGeheimesPasswort!" not in log_text
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="DPAPI ist nur unter Windows verfuegbar")
+def test_windows_dpapi_file_is_encrypted_and_no_plaintext_fallback(tmp_path: Path):
+    store = Store(tmp_path / "data")
+    password = "NurTest-keinEchtesPasswort-123!"
+    secrets.set_password(store, "pf1", password)
+    pfad = store.root / secrets.WINDOWS_DATEI
+    assert pfad.exists()
+    assert not (store.root / secrets.UNSICHER_DATEI).exists()
+    daten = json.loads(pfad.read_text("utf-8"))
+    assert daten["pf1"] and daten["pf1"] != password
+    assert password not in pfad.read_text("utf-8")
+    assert secrets.has_password(store, "pf1")
+    assert secrets.get_password(store, "pf1") == password
