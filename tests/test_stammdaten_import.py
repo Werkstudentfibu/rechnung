@@ -458,7 +458,7 @@ def test_verschmolzene_adresse_widerspruch_bleibt_keine_frage(tmp_path):
     sheets = _de_ch_sheets([DE_ROW], [ch])
     si.anwenden(store, sheets, {}, "t")
     s = store.suppliers()[0]
-    assert s.address_lines == ["Hauptstr. 1", "80331 München"]
+    assert s.address_lines == ["Hauptstr. 1", "80331 München", "DE"]
     assert "Anschrift CH: Bahnhofstr. 9, 8001 Zürich" in s.notes
     # erneuter Import: idempotent
     si.anwenden(store, sheets, {}, "t")
