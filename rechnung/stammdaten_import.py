@@ -666,17 +666,58 @@ def _dubletten_schluessel(z: dict) -> set[str]:
     return set()
 
 
+def _merge_id(werte: dict[str, str]) -> str:
+    """Gemeinsame interne Lieferanten-Id eines verschmolzenen DE/CH-Paares:
+    nur aus dem normalisierten Namen -- Kreditorennummer/UID/IBAN sind je
+    Land verschieden und wuerden wieder zwei Ids ergeben."""
+    return "kreditor-" + _slug(norm(werte.get("name", "")))
+
+
 def _markiere_dubletten(zeilen: list[dict]) -> None:
     """Zwei Zeilen DIESES Imports mit gleichem Namen/UID/IBAN -> beide gelb,
     mit Frage und Verweis aufeinander (nie stillschweigend die eine
-    bevorzugen)."""
+    bevorzugen).
+
+    Ausnahme (Entscheidung Aaron 16.10.2026): dieselbe Firma einmal im
+    Kreditor-DE- und einmal im Kreditor-CH-Blatt, Treffer NUR ueber den
+    Namen (genau eine DE- und eine CH-Zeile, keine gemeinsame UID/IBAN) --
+    ABBYY brauchte diese Trennung, wir nicht. Das ist keine Frage, sondern
+    ein automatisch zu verschmelzendes Paar (``verschmelzen``-Eintrag an
+    beiden Zeilen, ``anwenden`` legt EINEN Lieferanten an)."""
     von_schluessel: dict[str, list[dict]] = {}
     for z in zeilen:
         for k in _dubletten_schluessel(z):
             von_schluessel.setdefault(k, []).append(z)
+
+    # Zeilenpaare, die zusaetzlich UID/IBAN teilen, bleiben normale Dubletten.
+    teilt_kennung: set[frozenset] = set()
+    for k, treffer in von_schluessel.items():
+        if k.startswith("name:") or len(treffer) < 2:
+            continue
+        teilt_kennung.update(frozenset((a["schluessel"], b["schluessel"]))
+                             for a in treffer for b in treffer if a is not b)
+
+    verschmolzen: set[str] = set()
+    for k, treffer in von_schluessel.items():
+        if not k.startswith("name:") or len(treffer) != 2:
+            continue
+        de = [z for z in treffer if z["art"] == ART_KREDITOR_DE]
+        ch = [z for z in treffer if z["art"] == ART_KREDITOR_CH]
+        if len(de) != 1 or len(ch) != 1:
+            continue
+        if frozenset((de[0]["schluessel"], ch[0]["schluessel"])) in teilt_kennung:
+            continue
+        mid = _merge_id(de[0]["werte"])
+        for z, partner in ((de[0], ch[0]), (ch[0], de[0])):
+            z["verschmelzen"] = {"id": mid, "partner": partner["schluessel"],
+                                 "paar": "|".join(sorted((z["schluessel"], partner["schluessel"])))}
+            verschmolzen.add(z["schluessel"])
+
     gemeldet: set[tuple[str, str]] = set()
     for k, treffer in von_schluessel.items():
         if len(treffer) < 2:
+            continue
+        if k.startswith("name:") and all(z["schluessel"] in verschmolzen for z in treffer):
             continue
         for z in treffer:
             paar = (z["schluessel"], k)
@@ -898,12 +939,19 @@ def vorschau(store, sheets: dict[str, dict], antworten: dict | None = None) -> d
 
     zaehler = {STATUS_GRUEN: 0, STATUS_GELB: 0, STATUS_ROT: 0}
     bereit = 0
+    verschmolzen = [z for z in alle_zeilen if z.get("verschmelzen")]
     for z in alle_zeilen:
         z.pop("_mandant_codes", None)
         zaehler[z["status"]] += 1
         if not z["weglassen"] and z["beantwortet"]:
             bereit += 1
-    return {"blaetter": blaetter, "zusammenfassung": {**zaehler, "bereit_zum_uebernehmen": bereit}}
+    return {"blaetter": blaetter, "zusammenfassung": {
+        **zaehler, "bereit_zum_uebernehmen": bereit,
+        # DE/CH-Namensdubletten, die ohne Rueckfrage zu EINEM Lieferanten
+        # werden (Zeilen bzw. Paare) -- damit nachvollziehbar bleibt, was
+        # automatisch passiert ist.
+        "automatisch_verschmolzen_zeilen": len(verschmolzen),
+        "automatisch_verschmolzen_paare": len(verschmolzen) // 2}}
 
 
 # ---- Anwenden ---------------------------------------------------------------
@@ -914,7 +962,9 @@ def _slug(s: str) -> str:
     return s or "x"
 
 
-def _supplier_id(werte: dict[str, str]) -> str:
+def _supplier_id(werte: dict[str, str], verschmelzen: dict | None = None) -> str:
+    if verschmelzen:
+        return verschmelzen["id"]
     if werte.get("kreditorennummer"):
         return werte["kreditorennummer"].strip()
     if werte.get("ustid"):
@@ -934,17 +984,23 @@ def _anwenden_kreditor(store, zeile: dict, operator: str) -> str:
     from .identify import Supplier
 
     werte = zeile["werte"]
-    sid = _supplier_id(werte)
-    if zeile.get("neu_anlegen") and store.supplier(sid) is not None:
+    merge = zeile.get("verschmelzen")
+    sid = _supplier_id(werte, merge)
+    if merge and zeile.get("neu_anlegen") and store.supplier(sid) is not None:
+        # beide Zeilen des Paares muessen auf denselben neuen Datensatz zeigen
+        sid = f"{sid}-{merge['paar'].replace(':', '-').replace('|', '-')}"
+    elif zeile.get("neu_anlegen") and store.supplier(sid) is not None:
         # Mensch hat bei der Bibliotheks-Konflikt-Frage "als neuen, separaten
         # Datensatz anlegen" gewaehlt -- der gefundene Treffer bleibt
         # unberuehrt, dieser Kreditor bekommt eine eigene, nicht
         # kollidierende Id statt den Treffer zu ueberschreiben.
         sid = f"{sid}-{zeile['schluessel'].replace(':', '-')}"
+    land = "CH" if zeile["art"] == ART_KREDITOR_CH else "DE"
     sup = store.supplier(sid)
     if sup is None:
         sup = Supplier(id=sid, name=werte.get("name", ""))
-    if werte.get("name"):
+    bestand = bool(merge) and bool(sup.address_lines or sup.ustids or sup.ibans)
+    if werte.get("name") and not (merge and sup.name):
         sup.name = werte["name"]
     if werte.get("strasse") or werte.get("plz") or werte.get("ort"):
         zeile_adresse = [x for x in (
@@ -953,19 +1009,38 @@ def _anwenden_kreditor(store, zeile: dict, operator: str) -> str:
         ) if x]
         if zeile_adresse:
             land_code = "CH" if zeile["art"] == ART_KREDITOR_CH else "DE"
-            sup.address_lines = zeile_adresse + [land_code]
+            bestehende_adresse = (sup.address_lines[:-1]
+                                  if sup.address_lines and sup.address_lines[-1] in ("DE", "CH")
+                                  else sup.address_lines)
+            if merge and bestehende_adresse and bestehende_adresse != zeile_adresse:
+                # verschmolzenes Paar, Adressen beider Laender verschieden: die
+                # zuerst angewendete bleibt Hauptanschrift, die andere geht nicht
+                # verloren, sondern steht (einmalig) in den Notizen.
+                vermerk = f"Anschrift {land}: {', '.join(zeile_adresse)}"
+                if vermerk not in sup.notes:
+                    sup.notes = (sup.notes + "\n" if sup.notes else "") + vermerk
+            else:
+                sup.address_lines = zeile_adresse + [land_code]
     if werte.get("notiz"):
         sup.notes = _notizen_ergaenzen(sup.notes, werte["notiz"])
     if werte.get("ustid"):
         sup.ustids = sorted(set(sup.ustids) | {werte["ustid"]})
     if werte.get("iban"):
         sup.ibans = sorted(set(sup.ibans) | {re.sub(r"\s+", "", werte["iban"]).upper()})
-    if werte.get("bic"):
+    if werte.get("bic") and not (merge and bestand and sup.bic):
         sup.bic = werte["bic"]
-    if werte.get("steuernummer"):
+    if werte.get("steuernummer") and not (merge and bestand and sup.creditor_id):
         sup.creditor_id = werte["steuernummer"]
     if werte.get("kreditorennummer"):
-        sup.external_id = werte["kreditorennummer"]
+        nr = werte["kreditorennummer"]
+        sup.external_ids = {**sup.external_ids, land: nr}
+        if merge:
+            # Rueckfallwert (Rueckwaertskompatibilitaet): deterministisch die
+            # DE-Nummer, sonst die vorhandene -- massgeblich ist je Beleg
+            # ``external_id_fuer(land)``.
+            sup.external_id = sup.external_ids.get("DE") or sup.external_id or nr
+        else:
+            sup.external_id = nr
     sup.currency = "CHF" if zeile["art"] == ART_KREDITOR_CH else "EUR"
     if werte.get("mandant_verweis"):
         addr_id = _slug(werte["mandant_verweis"])
@@ -1059,25 +1134,30 @@ def anwenden(store, sheets: dict[str, dict], antworten: dict | None, operator: s
     die nicht per "Zeile weglassen" ausgeschlossen sind."""
     vor = vorschau(store, sheets, antworten)
     ergebnis = {"kreditoren": 0, "mandanten": 0, "postfaecher": 0,
-               "uebersprungen": 0, "passwoerter_gesetzt": 0}
+               "uebersprungen": 0, "passwoerter_gesetzt": 0,
+               "verschmolzene_lieferanten": 0}
     # Reihenfolge unabhaengig von der Blattreihenfolge: Postfaecher verweisen auf
     # Mandanten, die dafuer schon in der Bibliothek stehen muessen.
     reihenfolge = {ART_MANDANT: 0, ART_KREDITOR_DE: 1, ART_KREDITOR_CH: 1, ART_POSTFACH: 2}
     alle = [z for blatt in vor["blaetter"].values() for z in blatt["zeilen"]]
     alle.sort(key=lambda z: reihenfolge.get(z["art"], 9))
     kreditor_ids: set[str] = set()
+    verschmolzen_ids: set[str] = set()
     for z in alle:
         if z["weglassen"] or not (
                 z["status"] == STATUS_GRUEN or (z["status"] == STATUS_GELB and z["beantwortet"])):
             ergebnis["uebersprungen"] += 1
             continue
         if z["art"] in ARTEN_KREDITOR:
-            sid0 = _supplier_id(z["werte"])
-            if sid0 in kreditor_ids:
+            merge = z.get("verschmelzen")
+            sid0 = _supplier_id(z["werte"], merge)
+            if sid0 in kreditor_ids and not merge:
                 z["neu_anlegen"] = True   # gleiche Id in dieser Datei: nie ueberschreiben
             kreditor_ids.add(sid0)
-            _anwenden_kreditor(store, z, operator)
+            sid = _anwenden_kreditor(store, z, operator)
             ergebnis["kreditoren"] += 1
+            if merge:
+                verschmolzen_ids.add(sid)
         elif z["art"] == ART_MANDANT:
             _anwenden_mandant(store, z, operator)
             ergebnis["mandanten"] += 1
@@ -1088,6 +1168,7 @@ def anwenden(store, sheets: dict[str, dict], antworten: dict | None, operator: s
                 ergebnis["passwoerter_gesetzt"] += 1
         else:
             ergebnis["uebersprungen"] += 1
+    ergebnis["verschmolzene_lieferanten"] = len(verschmolzen_ids)
     if any(blatt["zeilen"] and any(z["werte"].get("passwort") for z in blatt["zeilen"])
           for blatt in vor["blaetter"].values()):
         ergebnis["hinweis_passwoerter"] = (

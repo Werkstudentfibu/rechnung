@@ -37,6 +37,7 @@ from .identify import (DEFAULT_CURRENCY, EXPECTED_RATES, FIXED_FIELD_TYPES, IBAN
                        NEW_SUPPLIER_HOLD, POSITIONSMODI, POSITIONSMODUS_EINE_POSITION,
                        POSITIONSMODUS_EINZELN, POSITIONSMODUS_ZUSAMMENFASSUNG, Supplier,
                        _address_scope_reason, _detect_currency, cross_check,
+                       land_aus_beleg_text, land_aus_kennungen,
                        extract_identifiers, identify_einvoice, identify_with_reason, kandidaten)
 from .store import Store
 from .suggest import similar_suppliers, suggest_category
@@ -427,6 +428,20 @@ def _iban_master_check(supplier, invoice_ibans: set[str], fields: dict) -> Check
                  "ok" if seen else "keine IBAN auf der Rechnung -- Stammdaten-IBAN verwendet")
 
 
+def _setze_lieferantennummer(res, supplier, land: str | None) -> None:
+    """Lieferantennummer (Fremdsystem) fuer JobRouter. Hat der Lieferant je
+    Land eine eigene Nummer (verschmolzene DE/CH-Kreditoren, Stammdaten-
+    Import 16.10.2026), zaehlt die zum Beleg passende; ist das Land nicht
+    erkennbar, wird keine geraten -- stattdessen bleibt der Beleg beim
+    Menschen."""
+    nummer = supplier.external_id_fuer(land)
+    res.supplier_external_id = nummer or None
+    if not nummer and supplier.external_id_mehrdeutig:
+        res.hold_reasons.append(
+            "Lieferant hat je Land (DE/CH) eine eigene Lieferantennummer, das Land "
+            "des Belegs ist nicht erkennbar -- bitte Nummer pruefen")
+
+
 def _billing_check(text: str, store: Store, res: "Result") -> Check:
     """Rechnungsadresse eindeutig aus der Bibliothek? Setzt bei Treffer
     ``res.billing_address_*``, sonst einen Rueckstellgrund. Solange (noch)
@@ -788,7 +803,8 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
             supplier, res.match_score = match
             res.supplier_id = supplier.id
             res.supplier_name = supplier.name
-            res.supplier_external_id = supplier.external_id or None
+            _setze_lieferantennummer(
+                res, supplier, land_aus_kennungen([inv.verkaeufer_ustid], inv.verkaeufer_iban))
             if not supplier.bestaetigt:
                 res.hold_reasons.append(NEW_SUPPLIER_HOLD)
         else:
@@ -1507,7 +1523,7 @@ def _process(path: str | Path, store: Store, use_llm: bool = True,
     supplier, score = match
     res.supplier_id = supplier.id
     res.supplier_name = supplier.name
-    res.supplier_external_id = supplier.external_id or None
+    _setze_lieferantennummer(res, supplier, land_aus_beleg_text(supplier, doc.text))
     res.match_score = score
     if not supplier.bestaetigt:
         # Entwurf (frisch angelegt oder ein vorhandener, noch nicht

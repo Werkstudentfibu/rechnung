@@ -1423,6 +1423,34 @@ Bekannte Grenzen: ein unzuordenbarer Postfach-Anhang bleibt bewusst bei
 (`belegart.ANLAGEN`) ist nicht vollstaendig -- unbekannte Formulierungen
 landen weiterhin normal bei "Menschliche Bearbeitung", nicht faelschlich hier.
 
+## 7ae. Stammdaten-Import aus Excel: DE/CH-Dubletten verschmelzen (Entscheidung Aaron 16.10.2026)
+
+Der Excel-Import (`rechnung/stammdaten_import.py`, Reiter „Stammdaten“) fragt
+bei jeder Unsicherheit nach, statt zu raten. Eine Ausnahme ist entschieden:
+**dieselbe Firma einmal im Kreditor-DE- und einmal im Kreditor-CH-Blatt**
+(ABBYY brauchte die Trennung, wir nicht) wird ohne Rückfrage zu **einem**
+Lieferanten.
+
+- Bedingung: Treffer nur über den normalisierten **Namen**, genau eine
+  DE- und eine CH-Zeile, keine gemeinsame UID/IBAN. Interne Id =
+  `kreditor-<normalisierter Name>`.
+- IBANs und UIDs werden vereinigt. Die erste Anschrift bleibt Hauptanschrift,
+  die zweite steht einmalig in den Notizen („Anschrift CH: …“) – verschiedene
+  Anschriften sind bei zwei Ländern der Normalfall und **kein** Widerspruch.
+- **Lieferantennummer (`external_id`)**: ABBYY kann DE und CH verschiedene
+  Nummern gegeben haben. `Supplier.external_ids` hält sie je Land
+  (`{"DE": "…", "CH": "…"}`); `external_id` bleibt als Rückfall (DE-Nummer).
+  Bei der Rechnung wählt `external_id_fuer(land)` die passende Nummer; das Land
+  kommt aus den UIDs/IBANs des Lieferanten, die im Beleg stehen (bei E-Rechnung
+  aus dem XML). Ist das Land nicht erkennbar, wird **nicht geraten**: keine
+  Nummer, der Beleg bleibt mit Hinweis beim Menschen. Lieferanten mit nur einer
+  Nummer verhalten sich unverändert.
+- Weiterhin Rückfrage: Dublette innerhalb eines Landes, Treffer über UID/IBAN,
+  Gruppen mit mehr als einer DE- oder CH-Zeile.
+- Die Vorschau zeigt „N Firmen automatisch verschmolzen“, die Zeilen tragen
+  ein Kennzeichen „verschmolzen mit …“; nach dem Übernehmen steht die Anzahl
+  im Ergebnis.
+
 ## 8. Offene Punkte für v1.1
 
 - Template-Export/-Import zwischen Kollegen (eine `.zip` mit `data/`).

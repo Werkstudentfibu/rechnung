@@ -268,6 +268,18 @@ strikt auf Dateien begrenzt, die tatsächlich im Ordner „Keine Rechnung“
 liegen (kein Pfad-Traversal über die API) – eine Datei mit demselben sha256
 im Archiv/als verarbeitete Rechnung bleibt unberührt.
 
+## Excel-Stammdaten-Import: DE/CH-Firmen werden verschmolzen (16.10.2026)
+
+Steht dieselbe Firma (gleicher Name) im Kreditor-Deutschland- **und** im
+Kreditor-Schweiz-Blatt, wird sie beim Import ohne Rückfrage zu **einem**
+Lieferanten mit den IBANs/UIDs beider Seiten. Beide ABBYY-Lieferantennummern
+bleiben erhalten; an JobRouter geht je Beleg die zum Land der Rechnung
+passende (Land aus UID/IBAN des Belegs). Ist das Land nicht erkennbar, bleibt
+der Beleg beim Menschen. Die Vorschau zählt diese Firmen extra
+(„N automatisch verschmolzen“), sodass nicht mehr jede einzeln geprüft werden
+muss. Dubletten innerhalb eines Landes und UID-/IBAN-Treffer bleiben Fragen.
+Details: SPEC-v1.md §7ae.
+
 ## Texterkennung für Scans (OCR)
 
 PDFs ohne Textebene sowie Bild-Anhänge (`.jpg`, `.jpeg`, `.png`, `.tif`,

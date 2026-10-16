@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import re
 
+from .identify import land_aus_kennungen
+
 LAENDER = {"deutschland": "DE", "germany": "DE", "schweiz": "CH", "suisse": "CH",
            "switzerland": "CH", "österreich": "AT", "oesterreich": "AT", "austria": "AT"}
 _PLZ_ORT = re.compile(r"^(?:([A-Z]{2})[- ])?(\d{4,5})\s+(.+)$")
@@ -72,7 +74,11 @@ def lieferant(sup, iban_rechnung: str | None = None) -> dict | None:
     gelesen = (iban_rechnung or "").replace(" ", "").upper()
     iban = gelesen if gelesen in ibans else (ibans[0] if ibans else "")
     ust = sup.ustids[0] if sup.ustids else ""
-    return {"id": sup.external_id or sup.id, "name": sup.name, "ustid": ust,
+    # Lieferanten mit je Land eigener Nummer (verschmolzene DE/CH-Kreditoren):
+    # Land aus der IBAN der Rechnung, sonst Rueckfall wie bisher.
+    nummer = (sup.external_id_fuer(land_aus_kennungen(ibans=[iban_rechnung or ""]))
+              or sup.external_id)
+    return {"id": nummer or sup.id, "name": sup.name, "ustid": ust,
             "steuernummer": sup.creditor_id,
             "strasse": a["strasse"], "plz": a["plz"], "ort": a["ort"],
             "land": a["land"] or _land_aus(ust, iban),

@@ -96,6 +96,13 @@ class Supplier:
     # BusinessUnitId ist die interne ``id`` zusammengesetzt (siehe importers.py),
     # ``external_id`` bleibt die reine Fremd-Id fuer den Export (jobrouter.py).
     external_id: str = ""
+    # Je Land ("DE"/"CH") die Fremd-Lieferantennummer, wenn ein Lieferant aus
+    # einem DE- und einem CH-Kreditorensatz verschmolzen wurde (Stammdaten-
+    # Import, Entscheidung Aaron 16.10.2026): ABBYY hat der DE- und der
+    # CH-Seite derselben Firma ggf. verschiedene Nummern gegeben, JobRouter
+    # braucht die zum Beleg passende (``external_id_fuer``). ``external_id``
+    # bleibt als Rueckfall/Rueckwaertskompatibilitaet bestehen.
+    external_ids: dict[str, str] = field(default_factory=dict)
     # Entwurfsstatus (Entscheidung Aaron 09.10.2026): ersetzt die bisherige
     # Regel "Lieferanten werden nie automatisch angelegt" (SPEC §7h) -- ein
     # beim Verarbeiten einer Rechnung automatisch angelegter, noch nicht
@@ -135,12 +142,32 @@ class Supplier:
     # -- unterscheidet "noch nie entschieden" vom Standardwert "einzeln".
     positionsmodus_gesetzt: bool = False
 
+    def external_id_fuer(self, land: str | None) -> str:
+        """Fremd-Lieferantennummer fuer einen Beleg aus ``land`` ("DE"/"CH"/
+        ``None`` = nicht erkennbar). Hat der Lieferant nur EINE Nummer (der
+        Normalfall), gilt sie immer. Hat er mehrere verschiedene und das Land
+        ist unbekannt (oder hat dafuer keine), wird NICHT geraten: ``""``."""
+        if land and self.external_ids.get(land):
+            return self.external_ids[land]
+        verschieden = set(v for v in self.external_ids.values() if v)
+        if self.external_id:
+            verschieden.add(self.external_id)
+        if len(verschieden) > 1:
+            return ""
+        return self.external_id or next(iter(verschieden), "")
+
+    @property
+    def external_id_mehrdeutig(self) -> bool:
+        return len(set(v for v in self.external_ids.values() if v)
+                   | ({self.external_id} if self.external_id else set())) > 1
+
     def to_dict(self) -> dict:
         return {
             "id": self.id, "name": self.name, "ustids": self.ustids,
             "ibans": self.ibans, "domains": self.domains,
             "fingerprint": self.fingerprint,
             "addresses": self.addresses, "external_id": self.external_id,
+            "external_ids": self.external_ids,
             "address_lines": self.address_lines, "bank_name": self.bank_name,
             "bic": self.bic, "bank_code": self.bank_code,
             "bank_account": self.bank_account, "creditor_id": self.creditor_id,
@@ -162,6 +189,7 @@ class Supplier:
             ibans=d.get("ibans", []), domains=d.get("domains", []),
             fingerprint=d.get("fingerprint", []),
             addresses=d.get("addresses", []), external_id=d.get("external_id", ""),
+            external_ids=dict(d.get("external_ids") or {}),
             address_lines=d.get("address_lines", []),
             bank_name=d.get("bank_name", ""), bic=d.get("bic", ""),
             bank_code=d.get("bank_code", ""), bank_account=d.get("bank_account", ""),
@@ -469,3 +497,32 @@ def identify_einvoice(inv, suppliers: list[Supplier]):
         if len(by_name) == 1:
             return by_name[0], 0.6
     return None
+
+
+def land_aus_kennungen(ustids=(), ibans=()) -> str | None:
+    """"DE"/"CH" aus UIDs/IBANs eines Belegs, wenn sie GENAU ein Land
+    ergeben; sonst ``None`` (nicht erkennbar oder widerspruechlich -- nie
+    raten)."""
+    laender = set()
+    for u in ustids:
+        n = norm_ustid(u)
+        if n.startswith("CHE"):
+            laender.add("CH")
+        elif n.startswith("DE"):
+            laender.add("DE")
+    for i in ibans:
+        k = re.sub(r"\s+", "", str(i or "")).upper()
+        if k[:2] in ("DE", "CH"):
+            laender.add(k[:2])
+    return next(iter(laender)) if len(laender) == 1 else None
+
+
+def land_aus_beleg_text(sup: "Supplier", text: str) -> str | None:
+    """Land eines Belegs anhand der UIDs/IBANs des Lieferanten, die im Text
+    stehen (Beleg einer DE-Seite nennt die DE-UID/-IBAN, einer CH-Seite die
+    CH-Kennungen)."""
+    kompakt = re.sub(r"\s+", "", (text or "").upper())
+    ustids_im_text = find_ustids(text or "")
+    ust = [u for u in sup.ustids if norm_ustid(u) in ustids_im_text]
+    ib = [i for i in sup.ibans if re.sub(r"\s+", "", i).upper() in kompakt]
+    return land_aus_kennungen(ust, ib)
