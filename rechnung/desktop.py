@@ -73,7 +73,12 @@ def run(store: Store, samples: Path, port: int = 8000,
     # maximiert: 1360x900 ist auf einem Laptop mit Skalierung groesser als der Bildschirm
     webview.create_window(title, f"http://127.0.0.1:{port}", width=1360, height=900,
                           maximized=True)
-    webview.start()
+    # debug=True (Befund Aaron 16.10.2026: Text im Fenster liess sich nicht markieren/
+    # kopieren) -- pywebview schaltet ohne debug=True auf manchen Backends (u. a.
+    # WebView2/Windows) das native Rechtsklick-Menu ab, darueber laeuft dort auch
+    # Kopieren. Nebenwirkung: Rechtsklick zeigt zusaetzlich "Element untersuchen" --
+    # auf Aarons eigenem Geraet unproblematisch.
+    webview.start(debug=True)
 
     server.should_exit = True
     thread.join(timeout=2.0)
