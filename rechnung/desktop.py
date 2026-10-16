@@ -43,6 +43,15 @@ def run(store: Store, samples: Path, port: int = 8000,
     from .web.server import create_app
 
     app = create_app(store, Path(samples))
+    # Zwischenspeicher fuer den Excel-Import (Befund Aaron 16.10.2026: eingelesene
+    # Listen waren nach dem Schliessen weg). Faellt er aus, startet das Programm
+    # trotzdem -- die Excel-Seite arbeitet dann wie bisher ohne Zwischenstand.
+    try:
+        from .stammdaten_entwurf import registrieren as entwurf_registrieren
+
+        entwurf_registrieren(app, store)
+    except Exception as e:  # noqa: BLE001
+        print(f"Hinweis: Zwischenspeicher fuer den Excel-Import nicht verfuegbar ({e})")
     # Belegt ein alter, haengengebliebener Prozess den Port, wuerde sich das
     # Fenster sonst still mit DESSEN (altem) Stand verbinden -- Befund Aaron
     # 09.10.2026: Update installiert, Oberflaeche trotzdem alt. Dann lieber
