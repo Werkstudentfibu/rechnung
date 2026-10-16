@@ -13,6 +13,7 @@ from . import spaltenwoerter as spaltenwoerter_mod
 from .billing import BillingAddress
 from .identify import Supplier
 from .positionen import ordered_columns
+from .postfach import Postfach
 from .template import Template
 from .textnorm import norm
 
@@ -117,6 +118,8 @@ class Store:
         self._confirmations_log = self.root / "confirmations.jsonl"
         self._shadow = self.root / "shadow.jsonl"
         self._events = self.root / "events.jsonl"
+        self._postfaecher = self.root / "postfaecher.json"
+        self._dateien_mandant = self.root / "dateien_mandant.json"
         self._processed_cache: list[dict] | None = None
         self._supplier_index_cache: dict | None = None
         self._supplier_index_sig: tuple | None = None
@@ -201,6 +204,50 @@ class Store:
             self._addresses, json.dumps([x.to_dict() for x in rows], indent=2, ensure_ascii=False)
         )
         self._supplier_index_cache = None
+
+    # ---- Postfaecher (Excel-Stammdaten-Import, Entscheidung Aaron
+    # 15.10.2026: ~50 IONOS-Postfaecher, je Mandant eines) -----------
+    # Passwoerter liegen bewusst NICHT hier, sondern in secrets.py.
+    def postfaecher(self) -> list[Postfach]:
+        return [Postfach.from_dict(d) for d in _read_json_safe(self._postfaecher, [])]
+
+    def postfach(self, postfach_id: str) -> Postfach | None:
+        return next((p for p in self.postfaecher() if p.id == postfach_id), None)
+
+    def save_postfach(self, p: Postfach) -> None:
+        rows = {x.id: x for x in self.postfaecher()}
+        rows[p.id] = p
+        _atomic_write(
+            self._postfaecher,
+            json.dumps([x.to_dict() for x in rows.values()], indent=2, ensure_ascii=False),
+        )
+
+    def delete_postfach(self, postfach_id: str) -> None:
+        rows = [x for x in self.postfaecher() if x.id != postfach_id]
+        _atomic_write(
+            self._postfaecher, json.dumps([x.to_dict() for x in rows], indent=2, ensure_ascii=False)
+        )
+
+    # ---- Mandant je abgeholter Datei (sha256 -> BillingAddress.id) --
+    # Geschrieben beim Postfach-Abholen (ingest.handle_mail), damit die
+    # Pipeline weiss, aus welchem Postfach (= welcher Mandant) eine Rechnung
+    # kam -- starker Hinweis fuer den Geschaeftsbereich, siehe pipeline.py.
+    def _dateien_mandant_map(self) -> dict:
+        return _read_json_safe(self._dateien_mandant, {})
+
+    def datei_mandant(self, sha: str) -> str | None:
+        if not sha:
+            return None
+        return self._dateien_mandant_map().get(sha)
+
+    def set_datei_mandant(self, sha: str, address_id: str) -> None:
+        if not sha or not address_id:
+            return
+        m = self._dateien_mandant_map()
+        if m.get(sha) == address_id:
+            return
+        m[sha] = address_id
+        _atomic_write(self._dateien_mandant, json.dumps(m, indent=2, ensure_ascii=False))
 
     # ---- Templates --------------------------------------------------
     def _tpl_path(self, tid: str) -> Path:

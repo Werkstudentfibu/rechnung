@@ -244,6 +244,24 @@ class AddressPost(BaseModel):
     notes: str = ""
 
 
+class PostfachPost(BaseModel):
+    """Postfach-Stammdaten (Entscheidung Aaron 15.10.2026, ~50 IONOS-
+    Postfaecher). ``passwort`` ist optional -- leer = Passwort unveraendert
+    lassen, nie wird ein vorhandenes Passwort durch Leerlassen geloescht
+    (dafuer gibt es den eigenen Knopf/Endpunkt)."""
+    id: str
+    mandant_id: str = ""
+    mandant_name: str = ""
+    user: str = ""
+    host: str = "imap.ionos.de"
+    port: int = 993
+    ssl: bool = True
+    source_folder: str = "INBOX"
+    done_folder: str = ""
+    aktiv: bool = True
+    passwort: str = ""
+
+
 def _sha(path: Path) -> str:
     """Datei-Hash wie pdf.load().sha256 -- funktioniert auch fuer XML."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -388,7 +406,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if samples.is_dir():
             vorverarbeiter.einreihen(invoice_files(samples))
 
-    abholer = aus_konfiguration(samples,
+    abholer = aus_konfiguration(samples, store=store,
                                 bei_neuen=vorverarbeiter.einreihen if vorverarbeiter else None)
     if abholer is not None:
         abholer.start()
@@ -463,6 +481,137 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                 return JSONResponse({"anzahl": n, "fehlend": sorted(set(fehlend))})
             except ValueError as e:
                 raise HTTPException(400, str(e))
+
+    # ---- Excel-Stammdaten-Import (Entscheidung Aaron 15.10.2026) --------
+    # Grundsatz (Aaron, woertlich): "Wenn das Programm irgendwo nicht sicher
+    # ist, soll es nicht raten, sondern mir Bescheid geben" -- siehe
+    # stammdaten_import.py. Zustandslos: die geparsten Zeilen reisen
+    # zwischen den drei Schritten (Hochladen -> Vorschau -> Uebernehmen) im
+    # Client mit, nur die bestaetigte Spaltenzuordnung je Layout und das
+    # Ergebnis selbst werden serverseitig gemerkt.
+    @app.post("/api/stammdaten/parse")
+    def stammdaten_parse(body: dict) -> JSONResponse:
+        """Excel-Datei (xlsx) einlesen -> je Blatt Kopfzeile/Datenzeilen plus
+        einen Zuordnungs-/Art-Vorschlag. Entscheidet nichts -- der naechste
+        Schritt (Vorschau) ist die eigentliche Pruefung."""
+        import base64
+
+        from .. import stammdaten_import as si
+        from ..xlsx import XlsxError, header_and_rows, read_workbook
+
+        try:
+            daten = base64.b64decode(body.get("inhalt") or "", validate=True)
+        except ValueError:
+            raise HTTPException(400, "Datei nicht lesbar (kein gueltiges Base64)")
+        if not daten:
+            raise HTTPException(400, "Datei ist leer")
+        try:
+            rohblaetter = read_workbook(daten)
+        except XlsxError as e:
+            raise HTTPException(400, str(e))
+        sheets = {}
+        for name, rows in rohblaetter.items():
+            headers, datenzeilen = header_and_rows(rows)
+            if not headers:
+                continue
+            gelernt = si.gelernte_zuordnung(store, headers)
+            mapping = (gelernt or {}).get("mapping") or si.spalten_vorschlag(headers)
+            art_vorschlag = si.art_vorschlag(name, mapping)
+            art = (gelernt or {}).get("art") or art_vorschlag
+            sheets[name] = {
+                "headers": headers, "rows": datenzeilen, "mapping": mapping, "art": art,
+                "art_vorschlag": art_vorschlag, "gelernt": gelernt is not None,
+            }
+        if not sheets:
+            raise HTTPException(400, "Keine Tabelle mit einer Kopfzeile gefunden")
+        return JSONResponse({"sheets": sheets, "zielfelder": sorted(si.ZIELFELDER),
+                            "arten": list(si.BLATT_ARTEN)})
+
+    @app.post("/api/stammdaten/vorschau")
+    def stammdaten_vorschau(body: dict) -> JSONResponse:
+        """Zeilenpruefung mit aktueller Zuordnung + Antworten -- Ampel
+        gruen/gelb/rot je Zeile, jede Unsicherheit als begruendete Frage."""
+        from .. import stammdaten_import as si
+
+        sheets = body.get("sheets") or {}
+        if not sheets:
+            raise HTTPException(400, "keine Blaetter uebergeben")
+        return JSONResponse(si.vorschau(store, sheets, body.get("antworten") or {}))
+
+    @app.post("/api/stammdaten/uebernehmen")
+    def stammdaten_uebernehmen(body: dict) -> JSONResponse:
+        """Nur gruene Zeilen + vollstaendig beantwortete gelbe/rote Zeilen
+        werden uebernommen -- die komplette Pruefung laeuft dabei
+        serverseitig NEU (vertraut nie einer vom Client mitgeschickten
+        Ampel). Lernt dabei die bestaetigte Spaltenzuordnung je Blatt-Layout."""
+        from .. import stammdaten_import as si
+        from ..config import operator as _operator
+
+        sheets = body.get("sheets") or {}
+        if not sheets:
+            raise HTTPException(400, "keine Blaetter uebergeben")
+        op = _operator()
+        antworten = body.get("antworten") or {}
+        # Die tatsaechlich VERWENDETE Zuordnung (inkl. automatisch
+        # vorgeschlagener, falls der Client ``mapping``/``art`` leer liess)
+        # merken -- nicht nur, was der Client zufaellig mitschickte.
+        vor = si.vorschau(store, sheets, antworten)
+        ergebnis = si.anwenden(store, sheets, antworten, op)
+        for name, blatt in vor["blaetter"].items():
+            headers = (sheets.get(name) or {}).get("headers")
+            if headers and blatt.get("mapping") and blatt.get("art"):
+                si.zuordnung_lernen(store, headers, blatt["mapping"], blatt["art"], op)
+        return JSONResponse(ergebnis)
+
+    # ---- Mehrere Postfaecher (Entscheidung Aaron 15.10.2026) -----------
+    @app.get("/api/postfaecher")
+    def list_postfaecher() -> JSONResponse:
+        from .. import secrets as secrets_mod
+
+        return JSONResponse([
+            {**p.to_dict(), "passwort_gesetzt": secrets_mod.has_password(store, p.id)}
+            for p in store.postfaecher()
+        ])
+
+    @app.post("/api/postfaecher")
+    def save_postfach_ep(body: PostfachPost) -> JSONResponse:
+        from .. import secrets as secrets_mod
+        from ..config import operator as _operator
+        from ..postfach import Postfach
+
+        store.save_postfach(Postfach(
+            id=body.id, mandant_id=body.mandant_id.strip(),
+            mandant_name=body.mandant_name.strip(), user=body.user.strip(),
+            host=body.host.strip() or "imap.ionos.de", port=body.port, ssl=body.ssl,
+            source_folder=body.source_folder.strip() or "INBOX",
+            done_folder=body.done_folder.strip(), aktiv=body.aktiv,
+        ))
+        if body.passwort:
+            secrets_mod.set_password(store, body.id, body.passwort, _operator())
+        return JSONResponse({"ok": True})
+
+    @app.delete("/api/postfaecher/{postfach_id}")
+    def delete_postfach_ep(postfach_id: str) -> JSONResponse:
+        from .. import secrets as secrets_mod
+        from ..config import operator as _operator
+
+        store.delete_postfach(postfach_id)
+        secrets_mod.delete_password(store, postfach_id, _operator())
+        return JSONResponse({"ok": True})
+
+    @app.post("/api/postfaecher/testen")
+    def postfaecher_testen() -> JSONResponse:
+        """"Alle testen" -- Verbindung/Login/Ordner je Postfach pruefen,
+        OHNE etwas abzuholen (wie ``rechnung imap-test``, nur fuer alle
+        konfigurierten Postfaecher statt nur dem ENV-Postfach)."""
+        from .. import ingest
+        from ..config import postfaecher as postfaecher_cfg
+
+        out = []
+        for label, cfg, mandant_id in postfaecher_cfg(store):
+            c = ingest.check_connection(cfg)
+            out.append({"postfach": label, "mandant_id": mandant_id, **c})
+        return JSONResponse({"ergebnisse": out})
 
     @app.get("/api/postfach-bericht")
     def postfach_bericht() -> JSONResponse:
