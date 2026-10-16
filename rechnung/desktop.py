@@ -71,14 +71,15 @@ def run(store: Store, samples: Path, port: int = 8000,
         raise SystemExit(f"Programm-Server startete nicht (Port {port}).")
 
     # maximiert: 1360x900 ist auf einem Laptop mit Skalierung groesser als der Bildschirm
+    # text_select=True (Korrektur 16.10.2026 -- Befund Aaron: Text liess sich nicht
+    # markieren/kopieren): pywebview blendet Textmarkierung standardmaessig per
+    # eigenem CSS komplett aus (webview/js/customize.js, "user-select: none"),
+    # UNABHAENGIG vom debug-Modus -- der erste Versuch mit debug=True war daher der
+    # falsche Hebel und hat nur ungewollt das DevTools-Fenster beim Start mitgeoeffnet.
+    # Zurueckgenommen, stattdessen der dafuer vorgesehene Schalter.
     webview.create_window(title, f"http://127.0.0.1:{port}", width=1360, height=900,
-                          maximized=True)
-    # debug=True (Befund Aaron 16.10.2026: Text im Fenster liess sich nicht markieren/
-    # kopieren) -- pywebview schaltet ohne debug=True auf manchen Backends (u. a.
-    # WebView2/Windows) das native Rechtsklick-Menu ab, darueber laeuft dort auch
-    # Kopieren. Nebenwirkung: Rechtsklick zeigt zusaetzlich "Element untersuchen" --
-    # auf Aarons eigenem Geraet unproblematisch.
-    webview.start(debug=True)
+                          maximized=True, text_select=True)
+    webview.start()
 
     server.should_exit = True
     thread.join(timeout=2.0)
