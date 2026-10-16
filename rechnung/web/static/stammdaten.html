@@ -93,7 +93,7 @@ const SLOTS = [
 ];
 
 const S = { slots: {}, slotFehler: {}, zielfelder: [], vor: null, antworten: {}, fehler: '', ergebnis: null,
-            busy: false, nurOffen: true };
+            busy: false, nurOffen: true, sicherung: '', warnung: '' };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const lbl = (k) => LABEL[k] || k;
@@ -222,7 +222,10 @@ async function uebernehmen() {
   S.busy = false; render();
 }
 
-function neu() { S.slots = {}; S.slotFehler = {}; S.vor = null; S.antworten = {}; S.ergebnis = null; S.fehler = ''; render(); }
+function neu() {
+  if (hatDaten() && !S.ergebnis && !confirm('Alle hochgeladenen Listen und Antworten verwerfen?\nDer gespeicherte Zwischenstand wird dabei ebenfalls gelöscht.')) return;
+  S.slots = {}; S.slotFehler = {}; S.vor = null; S.antworten = {}; S.ergebnis = null; S.fehler = ''; render();
+}
 
 function beispiel(b, i) {
   const h = b.headers[i];
@@ -330,6 +333,8 @@ function render() {
     h += `<h2>Stammdaten aus Excel hochladen</h2>
       <p class="hint">Laden Sie in jedem Bereich die passende Excel-Datei (.xlsx) hoch. Das Programm erkennt die Spalten und sortiert die Einträge selbst an die richtigen Stellen.
       Wo es nicht sicher ist, fragt es nach – es übernimmt nichts, was Sie nicht gesehen haben. Sie müssen nicht alle vier Bereiche auf einmal befüllen.</p>
+      ${S.warnung ? `<div class="warn" role="alert">${esc(S.warnung)}</div>` : ''}
+      <p class="klein" id="sicherung">${esc(S.sicherung)}</p>
       <div class="slots">${SLOTS.map(slotHtml).join('')}</div>`;
     if (S.busy) h += `<p>Bitte warten …</p>`;
     if (hatDaten()) {
@@ -349,6 +354,7 @@ function render() {
   }
   $('app').innerHTML = h;
   bindeDateien();
+  entwurfSync();
 }
 
 function lesen(slotId, file) {
@@ -393,7 +399,82 @@ $('app').addEventListener('change', (e) => {
   if (el && el.tagName !== 'BUTTON') aktion(el);
 });
 
+// ---- Zwischenspeicher (Befund Aaron 16.10.2026: "die eingelesenen Tabellen sind weg, wenn man das
+// Programm schließt") --------------------------------------------------------------------------------
+// Hochgeladene Listen, Spaltenzuordnung und Antworten bleiben auf diesem Rechner gespeichert, bis sie
+// übernommen oder verworfen werden -- auch nach dem Schließen des Programms. Das ist KEINE Übernahme:
+// in die Bibliothek kommt weiterhin nur, was Sie im Schritt "übernehmen" gesehen haben. Passwörter
+// legt der Server getrennt verschlüsselt ab (stammdaten_entwurf.py), nie im Klartext in der Datei.
+const ENTWURF_URL = '/api/stammdaten/entwurf';
+const ENTW = { bereit: false, an: true, letzter: '', timer: null };
+const entwurfStand = () => hatDaten()
+  ? JSON.stringify({ slots: S.slots, antworten: S.antworten, zielfelder: S.zielfelder, nurOffen: S.nurOffen })
+  : '';
+
+function sicherungAnzeigen(text) {
+  S.sicherung = text;
+  const el = document.getElementById('sicherung');
+  if (el) el.textContent = text;
+}
+
+function entwurfSync() {
+  if (!ENTW.bereit || !ENTW.an) return;
+  const jetzt = entwurfStand();
+  if (jetzt === ENTW.letzter) return;
+  clearTimeout(ENTW.timer);
+  ENTW.timer = setTimeout(() => entwurfSichern(jetzt), 500);
+}
+
+async function entwurfSichern(stand) {
+  ENTW.timer = null;
+  try {
+    const r = await fetch(ENTWURF_URL, stand
+      ? { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: stand }
+      : { method: 'DELETE' });
+    if (r.status === 404 || r.status === 405) { ENTW.an = false; return; }   // älterer Programmstand ohne Zwischenspeicher
+    if (!r.ok) {
+      let j = null;
+      try { j = await r.json(); } catch (e) { /* leere Antwort */ }
+      throw new Error((j && j.detail) || ('Fehler ' + r.status));
+    }
+    ENTW.letzter = stand;
+    sicherungAnzeigen(stand
+      ? 'Automatisch gespeichert um ' + new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
+        + ' – bleibt auch nach dem Schließen erhalten. Übernommen ist noch nichts.'
+      : '');
+  } catch (e) {
+    sicherungAnzeigen('⚠ Zwischenspeichern fehlgeschlagen: ' + e.message
+      + ' – bitte erst schließen, wenn Sie übernommen haben.');
+  }
+}
+
+async function entwurfLaden() {
+  try {
+    const r = await fetch(ENTWURF_URL);
+    if (!r.ok) { ENTW.an = false; return; }
+    const e = (await r.json()).entwurf;
+    ENTW.bereit = true;
+    if (!e || hatDaten() || S.ergebnis) return;
+    S.slots = e.slots;
+    S.antworten = e.antworten || {};
+    S.zielfelder = e.zielfelder || [];
+    S.nurOffen = e.nurOffen !== false;
+    S.warnung = e.passwoerter_fehlen
+      ? `${e.passwoerter_fehlen} Passwort/Passwörter konnten nicht wiederhergestellt werden – bitte die Postfach-Liste noch einmal hochladen.`
+      : '';
+    ENTW.letzter = entwurfStand();
+    const wann = e.gespeichert ? new Date(e.gespeichert) : null;
+    sicherungAnzeigen('Gespeicherter Stand' + (wann && !isNaN(wann) ? ' vom ' + wann.toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' }) : '')
+      + ' wiederhergestellt – es wurde noch nichts übernommen.');
+    render();
+    if (!offeneWahl().length) await pruefen();
+  } catch (err) {
+    ENTW.an = false;   // Zwischenspeicher nicht erreichbar: Seite funktioniert wie bisher
+  }
+}
+
 render();
+entwurfLaden();
 </script>
 </body>
 </html>
