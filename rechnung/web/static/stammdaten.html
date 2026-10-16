@@ -301,8 +301,11 @@ function vorschauHtml() {
   const v = S.vor;
   const zs = v.zusammenfassung;
   const offen = Object.values(v.blaetter).reduce((n, b) => n + b.zeilen.filter((z) => !z.beantwortet && !z.weglassen).length, 0);
+  const verschmolzenChip = zs.automatisch_verschmolzen_paare
+    ? ` <span class="chip neutral">${zs.automatisch_verschmolzen_paare} Firma(en) automatisch verschmolzen (DE/CH)</span>`
+    : '';
   let h = `<h2>Vorschau</h2><div class="chips"><span class="chip gruen">${zs.gruen} grün</span><span class="chip gelb">${zs.gelb} gelb – Frage offen</span>
-    <span class="chip rot">${zs.rot} rot</span><span class="chip neutral">${offen} noch zu beantworten</span></div>
+    <span class="chip rot">${zs.rot} rot</span><span class="chip neutral">${offen} noch zu beantworten</span>${verschmolzenChip}</div>
     <label><input type="checkbox" ${S.nurOffen ? 'checked' : ''} data-act="nuroffen"> nur Zeilen mit Fragen zeigen</label>`;
   for (const [name, b] of Object.entries(v.blaetter)) {
     const alle = b.zeilen;
@@ -326,7 +329,7 @@ function render() {
   if (S.ergebnis) {
     const e = S.ergebnis;
     h += `<h2>Fertig</h2><div class="ok">Übernommen: ${e.kreditoren} Kreditoren, ${e.mandanten} Mandanten, ${e.postfaecher} Postfächer
-      (${e.uebersprungen} Zeile(n) nicht übernommen – Frage offen oder weggelassen).</div>`;
+      (${e.uebersprungen} Zeile(n) nicht übernommen – Frage offen oder weggelassen)${e.verschmolzene_lieferanten ? `, davon ${e.verschmolzene_lieferanten} automatisch verschmolzen (DE/CH)` : ''}.</div>`;
     if (e.hinweis_passwoerter) h += `<div class="warn"><b>Wichtig:</b> ${esc(e.hinweis_passwoerter)}</div>`;
     h += `<button data-act="neu">Weitere Dateien einlesen</button>`;
   } else {
