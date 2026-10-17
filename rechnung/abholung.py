@@ -82,6 +82,11 @@ class Abholer:
         self.status["postfaecher"] = je_postfach
         return FetchResult(saved, mails, False, "; ".join(fehler_teile), human)
 
+    def nur_abholen(self):
+        """Nur das Postfach abholen (``rechnung vorbereiten``): kein Nachschicken
+        an JobRouter, keine Sicherung, kein Lernbericht. -> FetchResult."""
+        return self._call_fetch()
+
     def _jobrouter_nachschicken(self) -> None:
         """Freigegebene Rechnungen an JobRouter -- nur mit echter Anbindung
         (sonst bleiben sie in der Warteschlange, siehe push_queue)."""

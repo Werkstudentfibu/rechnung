@@ -34,6 +34,26 @@ def _cmd_fetch(args) -> int:
     return 0
 
 
+def _cmd_vorbereiten(args) -> int:
+    """Rechnungen im Eingang vorab auslesen (Texterkennung + KI), damit der
+    Mensch spaeter ohne Wartezeit nur noch prueft und sendet. Auch ohne offenes
+    Programmfenster; nichts wird bestaetigt, gesendet oder gelernt."""
+    from .vorbereitung import vorbereiten_lauf
+
+    store = Store(args.data)
+    b = vorbereiten_lauf(store, args.samples, abholen=not args.ohne_abholen,
+                         zeitgrenze=args.zeit, erneut=args.erneut, max_dateien=args.max,
+                         melde=(lambda t: None) if args.json else print)
+    if args.json:
+        print(json.dumps(b, indent=2, ensure_ascii=False))
+        return 0
+    if b["uebersprungen_laeuft"]:
+        return 0
+    print(f"Vorbereitet: {b['bereit']} neu, {b['schon_fertig']} waren schon fertig, "
+          f"{len(b['fehler'])} Fehler, {b['belegt']} woanders in Arbeit (von {b['dateien']} Dateien).")
+    return 0
+
+
 def _cmd_imap_test(args) -> int:
     """Anmeldung + Ordnerliste + Anzahl ungelesener Mails pruefen, ohne
     etwas abzuholen oder zu markieren."""
@@ -605,6 +625,17 @@ def main(argv=None) -> int:
     f.add_argument("--limit", type=int, default=0, help="hoechstens N Mails")
     f.add_argument("--json", action="store_true")
     f.set_defaults(func=_cmd_fetch)
+
+    vb = sub.add_parser("vorbereiten",
+                        help="Eingang vorab auslesen (Postfach abholen, falls eingerichtet) -- "
+                             "auch ohne offenes Programmfenster, fuer die Aufgabenplanung")
+    vb.add_argument("--ohne-abholen", action="store_true", help="Postfach nicht abholen")
+    vb.add_argument("--zeit", type=float, default=600.0,
+                    help="Zeitgrenze je Datei in Sekunden (Standard 600)")
+    vb.add_argument("--max", type=int, default=0, help="hoechstens N Dateien pro Lauf (0 = alle)")
+    vb.add_argument("--erneut", action="store_true", help="auch schon vorbereitete Dateien neu auslesen")
+    vb.add_argument("--json", action="store_true")
+    vb.set_defaults(func=_cmd_vorbereiten)
 
     pu = sub.add_parser("push", help="Warteschlange an JobRouter uebergeben")
     pu.add_argument("--json", action="store_true")
