@@ -538,6 +538,30 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             raise HTTPException(400, "keine Blaetter uebergeben")
         return JSONResponse(si.vorschau(store, sheets, body.get("antworten") or {}))
 
+    @app.post("/api/stammdaten/gruppen-antwort")
+    def stammdaten_gruppen_antwort(body: dict) -> JSONResponse:
+        """Komfortweg: dieselbe Antwort fuer ALLE unbeantworteten Fragen einer
+        Gruppe (gruppen_id aus ``vorschau.gruppen``) in ``antworten`` eintragen.
+        Prueft neu, schreibt nichts in die Bibliothek -- uebernommen wird erst
+        durch /uebernehmen (das wie immer serverseitig alles neu prueft)."""
+        from .. import stammdaten_import as si
+
+        sheets = body.get("sheets") or {}
+        if not sheets:
+            raise HTTPException(400, "keine Blaetter uebergeben")
+        if not body.get("gruppen_id"):
+            raise HTTPException(400, "gruppen_id fehlt")
+        try:
+            res = si.sammelantwort(
+                store, sheets, body.get("antworten") or {}, str(body["gruppen_id"]),
+                str(body.get("antwort") or ""), body.get("wert"),
+                bool(body.get("vorschlaege")))
+        except KeyError:
+            raise HTTPException(404, "Gruppe nicht gefunden (Stand hat sich geändert?)")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return JSONResponse(res)
+
     @app.post("/api/stammdaten/uebernehmen")
     def stammdaten_uebernehmen(body: dict) -> JSONResponse:
         """Nur gruene Zeilen + vollstaendig beantwortete gelbe/rote Zeilen

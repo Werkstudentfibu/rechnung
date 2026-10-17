@@ -49,6 +49,7 @@ import unicodedata
 from dataclasses import dataclass, field
 
 from .textnorm import che_valid, iban_valid, norm, norm_ustid
+from .xlsx import text_saeubern
 
 # ---- Arten (Blatt/Zeile) --------------------------------------------------
 ART_KREDITOR_DE = "kreditor_de"
@@ -302,7 +303,9 @@ def _zeile_zu_werten_ex(headers: list[str], row: list[str],
     notizen: list[str] = []
     for h, v in zip(headers, row):
         feld = mapping.get(h)
-        v = (v or "").strip()
+        # Passwoerter nur trimmen: NFKC/Whitespace-Zusammenfassen wuerde ein
+        # Passwort veraendern (z. B. zwei Leerzeichen hintereinander).
+        v = (v or "").strip() if feld == "passwort" else text_saeubern(v)
         if not feld or feld == IGNORIEREN or not v:
             continue
         if feld == "notiz":
@@ -534,23 +537,32 @@ def _kreditor_aufbereiten(werte: dict[str, str], fragen: list[dict],
 _PLZ_ORT_RE = re.compile(r"^(?:[A-Za-z]{1,3}[- ])?(\d{4,5})\s+(\S.*)$")
 
 
-def _plz_aufbereiten(werte: dict[str, str], fragen: list[dict], hinweise: list[str]) -> None:
+def _plz_aufbereiten(werte: dict[str, str], fragen: list[dict], hinweise: list[str],
+                     fuehrende_null_ok: bool = False) -> bool:
     """Spalte "PlzOrt" kann nur die PLZ ("12345") oder PLZ + Ort enthalten. Steht
-    ein Ort darin, wird er mit "Ortsbezeichnung" abgeglichen (Widerspruch = Frage)."""
+    ein Ort darin, wird er mit "Ortsbezeichnung" abgeglichen (Widerspruch = Frage).
+    ``fuehrende_null_ok`` (DE-Kreditor, Land sicher DE): eine rein numerische,
+    genau 4-stellige PLZ hat in Excel ihre fuehrende Null verloren -- einzige
+    Deutung, daher "0" voranstellen mit sichtbarem Hinweis. -> True, wenn ergaenzt."""
     plz = werte.get("plz", "")
-    if not plz or plz.isdigit():
-        return
-    m = _PLZ_ORT_RE.match(plz)
-    if not m:
-        return   # ``_kreditor_pruefen`` fragt wegen des Formats
-    werte["plz"], ort_aus_plz = m.group(1), m.group(2).strip()
-    if not werte.get("ort"):
-        werte["ort"] = ort_aus_plz
-        hinweise.append(f"Ort '{ort_aus_plz}' aus der PLZ-Spalte übernommen")
-    elif norm(werte["ort"]) != norm(ort_aus_plz):
-        fragen.append(_frage(
-            "ort", f"PLZ-Spalte nennt '{ort_aus_plz}', Ortsbezeichnung '{werte['ort']}' "
-                   "-- bitte entscheiden", vorschlag=ort_aus_plz))
+    if plz and not plz.isdigit():
+        m = _PLZ_ORT_RE.match(plz)
+        if not m:
+            return False   # ``_kreditor_pruefen`` fragt wegen des Formats
+        werte["plz"], ort_aus_plz = m.group(1), m.group(2).strip()
+        if not werte.get("ort"):
+            werte["ort"] = ort_aus_plz
+            hinweise.append(f"Ort '{ort_aus_plz}' aus der PLZ-Spalte übernommen")
+        elif norm(werte["ort"]) != norm(ort_aus_plz):
+            fragen.append(_frage(
+                "ort", f"PLZ-Spalte nennt '{ort_aus_plz}', Ortsbezeichnung '{werte['ort']}' "
+                       "-- bitte entscheiden", vorschlag=ort_aus_plz))
+    plz = werte.get("plz", "")
+    if fuehrende_null_ok and re.fullmatch(r"\d{4}", plz):
+        werte["plz"] = "0" + plz
+        hinweise.append(f"führende Null ergänzt (Excel hatte sie entfernt): {plz} -> 0{plz}")
+        return True
+    return False
 
 
 def _postfach_aufbereiten(werte: dict[str, str], fragen: list[dict]) -> None:
@@ -579,19 +591,64 @@ class Zeilen:
     rows: list[dict] = field(default_factory=list)
 
 
+_TRENNER_RE = re.compile(r"[-_=*#.~+\s]+")
+_SUMME_RE = re.compile(r"(summe|gesamtsumme|gesamt|zwischensumme|total|übertrag|uebertrag)\b",
+                       re.IGNORECASE)
+_KEIN_INHALT = frozenset({"notiz", "land"})   # allein kein Datensatz (z. B. SammelKt-Summe)
+_KENNUNG = ("kreditorennummer", "mandant_verweis", "email")
+
+
+def _kopfzeile_wiederholt(headers: list[str], row: list[str]) -> bool:
+    """Zeile == Kopfzeile (nach Saeubern/Kleinschreibung) -- Excel-Seitenumbruch
+    oder zusammenkopierte Listen wiederholen die Ueberschriften mitten in den Daten."""
+    soll = [text_saeubern(h).casefold() for h in headers]
+    ist = [text_saeubern(v).casefold() for v in row][:len(soll)]
+    ist += [""] * (len(soll) - len(ist))
+    return any(soll) and ist == soll
+
+
+def _leer_oder_summe(headers: list[str], row: list[str], werte: dict[str, str]) -> bool:
+    """Trenn-, Summen- und Fusszeilen: kein Name und keine Kennung (Konto/Mandant/
+    E-Mail) und sonst nichts Inhaltliches -- nie eine Zeile mit Konto oder IBAN."""
+    zellen = [text_saeubern(v) for v in row]
+    if not any(zellen) or all(not z or _TRENNER_RE.fullmatch(z) for z in zellen):
+        return True
+    if any(werte.get(k) for k in _KENNUNG):
+        return False
+    inhalt = {k for k in werte if k not in _KEIN_INHALT}
+    if not inhalt:
+        return True
+    # "Summe: 3000" in einer Namensspalte, aber weder Konto noch sonst etwas
+    name = " ".join(werte.get(k, "") for k in ("name", "name1", "name2")).strip()
+    return bool(name) and bool(_SUMME_RE.match(name)) and not (inhalt - {"name", "name1", "name2",
+                                                                          "bezeichnung1"})
+
+
 def zeilen_aufbauen(store, blatt: str, headers: list[str], data_rows: list[list[str]],
-                    mapping: dict[str, str | None], art: str) -> list[dict]:
+                    mapping: dict[str, str | None], art: str,
+                    uebersprungen: list[dict] | None = None) -> list[dict]:
     """Je Datenzeile: ``{blatt, zeile, art, werte, status, fragen, schluessel}``.
     Bibliotheks-/Dubletten-Pruefung (zeilenuebergreifend) macht ``vorschau()``
-    danach -- hier nur die reine Zeilenpruefung."""
+    danach -- hier nur die reine Zeilenpruefung. Wiederholte Kopfzeilen und
+    Leer-/Summenzeilen werden nicht aufgenommen, sondern (falls ``uebersprungen``
+    uebergeben) dort vermerkt: ``{blatt, zeile, grund}``."""
     out: list[dict] = []
     for i, row in enumerate(data_rows, start=1):
+        if _kopfzeile_wiederholt(headers, row):
+            if uebersprungen is not None:
+                uebersprungen.append({"blatt": blatt, "zeile": i, "grund": "kopfzeile"})
+            continue
         werte, kollisionen = _zeile_zu_werten_ex(headers, row, mapping)
-        rohwerte = {h: v for h, v in zip(headers, row) if (v or "").strip()}
+        if _leer_oder_summe(headers, row, werte):
+            if uebersprungen is not None:
+                uebersprungen.append({"blatt": blatt, "zeile": i, "grund": "leerzeile"})
+            continue
+        rohwerte = {h: text_saeubern(v) for h, v in zip(headers, row) if text_saeubern(v)}
         schluessel = f"{blatt}:{i}"
         zeilen_art = art
         fragen: list[dict] = []
         hinweise: list[str] = []
+        auto: set[str] = set()
         for feld, h_alt, v_alt, h_neu, v_neu in kollisionen:
             fragen.append(_frage(
                 feld, f"Zwei Spalten zeigen auf dasselbe Feld: '{h_alt}' = '{v_alt}', "
@@ -619,7 +676,11 @@ def zeilen_aufbauen(store, blatt: str, headers: list[str], data_rows: list[list[
                           "Zeile weglassen"]))
         elif zeilen_art in ARTEN_KREDITOR:
             _kreditor_aufbereiten(werte, fragen, hinweise)
-            _plz_aufbereiten(werte, fragen, hinweise)
+            land_text = _land_aus_text(werte.get("land", "")) if werte.get("land") else None
+            land_de_sicher = zeilen_art == ART_KREDITOR_DE and land_text in (None, "DE") and (
+                art == ART_KREDITOR_DE or land_text == "DE")
+            if _plz_aufbereiten(werte, fragen, hinweise, land_de_sicher):
+                auto.add("fuehrende_null")
             fragen += _kreditor_pruefen(zeilen_art, werte)
         elif zeilen_art == ART_MANDANT:
             fragen += _mandant_pruefen(werte)
@@ -627,15 +688,12 @@ def zeilen_aufbauen(store, blatt: str, headers: list[str], data_rows: list[list[
             _postfach_aufbereiten(werte, fragen)
             fragen += _postfach_pruefen(werte)
 
-        rot = zeilen_art == ART_UNKLAR or any(
-            f["feld"] in ("name", "email", "mandant_verweis") and "Pflichtfeld fehlt" in f["grund"]
-            for f in fragen)
-        status = STATUS_ROT if rot else (STATUS_GELB if fragen else STATUS_GRUEN)
         out.append({
             "blatt": blatt, "zeile": i, "art": zeilen_art, "werte": werte,
-            "rohwerte": rohwerte, "status": status, "fragen": fragen,
-            "schluessel": schluessel, "hinweise": hinweise,
+            "rohwerte": rohwerte, "fragen": fragen,
+            "schluessel": schluessel, "hinweise": hinweise, "auto": auto,
         })
+        out[-1]["status"] = _status_aus_fragen(out[-1])
     return out
 
 
@@ -673,66 +731,322 @@ def _merge_id(werte: dict[str, str]) -> str:
     return "kreditor-" + _slug(norm(werte.get("name", "")))
 
 
-def _markiere_dubletten(zeilen: list[dict]) -> None:
-    """Zwei Zeilen DIESES Imports mit gleichem Namen/UID/IBAN -> beide gelb,
-    mit Frage und Verweis aufeinander (nie stillschweigend die eine
-    bevorzugen).
+_DEDUP_ARTEN = (ART_KREDITOR_DE, ART_KREDITOR_CH, ART_MANDANT, ART_POSTFACH)
+_GETRENNT_HINWEIS = ("gleicher Name wie Zeile {z}, andere Kontonummer -> getrennter "
+                     "Lieferant (Entscheidung Aaron 17.10.)")
 
-    Ausnahme (Entscheidung Aaron 16.10.2026): dieselbe Firma einmal im
-    Kreditor-DE- und einmal im Kreditor-CH-Blatt, Treffer NUR ueber den
-    Namen (genau eine DE- und eine CH-Zeile, keine gemeinsame UID/IBAN) --
-    ABBYY brauchte diese Trennung, wir nicht. Das ist keine Frage, sondern
-    ein automatisch zu verschmelzendes Paar (``verschmelzen``-Eintrag an
-    beiden Zeilen, ``anwenden`` legt EINEN Lieferanten an)."""
-    von_schluessel: dict[str, list[dict]] = {}
-    for z in zeilen:
-        for k in _dubletten_schluessel(z):
-            von_schluessel.setdefault(k, []).append(z)
 
-    # Zeilenpaare, die zusaetzlich UID/IBAN teilen, bleiben normale Dubletten.
-    teilt_kennung: set[frozenset] = set()
-    for k, treffer in von_schluessel.items():
-        if k.startswith("name:") or len(treffer) < 2:
-            continue
-        teilt_kennung.update(frozenset((a["schluessel"], b["schluessel"]))
-                             for a in treffer for b in treffer if a is not b)
+def _vgl(feld: str, v: str) -> str:
+    """Vergleichswert eines Feldes (leer = ""): Gross-/Kleinschreibung,
+    Leerzeichen, IBAN-/UID-/Mandantennummer-Schreibweise egal."""
+    if feld == "passwort":
+        return v
+    if feld == "iban":
+        return re.sub(r"\s+", "", v).upper()
+    if feld == "ustid":
+        return norm_ustid(v)
+    if feld == "mandant_verweis":
+        return _mandant_key(v)
+    if feld == "kreditorennummer":
+        return v.strip()
+    return norm(v)
 
-    verschmolzen: set[str] = set()
-    for k, treffer in von_schluessel.items():
-        if not k.startswith("name:") or len(treffer) != 2:
-            continue
-        de = [z for z in treffer if z["art"] == ART_KREDITOR_DE]
-        ch = [z for z in treffer if z["art"] == ART_KREDITOR_CH]
-        if len(de) != 1 or len(ch) != 1:
-            continue
-        if frozenset((de[0]["schluessel"], ch[0]["schluessel"])) in teilt_kennung:
-            continue
-        mid = _merge_id(de[0]["werte"])
-        for z, partner in ((de[0], ch[0]), (ch[0], de[0])):
-            z["verschmelzen"] = {"id": mid, "partner": partner["schluessel"],
-                                 "paar": "|".join(sorted((z["schluessel"], partner["schluessel"])))}
-            verschmolzen.add(z["schluessel"])
 
-    gemeldet: set[tuple[str, str]] = set()
-    for k, treffer in von_schluessel.items():
-        if len(treffer) < 2:
-            continue
-        if k.startswith("name:") and all(z["schluessel"] in verschmolzen for z in treffer):
-            continue
-        for z in treffer:
-            paar = (z["schluessel"], k)
-            if paar in gemeldet:
+def _nw(werte: dict[str, str]) -> dict[str, str]:
+    return {k: g for k, v in werte.items() if (g := _vgl(k, v))}
+
+
+def _vertraeglich(a: dict[str, str], b: dict[str, str]) -> bool:
+    """Kein Feld widerspricht: gleich oder auf einer Seite leer (wie
+    ``_supplier_feld_diff`` -- leer ist nie ein Widerspruch)."""
+    return all(a[k] == b[k] for k in a.keys() & b.keys())
+
+
+def _status_aus_fragen(z: dict) -> str:
+    rot = z["art"] == ART_UNKLAR or any(
+        f["feld"] in ("name", "email", "mandant_verweis") and "Pflichtfeld fehlt" in f["grund"]
+        for f in z["fragen"])
+    return STATUS_ROT if rot else (STATUS_GELB if z["fragen"] else STATUS_GRUEN)
+
+
+def _record(rows: list[dict]) -> dict:
+    return {"rows": rows, "keeper": rows[0], "offen": set(), "getrennt": set(), "id": None}
+
+
+def _record_werte(rec: dict) -> dict[str, str]:
+    return rec["keeper"]["werte"]
+
+
+def _record_keys(rec: dict) -> set[str]:
+    k = rec["keeper"]
+    return _dubletten_schluessel({"art": k["art"], "werte": k["werte"]})
+
+
+def _nr(z: dict) -> str:
+    return z["schluessel"]
+
+
+def _zusammenfassen_identisch(keeper: dict, andere: list[dict]) -> None:
+    for z in andere:
+        z["zusammengefasst"] = {"art": "identisch", "mit": _nr(keeper)}
+        z["fragen"] = []
+        z["status"] = STATUS_GRUEN
+        z["hinweise"].append(f"automatisch zusammengefasst (identisch mit Zeile {_nr(keeper)})")
+    keeper["hinweise"].append("identische Zeile(n) automatisch zusammengefasst: "
+                              + ", ".join(_nr(z) for z in andere))
+    keeper.setdefault("identisch_mit", []).extend(_nr(z) for z in andere)
+
+
+def _merge_records(recs: list[dict], ordnung: dict[str, int]) -> dict:
+    """Mehrere vertraegliche Datensaetze -> EINER (Vereinigung der Felder, der
+    erste bleibt "Hauptzeile"); die uebrigen Zeilen werden nicht uebernommen."""
+    rows = sorted((z for r in recs for z in r["rows"]), key=lambda z: ordnung[_nr(z)])
+    keeper, rest = rows[0], rows[1:]
+    if not rest:
+        return recs[0]
+    merged = dict(keeper["werte"])
+    for z in rest:
+        for k, v in z["werte"].items():
+            if not merged.get(k):
+                merged[k] = v
+    gesehen: set[str] = set()
+    fragen: list[dict] = []
+    for z in rows:
+        for f in z["fragen"]:
+            if "Pflichtfeld fehlt" in f["grund"] or f["feld"] in gesehen:
                 continue
-            gemeldet.add(paar)
-            andere = ", ".join(sorted(a["schluessel"] for a in treffer if a is not z))
-            z["fragen"].append(_frage(
-                "dublette", f"Dublette in dieser Datei ({k.split(':', 1)[0]}): "
-                           f"auch in Zeile {andere}",
-                antworten=["beide übernehmen (sind unterschiedlich)",
-                          "diese Zeile übernehmen, andere weglassen",
-                          "Zeile weglassen"]))
-            if z["status"] != STATUS_ROT:
-                z["status"] = STATUS_GELB
+            gesehen.add(f["feld"])
+            fragen.append(f)
+    probe = dict(merged)
+    if keeper["art"] in ARTEN_KREDITOR:
+        pflicht = _kreditor_pruefen(keeper["art"], probe)
+    elif keeper["art"] == ART_MANDANT:
+        pflicht = _mandant_pruefen(probe)
+    else:
+        pflicht = _postfach_pruefen(probe)
+    for f in pflicht:
+        if "Pflichtfeld fehlt" in f["grund"] and f["feld"] not in gesehen:
+            gesehen.add(f["feld"])
+            fragen.append(f)
+    for z in rest:
+        for h in z["hinweise"]:
+            if h not in keeper["hinweise"]:
+                keeper["hinweise"].append(h)
+        keeper["auto"] |= z["auto"]
+        keeper.setdefault("identisch_mit", []).extend(z.get("identisch_mit", []))
+        z["zusammengefasst"] = {"art": "ergaenzend", "mit": _nr(keeper)}
+        z["fragen"] = []
+        z["status"] = STATUS_GRUEN
+        z["hinweise"].append(f"ergänzend zusammengeführt in Zeile {_nr(keeper)}")
+    keeper["werte"] = probe   # (Mandant: Name ggf. aus dem Verweis uebernommen)
+    keeper["fragen"] = fragen
+    keeper["status"] = _status_aus_fragen(keeper)
+    keeper["hinweise"].append("aus Zeilen " + ", ".join(_nr(z) for z in rows) + " zusammengeführt")
+    keeper.setdefault("zusammengefuehrt_aus", []).extend(_nr(z) for z in rest)
+    out = _record(rows)
+    out["offen"] = set().union(*(r["offen"] for r in recs))
+    return out
+
+
+def _primaerschluessel(z: dict) -> str:
+    w = z["werte"]
+    if z["art"] in ARTEN_KREDITOR:
+        return _vgl("kreditorennummer", w.get("kreditorennummer", ""))
+    if z["art"] == ART_MANDANT:
+        return _vgl("mandant_verweis", w.get("mandant_verweis", ""))
+    return _vgl("email", w.get("email", ""))
+
+
+def _gruppen_nach(items: list, schluessel) -> list[list]:
+    """Union-Find-Gruppen: Elemente mit mindestens einem gemeinsamen Schluessel."""
+    eltern = list(range(len(items)))
+
+    def find(i: int) -> int:
+        while eltern[i] != i:
+            eltern[i] = eltern[eltern[i]]
+            i = eltern[i]
+        return i
+
+    erste: dict[str, int] = {}
+    for i, it in enumerate(items):
+        for k in schluessel(it):
+            if k in erste:
+                eltern[find(i)] = find(erste[k])
+            else:
+                erste[k] = i
+    gruppen: dict[int, list] = {}
+    for i, it in enumerate(items):
+        gruppen.setdefault(find(i), []).append(it)
+    return list(gruppen.values())
+
+
+def _datensaetze_bilden(rows: list[dict], ordnung: dict[str, int]) -> list[dict]:
+    """Schritt (a) identische und (b) ergaenzende Zeilen derselben Art
+    zusammenfassen -> Liste von Datensaetzen. Widersprechende Zeilen mit
+    gleichem Primaerschluessel (Konto/Mandant/E-Mail) bleiben getrennte
+    Datensaetze, ``offen`` verweist aufeinander (-> Frage, Schritt d)."""
+    # (a) exakt gleiche Werte
+    nach_sig: dict[tuple, list[dict]] = {}
+    for z in rows:
+        nw = _nw(z["werte"])
+        z["_nw"] = nw
+        nach_sig.setdefault(tuple(sorted(nw.items())), []).append(z)
+    einzel: list[dict] = []
+    for sig, gleiche in nach_sig.items():
+        if sig and len(gleiche) > 1:
+            _zusammenfassen_identisch(gleiche[0], gleiche[1:])
+        einzel.append(gleiche[0])
+    einzel.sort(key=lambda z: ordnung[_nr(z)])
+
+    # (b) gleicher Primaerschluessel + keine Widersprueche
+    mit_pk: dict[str, list[dict]] = {}
+    ohne_pk: list[dict] = []
+    for z in einzel:
+        pk = _primaerschluessel(z)
+        (mit_pk.setdefault(pk, []) if pk else ohne_pk).append(z)
+    records: list[dict] = []
+    for pk, gruppe in mit_pk.items():
+        if len(gruppe) > 1 and all(_vertraeglich(a["_nw"], b["_nw"])
+                                   for i, a in enumerate(gruppe) for b in gruppe[i + 1:]):
+            records.append(_merge_records([_record([z]) for z in gruppe], ordnung))
+            continue
+        recs = [_record([z]) for z in gruppe]
+        for r in recs:
+            r["offen"] = {_nr(x["keeper"]) for x in recs if x is not r}
+        records += recs
+    # Zeilen ohne Primaerschluessel (z. B. Kreditor ohne Konto): untereinander ueber
+    # die uebrigen Schluessel verwandt; vertraeglich -> zu einem Datensatz
+    def schluessel_ohne_primaer(z: dict) -> set[str]:
+        return {k for k in _dubletten_schluessel(z) if not k.startswith("konto:")}
+
+    neue: list[dict] = []
+    for gruppe in _gruppen_nach(ohne_pk, schluessel_ohne_primaer):
+        if len(gruppe) > 1 and all(_vertraeglich(a["_nw"], b["_nw"])
+                                   for i, a in enumerate(gruppe) for b in gruppe[i + 1:]):
+            neue.append(_merge_records([_record([z]) for z in gruppe], ordnung))
+        else:
+            recs = [_record([z]) for z in gruppe]
+            if len(recs) > 1:
+                for r in recs:
+                    r["offen"] = {_nr(x["keeper"]) for x in recs if x is not r}
+            neue += recs
+    # ... und ein solcher Datensatz ergaenzt GENAU EINEN verwandten, vertraeglichen
+    # Datensatz mit Konto; sonst nicht raten.
+    for k in neue:
+        k_keys = schluessel_ohne_primaer(k["keeper"])
+        kand = [r for r in records if r["keeper"]["art"] == k["keeper"]["art"]
+                and (schluessel_ohne_primaer(r["keeper"]) & k_keys)]
+        vertr = [r for r in kand if _vertraeglich(_nw(_record_werte(r)), _nw(_record_werte(k)))]
+        if len(vertr) == 1 and len(kand) == 1 and not k["offen"] and not vertr[0]["offen"]:
+            idx = records.index(vertr[0])
+            records[idx] = _merge_records([vertr[0], k], ordnung)
+        else:
+            records.append(k)
+            for r in kand:
+                r["offen"].add(_nr(k["keeper"]))
+                k["offen"].add(_nr(r["keeper"]))
+    return records
+
+
+def _markiere_dubletten(zeilen: list[dict]) -> None:
+    """Dubletten innerhalb DIESES Imports (Aaron 17.10.2026: ~7000 Fragen, vor
+    allem Dubletten). Reihenfolge, immer nur ohne Informationsverlust und mit
+    sichtbarem Hinweis an der Zeile:
+
+    a) identische Zeilen -> eine Zeile, die anderen "automatisch zusammengefasst";
+    b) gleicher Schluessel, kein Feld widerspricht (leer ist nie ein Widerspruch;
+       andere Kontonummer ist einer) -> ein Datensatz mit der Vereinigung der Felder;
+    c) gleicher Name, andere Kontonummer, sonst kein Widerspruch -> getrennte
+       Lieferanten (Entscheidung Aaron 17.10.2026), keine Frage;
+    d) echte Widersprueche -> EINE Frage je betroffener Zeile (nie N*(N-1)).
+
+    Dazu die Ausnahme vom 16.10.2026: dieselbe Firma einmal im Kreditor-DE- und
+    einmal im Kreditor-CH-Blatt, Treffer NUR ueber den Namen (genau ein DE- und
+    ein CH-Datensatz, keine gemeinsame UID/IBAN/Konto) -> ``verschmelzen``-Eintrag
+    an beiden Zeilen, ``anwenden`` legt EINEN Lieferanten an."""
+    ordnung = {_nr(z): i for i, z in enumerate(zeilen)}
+    records: list[dict] = []
+    for art in _DEDUP_ARTEN:
+        rows = [z for z in zeilen if z["art"] == art]
+        if rows:
+            records += _datensaetze_bilden(rows, ordnung)
+    for z in zeilen:
+        z.pop("_nw", None)
+
+    keys = [_record_keys(r) for r in records]
+    von_schluessel: dict[str, list[int]] = {}
+    for i, ks in enumerate(keys):
+        for k in ks:
+            von_schluessel.setdefault(k, []).append(i)
+
+    # Paare verwandter Datensaetze -> gemeinsame Schluessel
+    paare: dict[tuple[int, int], set[str]] = {}
+    for k, idxs in von_schluessel.items():
+        for n, i in enumerate(idxs):
+            for j in idxs[n + 1:]:
+                paare.setdefault((i, j), set()).add(k)
+    index_von_nr = {_nr(r["keeper"]): i for i, r in enumerate(records)}
+    for i, r in enumerate(records):     # in ``offen`` vorgemerkte Widersprueche
+        for nr_partner in r["offen"]:
+            j = index_von_nr.get(nr_partner)
+            if j is not None and i != j:
+                paare.setdefault((min(i, j), max(i, j)), set()).update(keys[i] & keys[j])
+
+    aufgeloest: set[tuple[int, int]] = set()
+    # DE/CH-Paar nur ueber den Namen (alter Sonderfall)
+    for k, idxs in von_schluessel.items():
+        if not k.startswith("name:") or len(idxs) != 2:
+            continue
+        a, b = records[idxs[0]], records[idxs[1]]
+        arts = {a["keeper"]["art"], b["keeper"]["art"]}
+        if arts != {ART_KREDITOR_DE, ART_KREDITOR_CH}:
+            continue
+        pk = (min(idxs), max(idxs))
+        if paare.get(pk) != {k} or _nr(b["keeper"]) in a["offen"]:
+            continue
+        de = a if a["keeper"]["art"] == ART_KREDITOR_DE else b
+        ch = b if de is a else a
+        mid = _merge_id(de["keeper"]["werte"])
+        paar = "|".join(sorted((_nr(a["keeper"]), _nr(b["keeper"]))))
+        for z, partner in ((de["keeper"], ch["keeper"]), (ch["keeper"], de["keeper"])):
+            z["verschmelzen"] = {"id": mid, "partner": _nr(partner), "paar": paar}
+        aufgeloest.add(pk)
+    # (c) gleicher Name, andere Kontonummer, sonst vertraeglich -> getrennte Lieferanten
+    for pk, gemeinsam in paare.items():
+        if pk in aufgeloest:
+            continue
+        a, b = records[pk[0]], records[pk[1]]
+        if a["keeper"]["art"] != b["keeper"]["art"] or a["keeper"]["art"] not in ARTEN_KREDITOR:
+            continue
+        wa, wb = _nw(_record_werte(a)), _nw(_record_werte(b))
+        ka, kb = wa.pop("kreditorennummer", ""), wb.pop("kreditorennummer", "")
+        if ka and kb and ka != kb and any(g.startswith("name:") for g in gemeinsam) \
+                and _vertraeglich(wa, wb):
+            for x, y in ((a, b), (b, a)):
+                z = x["keeper"]
+                z["hinweise"].append(_GETRENNT_HINWEIS.format(z=_nr(y["keeper"])))
+                z["auto"].add("getrennt")
+                z.setdefault("getrennt_von", []).append(_nr(y["keeper"]))
+            aufgeloest.add(pk)
+    # (d) alles uebrige: EINE Frage je Zeile
+    offen: dict[int, dict[int, set[str]]] = {}
+    for pk, gemeinsam in paare.items():
+        if pk in aufgeloest:
+            continue
+        i, j = pk
+        offen.setdefault(i, {})[j] = gemeinsam
+        offen.setdefault(j, {})[i] = gemeinsam
+    for i, partner in sorted(offen.items()):
+        z = records[i]["keeper"]
+        arten = sorted({g.split(":", 1)[0] for gem in partner.values() for g in gem})
+        andere = ", ".join(sorted(_nr(records[j]["keeper"]) for j in partner))
+        z["fragen"].append(_frage(
+            "dublette", f"Dublette in dieser Datei ({'/'.join(arten)}): auch in Zeile {andere}",
+            antworten=["beide übernehmen (sind unterschiedlich)",
+                      "diese Zeile übernehmen, andere weglassen",
+                      "Zeile weglassen"]))
+        if z["status"] != STATUS_ROT:
+            z["status"] = STATUS_GELB
 
 
 def _supplier_feld_diff(sup, werte: dict[str, str]) -> list[str]:
@@ -764,22 +1078,52 @@ def _supplier_feld_diff(sup, werte: dict[str, str]) -> list[str]:
     return diffs
 
 
-def _konflikt_mit_bibliothek(store, zeile: dict) -> None:
+class _Bibliothek:
+    """Einmal je Vorschau aufgebauter Index ueber die vorhandene Bibliothek
+    (Lieferanten nach UID/IBAN, Mandanten nach Namen, bekannte Mandanten-
+    Schluessel) -- statt je Zeile alle Datensaetze neu zu lesen/normalisieren."""
+
+    def __init__(self, store) -> None:
+        self.suppliers = store.suppliers()
+        self.adressen = store.addresses()
+        self._ustid: dict[str, int] = {}
+        self._iban: dict[str, int] = {}
+        for n, s in enumerate(self.suppliers):
+            for u in s.ustids:
+                self._ustid.setdefault(norm_ustid(u), n)
+            for i in s.ibans:
+                self._iban.setdefault(re.sub(r"\s+", "", i).upper(), n)
+        self.mandant_nach_name: dict[str, object] = {}
+        for a in self.adressen:
+            if a.name:
+                self.mandant_nach_name.setdefault(norm(a.name), a)
+        self.mandant_namen = {norm(a.name) for a in self.adressen}
+        self.mandant_schluessel = ({_mandant_key(a.id) for a in self.adressen}
+                                   | {_mandant_key(a.company_code) for a in self.adressen
+                                      if a.company_code})
+
+    def treffer(self, werte: dict[str, str]):
+        """Erster Lieferant (in Bibliotheks-Reihenfolge), dessen UID oder IBAN passt."""
+        kandidaten = []
+        if werte.get("ustid") and norm_ustid(werte["ustid"]) in self._ustid:
+            kandidaten.append(self._ustid[norm_ustid(werte["ustid"])])
+        if werte.get("iban"):
+            n = self._iban.get(re.sub(r"\s+", "", werte["iban"]).upper())
+            if n is not None:
+                kandidaten.append(n)
+        return self.suppliers[min(kandidaten)] if kandidaten else None
+
+
+def _konflikt_mit_bibliothek(bib: "_Bibliothek", zeile: dict) -> None:
     """Treffer gegen einen bestehenden Lieferanten/Mandanten/Postfach MIT
     abweichenden Werten -> Frage "alt oder neu?", nie stillschweigend
     ueberschreiben. Ein Treffer OHNE Abweichung (reine Ergaenzung leerer
     Felder) bleibt gruen."""
+    if zeile.get("zusammengefasst"):
+        return
     werte = zeile["werte"]
     if zeile["art"] in ARTEN_KREDITOR:
-        treffer = None
-        for s in store.suppliers():
-            if werte.get("ustid") and norm_ustid(werte["ustid"]) in {norm_ustid(u) for u in s.ustids}:
-                treffer = s
-                break
-            if werte.get("iban") and re.sub(r"\s+", "", werte["iban"]).upper() in \
-                    {re.sub(r"\s+", "", i).upper() for i in s.ibans}:
-                treffer = s
-                break
+        treffer = bib.treffer(werte)
         if treffer is None:
             return
         diffs = _supplier_feld_diff(treffer, werte)
@@ -794,29 +1138,26 @@ def _konflikt_mit_bibliothek(store, zeile: dict) -> None:
         if zeile["status"] != STATUS_ROT:
             zeile["status"] = STATUS_GELB
     elif zeile["art"] == ART_MANDANT:
-        for a in store.addresses():
-            if norm(a.name) == norm(werte.get("name", "")) and a.name:
-                if a.lines and werte.get("strasse") and norm(" ".join(a.lines)) != \
-                        norm(werte.get("strasse", "")):
-                    zeile["fragen"].append(_frage(
-                        "bibliothek", f"Mandant '{a.name}' gibt es schon ({a.id}) mit "
-                                     "anderer Anschrift -- alt oder neu?",
-                        antworten=["bestehenden Mandanten aktualisieren",
-                                  "als neuen, separaten Mandanten anlegen",
-                                  "Zeile weglassen"]))
-                    if zeile["status"] != STATUS_ROT:
-                        zeile["status"] = STATUS_GELB
-                break
+        a = bib.mandant_nach_name.get(norm(werte.get("name", "")))
+        if a is not None and a.lines and werte.get("strasse") and \
+                norm(" ".join(a.lines)) != norm(werte.get("strasse", "")):
+            zeile["fragen"].append(_frage(
+                "bibliothek", f"Mandant '{a.name}' gibt es schon ({a.id}) mit "
+                             "anderer Anschrift -- alt oder neu?",
+                antworten=["bestehenden Mandanten aktualisieren",
+                          "als neuen, separaten Mandanten anlegen",
+                          "Zeile weglassen"]))
+            if zeile["status"] != STATUS_ROT:
+                zeile["status"] = STATUS_GELB
 
 
-def _mandant_referenz_pruefen(zeile: dict, alle_mandanten_namen: set[str], store) -> None:
+def _mandant_referenz_pruefen(zeile: dict, bekannt: set[str]) -> None:
+    """``bekannt``: Mandanten-Namen/-Nummern aus Datei + Bibliothek (einmal je
+    Vorschau gebildet, s. ``_vorschau_intern``)."""
     ref = zeile["werte"].get("mandant_verweis")
-    if not ref or zeile["art"] not in (ART_KREDITOR_DE, ART_KREDITOR_CH, ART_POSTFACH):
+    if zeile.get("zusammengefasst") or not ref or zeile["art"] not in (
+            ART_KREDITOR_DE, ART_KREDITOR_CH, ART_POSTFACH):
         return
-    bekannt = ({norm(n) for n in alle_mandanten_namen} | {norm(a.name) for a in store.addresses()}
-               | {_mandant_key(a.id) for a in store.addresses()}
-               | {_mandant_key(a.company_code) for a in store.addresses() if a.company_code}
-               | set(zeile.get("_mandant_codes", ())))
     if norm(ref) not in bekannt and _mandant_key(ref) not in bekannt:
         zeile["fragen"].append(_frage(
             "mandant_verweis", f"Mandant-Verweis '{ref}' nicht auffindbar (weder in "
@@ -843,7 +1184,7 @@ def _kuerzel_pruefen(zeilen: list[dict], store) -> None:
             if k and c:
                 kuerzel.setdefault(_mandant_key(c), k)
     for z in zeilen:
-        if z["art"] != ART_POSTFACH:
+        if z["art"] != ART_POSTFACH or z.get("zusammengefasst"):
             continue
         pk, code = z["werte"].get("kuerzel"), z["werte"].get("mandant_verweis")
         soll = kuerzel.get(_mandant_key(code)) if code else None
@@ -875,7 +1216,7 @@ def _antworten_einmischen(zeile: dict, antworten: dict) -> None:
     "beantwortet und nicht weggelassen" (SPEC: "nur gruene + von Aaron
     beantwortete Zeilen"), unabhaengig von der Ampelfarbe."""
     alle = True
-    weglassen = False
+    weglassen = bool(zeile.get("zusammengefasst"))   # automatisch zusammengefasst: nie uebernehmen
     neu_anlegen = False
     for f in zeile["fragen"]:
         a = antworten.get(_antwort_schluessel(zeile["schluessel"], f["feld"]))
@@ -903,15 +1244,46 @@ def _antworten_einmischen(zeile: dict, antworten: dict) -> None:
 # ---- Gesamtvorschau ---------------------------------------------------------
 
 def vorschau(store, sheets: dict[str, dict], antworten: dict | None = None) -> dict:
+    return _vorschau_intern(store, sheets, antworten)[0]
+
+
+def _auto_details(alle_zeilen: list[dict], uebersprungen: list[dict]) -> dict:
+    """Was das Programm ohne Rueckfrage getan hat -- je Art eine Liste mit
+    Zeilen-Schluessel (``<Blatt>:<Zeile>``), damit Aaron stichprobenartig
+    nachsehen kann."""
+    d: dict[str, list[dict]] = {k: [] for k in (
+        "identisch", "ergaenzend", "fuehrende_null", "getrennte_lieferanten",
+        "leerzeilen", "kopfzeilen")}
+    for z in alle_zeilen:
+        zus = z.get("zusammengefasst")
+        if zus:
+            d["identisch" if zus["art"] == "identisch" else "ergaenzend"].append(
+                {"zeile": z["schluessel"], "mit": zus["mit"]})
+            continue
+        if "fuehrende_null" in z["auto"]:
+            d["fuehrende_null"].append({"zeile": z["schluessel"]})
+        if z.get("getrennt_von"):
+            d["getrennte_lieferanten"].append(
+                {"zeile": z["schluessel"], "mit": ", ".join(z["getrennt_von"])})
+    for u in uebersprungen:
+        d["kopfzeilen" if u["grund"] == "kopfzeile" else "leerzeilen"].append(
+            {"zeile": f"{u['blatt']}:{u['zeile']}"})
+    return d
+
+
+def _vorschau_intern(store, sheets: dict[str, dict],
+                     antworten: dict | None = None) -> tuple[dict, list[dict]]:
     """``sheets``: {blattname: {"headers": [...], "rows": [[...], ...],
     "mapping": {...} oder None, "art": "..." oder None}}. Ohne ``mapping``/
     ``art`` werden sie vorgeschlagen (ggf. aus dem Layout-Gedaechtnis).
     -> {"blaetter": {name: {"mapping", "art", "art_vorschlag", "zeilen"}},
-       "zusammenfassung": {gruen, gelb, rot}}."""
+       "zusammenfassung": {gruen, gelb, rot, ...}, "gruppen": [...],
+       "automatisch": {...}}."""
     antworten = antworten or {}
     blaetter: dict[str, dict] = {}
     alle_zeilen: list[dict] = []
     mandanten_namen: set[str] = set()
+    uebersprungen: list[dict] = []
 
     for name, s in sheets.items():
         headers = s["headers"]
@@ -919,7 +1291,7 @@ def vorschau(store, sheets: dict[str, dict], antworten: dict | None = None) -> d
         mapping = s.get("mapping") or (gelernt or {}).get("mapping") or spalten_vorschlag(headers)
         art_vorg = art_vorschlag(name, mapping)
         art = s.get("art") or (gelernt or {}).get("art") or art_vorg
-        zeilen = zeilen_aufbauen(store, name, headers, s["rows"], mapping, art)
+        zeilen = zeilen_aufbauen(store, name, headers, s["rows"], mapping, art, uebersprungen)
         blaetter[name] = {"mapping": mapping, "art": art, "art_vorschlag": art_vorg,
                           "gelernt": gelernt is not None, "zeilen": zeilen}
         alle_zeilen += zeilen
@@ -928,30 +1300,149 @@ def vorschau(store, sheets: dict[str, dict], antworten: dict | None = None) -> d
 
     _markiere_dubletten(alle_zeilen)
     _kuerzel_pruefen(alle_zeilen, store)
+    bib = _Bibliothek(store)
     mandanten_codes = {_mandant_key(z["werte"]["mandant_verweis"]) for z in alle_zeilen
                        if z["art"] == ART_MANDANT and z["werte"].get("mandant_verweis")}
+    bekannt = ({norm(n) for n in mandanten_namen} | bib.mandant_namen | bib.mandant_schluessel
+               | mandanten_codes)
     for z in alle_zeilen:
-        z["_mandant_codes"] = mandanten_codes
-    for z in alle_zeilen:
-        _konflikt_mit_bibliothek(store, z)
-        _mandant_referenz_pruefen(z, mandanten_namen, store)
+        _konflikt_mit_bibliothek(bib, z)
+        _mandant_referenz_pruefen(z, bekannt)
         _antworten_einmischen(z, antworten)
 
     zaehler = {STATUS_GRUEN: 0, STATUS_GELB: 0, STATUS_ROT: 0}
     bereit = 0
     verschmolzen = [z for z in alle_zeilen if z.get("verschmelzen")]
     for z in alle_zeilen:
-        z.pop("_mandant_codes", None)
+        if z.get("zusammengefasst"):
+            continue   # nicht uebernommen, daher keine Ampel (eigener Zaehler unten)
         zaehler[z["status"]] += 1
         if not z["weglassen"] and z["beantwortet"]:
             bereit += 1
-    return {"blaetter": blaetter, "zusammenfassung": {
+    auto = _auto_details(alle_zeilen, uebersprungen)
+    for z in alle_zeilen:
+        z["auto"] = sorted(z["auto"])   # JSON-faehig
+    gruppen = gruppen_bilden(alle_zeilen)
+    vorschau_ergebnis = {"blaetter": blaetter, "zusammenfassung": {
         **zaehler, "bereit_zum_uebernehmen": bereit,
         # DE/CH-Namensdubletten, die ohne Rueckfrage zu EINEM Lieferanten
         # werden (Zeilen bzw. Paare) -- damit nachvollziehbar bleibt, was
         # automatisch passiert ist.
         "automatisch_verschmolzen_zeilen": len(verschmolzen),
-        "automatisch_verschmolzen_paare": len(verschmolzen) // 2}}
+        "automatisch_verschmolzen_paare": len(verschmolzen) // 2,
+        "identische_zeilen_zusammengefasst": len(auto["identisch"]),
+        "zeilen_ergaenzend_zusammengefuehrt": len(auto["ergaenzend"]),
+        "fuehrende_nullen_ergaenzt": len(auto["fuehrende_null"]),
+        "getrennte_lieferanten_gleicher_name": len(auto["getrennte_lieferanten"]),
+        "leerzeilen_uebersprungen": len(auto["leerzeilen"]),
+        "kopfzeilen_uebersprungen": len(auto["kopfzeilen"])}}
+    vorschau_ergebnis["automatisch"] = auto
+    vorschau_ergebnis["gruppen"] = [{k: v for k, v in g.items() if not k.startswith("_")}
+                                    for g in gruppen]
+    return vorschau_ergebnis, alle_zeilen
+
+
+def sammelantwort(store, sheets: dict[str, dict], antworten: dict | None,
+                  gruppen_id: str, antwort: str = "", wert: str | None = None,
+                  vorschlaege: bool = False) -> dict:
+    """Neu pruefen, Gruppe ``gruppen_id`` suchen und ihre Antwort in eine KOPIE
+    von ``antworten`` eintragen. -> {"antworten": ..., "gesetzt": n}. Schreibt
+    nichts in die Bibliothek; uebernommen wird erst durch ``anwenden()``."""
+    antworten = dict(antworten or {})
+    _, zeilen = _vorschau_intern(store, sheets, antworten)
+    neu = gruppen_antwort(gruppen_bilden(zeilen), gruppen_id, antwort, wert, vorschlaege)
+    antworten.update(neu)
+    return {"antworten": antworten, "gesetzt": len(neu)}
+
+
+# ---- Fragen buendeln + Sammel-Antwort ---------------------------------------
+# Reine Komfortebene (Aaron 17.10.2026: ~7000 offene Fragen kann niemand einzeln
+# durchklicken): gleichartige UNBEANTWORTETE Fragen werden zu Gruppen
+# zusammengefasst; eine Gruppen-Antwort traegt exakt denselben ``antworten``-
+# Eintrag fuer jede Frage der Gruppe ein, den der Mensch sonst einzeln gesetzt
+# haette. Entschieden wird weiterhin nur vom Menschen; ``anwenden()`` prueft
+# alles serverseitig neu und ist davon unberuehrt.
+
+_QUOTE_RE = re.compile(r"'[^']*'|[„“][^“”]*[“”]")
+_KLAMMER_RE = re.compile(r"\s*\([^)]*\)")
+
+# Antworten, die nur fuer EINE Zeile Sinn ergeben: "diese Zeile uebernehmen,
+# andere weglassen" gaebe in einer Gruppe beiden Dubletten dieselbe Antwort.
+NICHT_SAMMELFAEHIG = frozenset({"diese zeile übernehmen, andere weglassen"})
+
+
+def _grund_muster(feld: str, grund: str) -> str:
+    """Grund-Text ohne den eingebetteten konkreten Wert. Die Gruende stehen im
+    Code als feste Saetze mit Wert NACH dem ':' bzw. in Hochkommata; die
+    Bibliotheks-Frage nennt die Datensatz-ID in Klammern."""
+    muster = grund.split(":", 1)[0]
+    muster = _QUOTE_RE.sub("'…'", muster)
+    if feld == "bibliothek":
+        muster = _KLAMMER_RE.sub("", muster)
+    return " ".join(muster.split())
+
+
+def gruppen_bilden(zeilen: list[dict]) -> list[dict]:
+    """Gruppiert alle noch unbeantworteten Fragen ueber alle Zeilen/Blaetter nach
+    (Zeilen-Art, Feld, Grund-Muster, Antwortmoeglichkeiten). ``zeilen``: die
+    Zeilen aus ``vorschau()`` (nach dem Einmischen der Antworten). -> absteigend
+    nach Anzahl sortiert; ``beispiele`` nennt nur Zeilen-Schluessel (keine Werte)."""
+    gruppen: dict[str, dict] = {}
+    for z in zeilen:
+        for f in z["fragen"]:
+            if f.get("beantwortet"):
+                continue
+            antw = tuple(f["antwortmoeglichkeiten"])
+            muster = _grund_muster(f["feld"], f["grund"])
+            roh = "\x1f".join([z["art"], f["feld"], muster, *antw])
+            gid = hashlib.sha1(roh.encode("utf-8")).hexdigest()[:12]
+            g = gruppen.setdefault(gid, {
+                "id": gid, "art": z["art"], "feld": f["feld"], "muster": muster,
+                "anzahl": 0, "antwortmoeglichkeiten": list(antw),
+                "sammelfaehig": [a for a in antw if a.lower() not in NICHT_SAMMELFAEHIG],
+                "hat_vorschlag": False, "anzahl_vorschlaege": 0, "beispiele": [],
+                "_eintraege": []})
+            g["anzahl"] += 1
+            g["_eintraege"].append((z["schluessel"], f))
+            if f.get("vorschlag"):
+                g["hat_vorschlag"] = True
+                g["anzahl_vorschlaege"] += 1
+            if len(g["beispiele"]) < 5:
+                g["beispiele"].append(z["schluessel"])
+    return sorted(gruppen.values(), key=lambda g: (-g["anzahl"], g["muster"], g["id"]))
+
+
+def gruppen_antwort(gruppen: list[dict], gruppen_id: str, antwort: str,
+                    wert: str | None = None, vorschlaege: bool = False) -> dict:
+    """Erzeugt die ``antworten``-Eintraege (Format wie ``_antwort_schluessel``)
+    fuer JEDE Frage der Gruppe. ``vorschlaege=True``: je Frage "korrigieren auf
+    …" mit deren eigenem Vorschlag (Fragen ohne Vorschlag bleiben offen).
+    ValueError bei unbekannter Gruppe / unzulaessiger Antwort."""
+    g = next((x for x in gruppen if x["id"] == gruppen_id), None)
+    if g is None:
+        raise KeyError(gruppen_id)
+    korr = next((a for a in g["sammelfaehig"] if a.lower().startswith("korrigieren")), None)
+    out: dict[str, dict] = {}
+    if vorschlaege:
+        if not korr:
+            raise ValueError("Diese Gruppe kennt keine Korrektur -- Vorschläge nicht übernehmbar")
+        for schluessel, f in g["_eintraege"]:
+            if f.get("vorschlag"):
+                out[_antwort_schluessel(schluessel, f["feld"])] = {
+                    "antwort": korr, "wert": f["vorschlag"]}
+        if not out:
+            raise ValueError("Diese Gruppe hat keine Vorschläge")
+        return out
+    if antwort not in g["sammelfaehig"]:
+        raise ValueError("Antwort für diese Gruppe nicht zulässig")
+    if antwort.lower().startswith("korrigieren") and not (wert or "").strip():
+        raise ValueError("Für „korrigieren“ muss ein Wert angegeben werden")
+    eintrag = {"antwort": antwort}
+    if antwort.lower().startswith("korrigieren"):
+        eintrag["wert"] = wert
+    for schluessel, f in g["_eintraege"]:
+        out[_antwort_schluessel(schluessel, f["feld"])] = dict(eintrag)
+    return out
 
 
 # ---- Anwenden ---------------------------------------------------------------
@@ -1135,7 +1626,7 @@ def anwenden(store, sheets: dict[str, dict], antworten: dict | None, operator: s
     vor = vorschau(store, sheets, antworten)
     ergebnis = {"kreditoren": 0, "mandanten": 0, "postfaecher": 0,
                "uebersprungen": 0, "passwoerter_gesetzt": 0,
-               "verschmolzene_lieferanten": 0}
+               "verschmolzene_lieferanten": 0, "zusammengefasst": 0}
     # Reihenfolge unabhaengig von der Blattreihenfolge: Postfaecher verweisen auf
     # Mandanten, die dafuer schon in der Bibliothek stehen muessen.
     reihenfolge = {ART_MANDANT: 0, ART_KREDITOR_DE: 1, ART_KREDITOR_CH: 1, ART_POSTFACH: 2}
@@ -1144,6 +1635,9 @@ def anwenden(store, sheets: dict[str, dict], antworten: dict | None, operator: s
     kreditor_ids: set[str] = set()
     verschmolzen_ids: set[str] = set()
     for z in alle:
+        if z.get("zusammengefasst"):
+            ergebnis["zusammengefasst"] += 1   # in der Hauptzeile enthalten
+            continue
         if z["weglassen"] or not (
                 z["status"] == STATUS_GRUEN or (z["status"] == STATUS_GELB and z["beantwortet"])):
             ergebnis["uebersprungen"] += 1

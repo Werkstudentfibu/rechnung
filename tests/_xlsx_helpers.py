@@ -25,6 +25,11 @@ _ROOT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </Relationships>"""
 
 
+class Zahl(str):
+    """Marker: Zelle als reine Zahlzelle (ohne ``t``-Attribut) schreiben, so wie
+    Excel Zahlen speichert -- der Text ist der Rohwert in ``<v>``."""
+
+
 def _col_letter(idx: int) -> str:
     s = ""
     idx += 1
@@ -55,6 +60,9 @@ def write_workbook(sheets: dict[str, list[list[str]]]) -> bytes:
                 if val == "" or val is None:
                     continue
                 ref = f"{_col_letter(c)}{r}"
+                if isinstance(val, Zahl):
+                    cells_xml.append(f'<c r="{ref}"><v>{escape(str(val))}</v></c>')
+                    continue
                 i = sidx(str(val))
                 cells_xml.append(f'<c r="{ref}" t="s"><v>{i}</v></c>')
             rows_xml.append(f'<row r="{r}">{"".join(cells_xml)}</row>')
