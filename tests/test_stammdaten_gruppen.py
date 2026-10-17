@@ -12,7 +12,7 @@ from rechnung import stammdaten_import as si
 from rechnung.store import Store
 from rechnung.web.server import create_app
 
-KOPF = ["Name", "IBAN", "PLZ", "Land"]
+KOPF = ["Name", "IBAN", "PLZ", "Ort", "Land"]
 
 
 def _sheets(rows):
@@ -20,16 +20,17 @@ def _sheets(rows):
 
 
 def _rows():
-    # 3x ungueltige IBAN (verschiedene Werte), 2x PLZ 4-stellig (Vorschlag), 1x PLZ "ABC",
-    # 1 gruene Zeile.
+    # 3x ungueltige IBAN (verschiedene Werte), 2x PLZ-Spalte nennt anderen Ort als die
+    # Ortsspalte (Vorschlag), 1x PLZ "ABC", 1 gruene Zeile. (4-stellige DE-PLZ ist keine
+    # Frage mehr: fuehrende Null wird automatisch ergaenzt.)
     return [
-        ["Alpha GmbH", "DE00000000000000000001", "10115", "DE"],
-        ["Beta GmbH", "DE00000000000000000002", "10115", "DE"],
-        ["Gamma GmbH", "DE00000000000000000003", "10115", "DE"],
-        ["Delta GmbH", "", "1234", "DE"],
-        ["Epsilon GmbH", "", "5678", "DE"],
-        ["Zeta GmbH", "", "ABC", "DE"],
-        ["Eta GmbH", "", "10115", "DE"],
+        ["Alpha GmbH", "DE00000000000000000001", "10115", "Berlin", "DE"],
+        ["Beta GmbH", "DE00000000000000000002", "10115", "Berlin", "DE"],
+        ["Gamma GmbH", "DE00000000000000000003", "10115", "Berlin", "DE"],
+        ["Delta GmbH", "", "10115 Berlin", "Hamburg", "DE"],
+        ["Epsilon GmbH", "", "80331 München", "Köln", "DE"],
+        ["Zeta GmbH", "", "ABC", "Berlin", "DE"],
+        ["Eta GmbH", "", "10115", "Berlin", "DE"],
     ]
 
 
@@ -53,9 +54,10 @@ def test_gruppierung_mehrere_typen_sortiert_und_einzelfall(tmp_path):
     g = v["gruppen"]
     nach_muster = {x["muster"]: x for x in g}
     assert nach_muster["IBAN-Pruefziffer ungueltig"]["anzahl"] == 3
-    plz4 = nach_muster["PLZ-Format fuer DE erwartet 5-stellig"]
-    assert plz4["anzahl"] == 3                 # 1234, 5678, ABC -- gleiches Muster
-    assert plz4["hat_vorschlag"] and plz4["anzahl_vorschlaege"] == 2
+    assert nach_muster["PLZ-Format fuer DE erwartet 5-stellig"]["anzahl"] == 1   # "ABC"
+    ort = nach_muster["PLZ-Spalte nennt '…', Ortsbezeichnung '…' -- bitte entscheiden"]
+    assert ort["anzahl"] == 2
+    assert ort["hat_vorschlag"] and ort["anzahl_vorschlaege"] == 2
     assert not nach_muster["IBAN-Pruefziffer ungueltig"]["hat_vorschlag"]
     assert [x["anzahl"] for x in g] == sorted((x["anzahl"] for x in g), reverse=True)
     assert sum(x["anzahl"] for x in g) == 6    # gruene Zeile taucht nicht auf
@@ -86,12 +88,13 @@ def test_gruppen_id_stabil(tmp_path):
 
 def test_vorschlaege_uebernehmen_nur_wo_vorhanden(tmp_path):
     store, sh = _store(tmp_path), _sheets(_rows())
-    plz = next(x for x in si.vorschau(store, sh)["gruppen"] if x["feld"] == "plz")
-    res = si.sammelantwort(store, sh, {}, plz["id"], vorschlaege=True)
+    ort = next(x for x in si.vorschau(store, sh)["gruppen"] if x["feld"] == "ort")
+    res = si.sammelantwort(store, sh, {}, ort["id"], vorschlaege=True)
     assert res["gesetzt"] == 2
-    assert {e["wert"] for e in res["antworten"].values()} == {"01234", "05678"}
+    assert {e["wert"] for e in res["antworten"].values()} == {"Berlin", "München"}
     assert all(e["antwort"].startswith("korrigieren") for e in res["antworten"].values())
     v = si.vorschau(store, sh, res["antworten"])
+    assert all(x["feld"] != "ort" for x in v["gruppen"])
     assert next(x for x in v["gruppen"] if x["feld"] == "plz")["anzahl"] == 1   # "ABC" bleibt offen
 
 
@@ -128,7 +131,7 @@ def test_anwenden_prueft_nach_gruppenantwort_weiter_neu(tmp_path):
     iban = next(x for x in si.vorschau(store, sh)["gruppen"] if x["feld"] == "iban")
     res = si.sammelantwort(store, sh, {}, iban["id"], "Zeile weglassen")
     erg = si.anwenden(store, sh, res["antworten"], "test")
-    assert erg["kreditoren"] == 1          # nur die gruene Zeile; 3 weggelassen, 3 PLZ offen
+    assert erg["kreditoren"] == 1          # nur die gruene Zeile; 3 weggelassen, 3 Ort/PLZ offen
     assert len(store.suppliers()) == 1
 
 

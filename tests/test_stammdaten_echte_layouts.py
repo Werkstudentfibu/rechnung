@@ -174,12 +174,12 @@ def test_plzort_mit_ort_wird_getrennt_und_widerspruch_gefragt(tmp_path):
     assert z["status"] == si.STATUS_GELB and z["fragen"][0]["feld"] == "ort"
 
 
-def test_plz_mit_verlorener_null_bekommt_vorschlag(tmp_path):
+def test_plz_mit_verlorener_null_wird_automatisch_ergaenzt(tmp_path):
     kred = [KRED_KOPF, ["1", "A GmbH", "A GmbH", "1", "", "S 1", "DE", "1067", "Dresden"]]
     z = _zeilen(si.vorschau(_store(tmp_path), _sheets({"Kreditoren Deutschland": kred})),
                 "Kreditoren Deutschland")[0]
-    f = [f for f in z["fragen"] if f["feld"] == "plz"][0]
-    assert f["vorschlag"] == "01067"
+    assert z["werte"]["plz"] == "01067" and z["status"] == si.STATUS_GRUEN and not z["fragen"]
+    assert any("führende Null ergänzt" in h for h in z["hinweise"])
 
 
 def test_vertippter_mdt_wird_ueber_das_kuerzel_gefunden(tmp_path):
