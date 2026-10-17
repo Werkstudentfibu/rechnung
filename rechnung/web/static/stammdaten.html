@@ -56,6 +56,8 @@
   .warn { background: #fff2c6; color: #5c4400; padding: 10px 12px; border-radius: 4px; margin: 10px 0; }
   .leiste { position: sticky; bottom: 0; background: #fff; border-top: 1px solid #d5ddd9; padding: 10px 0; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
   .klein { font-size: 12px; color: #666; }
+  details.auto { margin: 2px 0; font-size: 13px; }
+  details.auto ul { max-height: 160px; overflow: auto; margin: 4px 0 4px 18px; padding: 0; }
   .gruppe { display: grid; grid-template-columns: 5.5em 1fr; gap: 4px 12px; padding: 8px 0; border-bottom: 1px solid #eee; }
   .gruppe .anz { font-weight: 700; font-size: 16px; text-align: right; }
   .gruppe .steuer { grid-column: 2; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -355,6 +357,27 @@ function frageHtml(z, f) {
     ${korr ? `<input type="text" aria-label="Korrigierter Wert" value="${esc(a.wert || '')}" data-act="wert" data-key="${esc(key)}">` : ''}</div></div>`;
 }
 
+const AUTO_TEXTE = [
+  ['identisch', (n) => `${n} identische Zeile(n) zusammengefasst`, 'identisch mit'],
+  ['ergaenzend', (n) => `${n} Zeile(n) ergänzend zusammengeführt`, 'zusammengeführt in'],
+  ['fuehrende_null', (n) => `${n} führende Null(en) ergänzt (Excel hatte sie entfernt)`, ''],
+  ['getrennte_lieferanten', (n) => `${n} Lieferant(en) mit gleichem Namen, aber anderer Kontonummer – als getrennte Lieferanten angelegt`, 'gleicher Name wie'],
+  ['leerzeilen', (n) => `${n} Leer-/Summenzeile(n) übersprungen`, ''],
+  ['kopfzeilen', (n) => `${n} wiederholte Kopfzeile(n) übersprungen`, ''],
+];
+
+// Was das Programm ohne Rückfrage getan hat: je Art aufklappbar mit den Zeilen
+// (Blatt:Zeile), damit stichprobenartig geprüft werden kann.
+function autoHtml(v) {
+  const a = v.automatisch || {};
+  const max = 500;
+  return AUTO_TEXTE.filter(([k]) => (a[k] || []).length).map(([k, text, mit]) => {
+    const l = a[k];
+    const items = l.slice(0, max).map((x) => `<li>${esc(x.zeile)}${x.mit && mit ? ` <span class="klein">(${mit} ${esc(x.mit)})</span>` : ''}</li>`).join('');
+    return `<details class="auto"><summary>${text(l.length)}</summary><ul>${items}</ul>${l.length > max ? `<p class="hint">… und ${l.length - max} weitere</p>` : ''}</details>`;
+  }).join('');
+}
+
 function vorschauHtml() {
   const v = S.vor;
   const zs = v.zusammenfassung;
@@ -364,6 +387,7 @@ function vorschauHtml() {
     : '';
   let h = `<h2>Vorschau</h2><div class="chips"><span class="chip gruen">${zs.gruen} grün</span><span class="chip gelb">${zs.gelb} gelb – Frage offen</span>
     <span class="chip rot">${zs.rot} rot</span><span class="chip neutral">${offen} noch zu beantworten</span>${verschmolzenChip}</div>
+    <div class="auto-box"><p class="klein"><b>Automatisch erledigt</b> (ohne Information zu verlieren – zum Stichproben-Prüfen aufklappen):</p>${autoHtml(v) || '<p class="klein">Nichts.</p>'}</div>
     ${gruppenHtml(v)}
     <label><input type="checkbox" ${S.detail ? 'checked' : ''} data-act="detail"> Einzelansicht je Zeile zeigen (zum Nachprüfen / für Einzelfälle)</label>
     <label style="margin-left:12px"><input type="checkbox" ${S.nurOffen ? 'checked' : ''} data-act="nuroffen"> nur Zeilen mit Fragen zeigen</label>`;
@@ -374,7 +398,7 @@ function vorschauHtml() {
     h += `<div class="card"><div class="kopf"><h3>${esc(name)}</h3><span class="klein">${alle.length} Zeilen, ${alle.filter((z) => z.status === 'gruen').length} grün</span></div><div class="inhalt">`;
     if (!zeigen.length) h += `<p class="hint">Alle Zeilen sind eindeutig – keine Frage offen.</p>`;
     else h += `<table><tr><th>Zeile</th><th>Status</th><th>Inhalt</th></tr>` + zeigen.map((z) => `<tr><td>${z.zeile}</td>
-      <td><span class="punkt ${z.status}"></span>${z.status === 'gruen' ? 'grün' : z.status === 'gelb' ? 'gelb' : 'rot'}</td>
+      <td><span class="punkt ${z.status}"></span>${z.zusammengefasst ? 'zusammengefasst' : z.status === 'gruen' ? 'grün' : z.status === 'gelb' ? 'gelb' : 'rot'}</td>
       <td>${esc(zeileText(z))}${(z.hinweise || []).map((x) => `<div class="klein">Hinweis: ${esc(x)}</div>`).join('')}
       ${z.fragen.map((f) => frageHtml(z, f)).join('')}</td></tr>`).join('') + `</table>`;
     if (sicht.length > zeigen.length) h += `<p class="hint">… und ${sicht.length - zeigen.length} weitere Zeilen (zuerst die gezeigten beantworten).</p>`;
@@ -389,7 +413,7 @@ function render() {
   if (S.ergebnis) {
     const e = S.ergebnis;
     h += `<h2>Fertig</h2><div class="ok">Übernommen: ${e.kreditoren} Kreditoren, ${e.mandanten} Mandanten, ${e.postfaecher} Postfächer
-      (${e.uebersprungen} Zeile(n) nicht übernommen – Frage offen oder weggelassen)${e.verschmolzene_lieferanten ? `, davon ${e.verschmolzene_lieferanten} automatisch verschmolzen (DE/CH)` : ''}.</div>`;
+      (${e.uebersprungen} Zeile(n) nicht übernommen – Frage offen oder weggelassen)${e.verschmolzene_lieferanten ? `, davon ${e.verschmolzene_lieferanten} automatisch verschmolzen (DE/CH)` : ''}${e.zusammengefasst ? `; ${e.zusammengefasst} Zeile(n) waren automatisch in eine andere zusammengefasst` : ''}.</div>`;
     if (e.hinweis_passwoerter) h += `<div class="warn"><b>Wichtig:</b> ${esc(e.hinweis_passwoerter)}</div>`;
     h += `<button data-act="neu">Weitere Dateien einlesen</button>`;
   } else {
