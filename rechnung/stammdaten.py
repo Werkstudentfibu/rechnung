@@ -84,7 +84,7 @@ def lieferant(sup, iban_rechnung: str | None = None) -> dict | None:
             "land": a["land"] or _land_aus(ust, iban),
             "iban": iban, "bic": sup.bic, "bankkonto": sup.bank_account,
             "bankleitzahl": sup.bank_code, "bank": sup.bank_name,
-            "bestaetigt": sup.bestaetigt}
+            "bestaetigt": sup.bestaetigt, "dummy": bool(getattr(sup, "dummy", False))}
 
 
 def fuer_rechnung(store, res) -> dict:

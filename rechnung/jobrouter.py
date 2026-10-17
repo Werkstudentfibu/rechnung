@@ -107,6 +107,13 @@ def payload_from_result(res: dict, cfg: JobRouterConfig | None = None) -> dict:
         # Geschaeftsbereich + Lieferant mit ID, USt-ID, Anschrift, Bank
         "geschaeftsbereich": (res.get("stammdaten") or {}).get("geschaeftsbereich"),
         "lieferantStammdaten": (res.get("stammdaten") or {}).get("lieferant"),
+        # Dummy-Lieferant (dummy.py): die vom Programm erkannten echten Daten,
+        # damit der neue Lieferant nicht abgetippt werden muss, plus kurzer
+        # Text fuers Bemerkungsfeld.
+        **({"lieferantIstDummy": True,
+            "erkannterLieferant": res.get("erkannter_lieferant") or {},
+            "bemerkung": res.get("bemerkung") or ""}
+           if res.get("lieferant_ist_dummy") else {}),
         "confidence": res.get("overall_confidence"),
         "fields": _map_fields(flat_fields, cfg),
         "herkunft": herkunft,

@@ -545,7 +545,9 @@ def _draft_id_base(name: str, ustid: str, iban: str) -> str:
 
 
 def _unique_supplier_id(store: Store, base: str) -> str:
-    existing = {s.id for s in store.suppliers()}
+    from .dummy import DUMMY_ID
+
+    existing = {s.id for s in store.suppliers()} | {DUMMY_ID}
     if base not in existing:
         return base
     i = 2
@@ -1765,7 +1767,8 @@ def _fv(fields: dict, key: str):
 
 
 def finalize(res: Result, store: Store, *, operator: str | None = None,
-             to_jobrouter: bool = True, autonomous: bool = False) -> dict:
+             to_jobrouter: bool = True, autonomous: bool = False,
+             als_dummy: bool = False) -> dict:
     """Eine geprüfte Rechnung in die Bücher übernehmen.
 
     1. Original unverändert archivieren (``data/archive/<sha>.pdf|.xml`` – GoBD;
@@ -1784,6 +1787,11 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
     sind nur noch Konfidenz-Signale, keine Freigabe fürs automatische
     Durchlaufen; ohne Bestätigung wird nichts archiviert, geloggt oder an
     JobRouter eingereiht.
+
+    ``als_dummy=True`` (Senden ohne bestaetigten Lieferanten, dummy.py): im
+    JobRouter-Datensatz steht der Dummy-Lieferant, die erkannten echten Daten
+    gehen als ``erkannter_lieferant`` mit. Journal/Audit behalten den internen
+    Entwurf (Dubletten, Lernen).
 
     Einzige Ausnahme: ``autonomous=True`` im Betriebsmodus ``autonom``
     (modus.py, SPEC §7v) UND die Rechnung ist sicher (``human.gruende``
@@ -1808,6 +1816,16 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
     # Unveraenderliche Stammdaten aus der Bibliothek mitgeben (stammdaten.py)
     from . import stammdaten
     payload["stammdaten"] = stammdaten.fuer_rechnung(store, res)
+    if als_dummy:
+        from . import dummy
+        dsup = dummy.sicherstellen(store)
+        erkannt = dummy.erkannter_lieferant(store, res)
+        payload["lieferant_ist_dummy"] = True
+        payload["erkannter_lieferant"] = erkannt
+        payload["bemerkung"] = dummy.bemerkung(erkannt)
+        payload["supplier_id"], payload["supplier_name"] = dsup.id, dsup.name
+        payload["supplier_external_id"] = dsup.external_id or None
+        payload["stammdaten"]["lieferant"] = stammdaten.lieferant(dsup)
     already = store.seen_sha_template(res.sha256, res.template_id)
 
     store.archive_pdf(res.file, res.sha256)
@@ -1821,6 +1839,7 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
             "billing_address_name": res.billing_address_name,
             "status": res.status,
             "freigabe": freigabe,
+            "als_dummy": als_dummy,
             "sammel": res.sammel,
             "rechnungsnummer": _fv(res.fields, "rechnungsnummer"),
             "rechnungsdatum": _fv(res.fields, "rechnungsdatum"),

@@ -29,14 +29,16 @@ def test_senden_reiht_ein_und_nimmt_aus_eingang(tmp_path: Path):
     assert store.is_confirmed(d["sha256"]) if "sha256" in d else True
 
 
-def test_senden_ohne_lieferant_wird_abgelehnt(tmp_path: Path):
+def test_senden_ohne_lieferant_blockiert_nicht_mehr_wegen_lieferant(tmp_path: Path):
+    """Seit 17.10.2026 ersetzt der Dummy-Lieferant den fehlenden Lieferanten;
+    blockiert wird nur noch wegen fehlender Pflichtfelder (test_dummy_lieferant.py)."""
     from rechnung.store import Store
     samples = tmp_path / "eingang"; samples.mkdir()
     make_invoice(samples / "Rechnung #1.pdf")
     store = Store(tmp_path / "data")
     c = TestClient(create_app(store, samples))
     r = c.post("/api/senden", json={"file": "Rechnung #1.pdf", "template_id": None})
-    assert r.status_code == 400 and "Lieferant" in r.json()["detail"]
+    assert r.status_code == 400 and "Lieferant" not in r.json()["detail"]
     assert (samples / "Rechnung #1.pdf").exists()
 
 
