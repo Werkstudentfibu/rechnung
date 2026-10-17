@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import io
 import re
+import unicodedata
 import zipfile
+from decimal import Decimal, InvalidOperation
 from xml.etree import ElementTree as ET
 
 _NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
@@ -78,6 +80,31 @@ def _sheet_list(z: zipfile.ZipFile) -> list[tuple[str, str]]:
     return out
 
 
+_ZAHL_RE = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+
+
+def zahl_ausschreiben(roh: str) -> str:
+    """Rohwert einer REINEN Zahlzelle -> ganze Zahl ausgeschrieben: ``12345.0`` ->
+    ``12345``, ``1.2345E+4`` -> ``12345``. Nicht-ganzzahlige oder unlesbare Werte
+    bleiben unveraendert (nie runden, nie raten)."""
+    t = (roh or "").strip()
+    if not _ZAHL_RE.fullmatch(t) or not re.search(r"[.eE]", t):
+        return roh
+    try:
+        d = Decimal(t)
+    except InvalidOperation:
+        return roh
+    if not d.is_finite() or abs(d.adjusted()) > 30 or d != d.to_integral_value():
+        return roh
+    return format(d.to_integral_value(), "f")
+
+
+def text_saeubern(s: str) -> str:
+    """Unicode NFKC, geschuetzte/exotische Leerzeichen -> normales Leerzeichen,
+    Tab/Zeilenumbruch/Mehrfach-Whitespace zusammenfassen, trimmen."""
+    return " ".join(unicodedata.normalize("NFKC", s or "").split())
+
+
 def _cell_value(c: ET.Element, shared: list[str]) -> str:
     t = c.get("t")
     v_el = c.find(f"{_NS}v")
@@ -95,7 +122,10 @@ def _cell_value(c: ET.Element, shared: list[str]) -> str:
         return "1" if (v_el is not None and v_el.text == "1") else "0"
     # "str" (Formel-Textergebnis) oder Zahl/Datum ohne ``t`` -- Rohwert reicht,
     # Formeln/Datumsformatierung werden bewusst nicht aufgeloest (s.o.).
-    return v_el.text if v_el is not None and v_el.text is not None else ""
+    roh = v_el.text if v_el is not None and v_el.text is not None else ""
+    if t in (None, "n"):   # reine Zahlzelle: "12345.0"/"1.2345E+4" -> "12345"
+        return zahl_ausschreiben(roh)
+    return roh
 
 
 def read_workbook(data: bytes) -> dict[str, list[list[str]]]:
@@ -152,6 +182,6 @@ def header_and_rows(rows: list[list[str]]) -> tuple[list[str], list[list[str]]]:
         idx += 1
     if idx >= len(rows):
         return [], []
-    header = [h.strip() for h in rows[idx]]
+    header = [text_saeubern(h) for h in rows[idx]]
     data = [r for r in rows[idx + 1:] if any(v.strip() for v in r)]
     return header, data
