@@ -135,6 +135,24 @@
   .ab-in.gut { background: #d9f2d9; }
   .ab-in.vorschlag { background: #fff6d5; }
   .ab-in.unsicher { background: #f9d6d6; }
+  /* Unsichere Felder deutlich (Tab springt von einem zum naechsten) */
+  .af.uns { box-shadow: -4px 0 0 #cf1322; padding-left: 4px; }
+  .af.uns.kuenstlich { box-shadow: -4px 0 0 #d48806; }
+  .af.uns > label::before { content: '⚠ '; color: #cf1322; }
+  .af.uns.kuenstlich > label::before { color: #d48806; }
+  .af.uns .ab-in { border: 2px solid #cf1322; }
+  .af.uns.kuenstlich .ab-in { border-color: #d48806; }
+  .af.sicher .ab-in { border-color: #b7d9b7; }
+  #uns-hinweis { font-size: 13px; padding: 4px 8px; margin: 2px 0 6px; background: #fff7e6; border: 1px solid #ffd591; border-radius: 4px; }
+  #uns-hinweis.ok { background: #f0faf0; border-color: #b7d9b7; }
+  /* Vorbereitung (Zustand je Rechnung, Zaehler) */
+  .list-kopf { padding: 8px 12px; border-bottom: 2px solid #1c7550; background: #f6faf8; position: sticky; top: 0; z-index: 2; }
+  .list-kopf .vb-zeile { font-weight: 600; }
+  .list-kopf select, .list-kopf label { font-size: 12px; margin-right: 8px; }
+  .badge.vb-bereit { background: #c9ecd6; } .badge.vb-vorbereitung { background: #d6e4ff; }
+  .badge.vb-wartet { background: #eee; color: #666; } .badge.vb-fehler { background: #f5222d; color: #fff; }
+  #list .row .vb-grund { font-size: 12px; color: #555; }
+  #list .row.nicht-bereit { opacity: .8; }
   .ab-in[readonly] { color: #222; }
   .af .raw { font: 12px/1.3 ui-monospace, Consolas, monospace; color: #555; padding: 1px 6px; }
   .af.sel .ab-in { outline: 2px solid #2f6fd0; }
@@ -297,6 +315,13 @@
       <div id="q-testsatz"></div>
     </div>
     <div class="box sect">
+      <h4>Lernfortschritt je Lieferant</h4>
+      <p class="hint">Wie weit das Programm je Lieferant ist: wie viele Rechnungen bestätigt, ob die
+        Vorlage gesichert ist, und wie oft zuletzt noch von Hand korrigiert werden musste
+        (Schattenbetrieb). Nur Anzeige – es wird nichts automatisch freigegeben.</p>
+      <div id="q-lernfortschritt"></div>
+    </div>
+    <div class="box sect">
       <h4>Fehlerstatistik je Lieferant und Feld</h4>
       <p class="hint">Anteil der Rechnungen eines Lieferanten, bei denen ein Feld von Hand
         korrigiert wurde – gesamt, in den letzten 4 Wochen und davor. Oben die lohnendsten
@@ -386,8 +411,43 @@ const esc = s => (s == null ? '' : String(s)).replace(/[&<>"]/g, c =>
 const nz = v => (v === null || v === undefined || v === '') ? '' : v;
 
 /* ================= Rechnungen / Training ================= */
+// Sortierung der Liste (merkt sich der Browser): bereite zuerst / nach Lernwert
+const SORT = { lernwert: localStorage.getItem('sortLernwert') !== '0',
+               bereite: localStorage.getItem('bereiteZuerst') !== '0' };
+let VB = null;   // letzte Vorbereitungs-Uebersicht (Zaehler, ob die Vorbereitung laeuft)
+function setSort() {
+  SORT.bereite = $('#vb-bereite').checked;
+  SORT.lernwert = $('#vb-sort').value === 'lernwert';
+  localStorage.setItem('bereiteZuerst', SORT.bereite ? '1' : '0');
+  localStorage.setItem('sortLernwert', SORT.lernwert ? '1' : '0');
+  loadList();
+}
+function vbText(v) {
+  if (!v) return '';
+  let t = `${v.bereit} bereit zur Prüfung, ${v.in_vorbereitung} in Vorbereitung`;
+  if (v.wartet) t += `, ${v.wartet} warten`;
+  if (v.fehler) t += `, ${v.fehler} Fehler`;
+  if (!v.aktiv && !v.bereit && v.gesamt) t += ' (Vorbereitung im Hintergrund ist aus)';
+  return t;
+}
+function vbTitel(v) {
+  document.title = v && v.bereit ? `(${v.bereit} bereit) Rechnung – Training & Bibliothek`
+                                  : 'Rechnung – Training & Bibliothek';
+}
+function listKopf(v) {
+  const el = document.createElement('div'); el.className = 'list-kopf';
+  const g = v && v.gesichert;
+  el.innerHTML = `<div class="vb-zeile" id="vb-zeile">${esc(vbText(v))}</div>
+    ${g && g.prozent != null ? `<div class="hint">${g.prozent} % der wartenden Rechnungen kommen von Lieferanten mit gesicherter Vorlage</div>` : ''}
+    <label><input type="checkbox" id="vb-bereite" ${SORT.bereite ? 'checked' : ''} onchange="setSort()"> bereite zuerst</label>
+    <select id="vb-sort" onchange="setSort()" title="Lernwert: erste Rechnung eines neuen Lieferanten zuerst – danach lernt das Programm für alle weiteren dieses Lieferanten">
+      <option value="lernwert" ${SORT.lernwert ? 'selected' : ''}>nach Lernwert</option>
+      <option value="eingang" ${SORT.lernwert ? '' : 'selected'}>nach Eingang</option></select>`;
+  return el;
+}
 async function loadList() {
-  const d = await api('/api/scan');
+  const d = await api(`/api/scan?sortierung=${SORT.lernwert ? 'lernwert' : 'eingang'}&bereite_zuerst=${SORT.bereite}`);
+  VB = d.vorbereitung; vbTitel(VB);
   const auto = d.results.filter(r => r.status === 'auto').length;
   $('#stats').textContent = `${d.results.length} PDF · ${auto} auto`;
   api('/api/menschlich').then(h =>
@@ -397,18 +457,69 @@ async function loadList() {
   loadModus();
   LIST_FILES = d.results.map(r => r.file);
   const list = $('#list'); list.innerHTML = '';
+  list.appendChild(listKopf(VB));
   for (const r of d.results) {
+    const vb = r.vorbereitung || {};
     const div = document.createElement('div');
-    div.className = 'row';
+    div.className = 'row' + (vb.zustand && vb.zustand !== 'bereit' ? ' nicht-bereit' : '');
     div.dataset.file = r.file;
+    div.dataset.zustand = vb.zustand || '';
+    const grund = vb.zustand === 'bereit' && vb.grund ? vb.grund
+      : vb.zustand === 'fehler' && vb.fehler ? vb.fehler : '';
     div.innerHTML = `<div>${esc(r.file.split(/[\\/]/).pop())}</div>
+      <span class="badge vb-${esc(vb.zustand)}" data-vb title="${esc(vb.text || '')}">${esc(vb.text || '')}</span>
       <span class="badge ${r.status}" title="${esc((r.hold_reasons || []).join('; '))}">${esc((d.status_labels || {})[r.status] || r.status)}</span>
       ${r.supplier_name ? ' ' + esc(r.supplier_name) : ''}
       ${r.billing_address_name ? ' → ' + esc(r.billing_address_name) : ''}
-      ${r.overall_confidence ? ` · conf ${r.overall_confidence}` : ''}`;
+      ${r.overall_confidence ? ` · conf ${r.overall_confidence}` : ''}
+      ${grund ? `<div class="vb-grund">${esc(grund)}</div>` : ''}`;
     div.onclick = () => openInvoice(r.file, div);
+    if (STATE && STATE.file === r.file) div.classList.add('active');
     list.appendChild(div);
   }
+}
+
+// Leichte Abfrage alle paar Sekunden: Zaehler, Badges und Fenstertitel
+// aktualisieren, ohne die Liste neu aufzubauen (stoert die Arbeit nicht).
+async function pollVorbereitung() {
+  if (document.hidden || !$('#v-scan').classList.contains('active')) return;
+  let v; try { v = await api('/api/vorbereitung'); } catch (e) { return; }
+  VB = Object.assign(VB || {}, v); vbTitel(VB);
+  const z = $('#vb-zeile'); if (z) z.textContent = vbText(VB);
+  const TXT = { bereit: 'bereit zur Prüfung', vorbereitung: 'wird vorbereitet', wartet: 'wartet', fehler: 'Fehler' };
+  document.querySelectorAll('#list .row').forEach(row => {
+    const name = row.dataset.file.split(/[\\/]/).pop();
+    const neu = (v.dateien || {})[name];
+    if (!neu || neu === row.dataset.zustand) return;
+    row.dataset.zustand = neu;
+    row.classList.toggle('nicht-bereit', neu !== 'bereit');
+    const b = row.querySelector('[data-vb]');
+    if (b) { b.className = 'badge vb-' + neu; b.textContent = TXT[neu]; }
+  });
+}
+setInterval(pollVorbereitung, 8000);
+
+// Nach dem Senden/Bestaetigen: zur naechsten BEREITEN Rechnung, nicht zur naechsten
+// beliebigen -- sonst wartet der Mensch wieder auf die Texterkennung.
+function naechsteBereite(alteListe, alt) {
+  const rows = [...document.querySelectorAll('#list .row')];
+  const bereit = rows.filter(r => r.dataset.zustand === 'bereit' && r.dataset.file !== alt);
+  if (bereit.length) {
+    if (SORT.lernwert) return bereit[0];
+    const idx = alteListe.indexOf(alt);
+    return bereit.find(r => alteListe.indexOf(r.dataset.file) > idx) || bereit[0];
+  }
+  // Vorbereitung im Hintergrund ist aus: wie frueher die naechste der Liste
+  if (VB && !VB.aktiv) {
+    const idx = alteListe.indexOf(alt);
+    const n = idx >= 0 ? alteListe[idx + 1] : null;
+    return n ? rows.find(r => r.dataset.file === n) || null : null;
+  }
+  return null;
+}
+function keineBereite() {
+  const n = VB ? VB.in_vorbereitung + VB.wartet : 0;
+  return 'Keine weitere Rechnung bereit' + (n ? ` – ${n} werden noch vorbereitet` : '') + '.';
 }
 
 let LADE_DATEI = null;
@@ -663,11 +774,17 @@ function fBox(name, label, cls = '') {
     : !da ? '' : (cur.source === 'manual' || cur.confidence == null || cur.confidence >= 0.7) ? 'gut' : 'unsicher';
   const raw = da && cur.raw && String(cur.raw).trim() !== val && cur.source !== 'manual'
     ? `<div class="raw" title="gelesen (${esc(cur.source)})">${esc(String(cur.raw).slice(0, 60))}</div>` : '';
-  return `<div class="af ${cls}" data-field="${esc(name)}" onclick="selectField('${esc(name)}', this)">
-    <label>${esc(label)}${def.required ? ' *' : ''}</label>
-    <input class="ab-in val-input ${st}" data-field="${esc(name)}" value="${esc(val)}"
+  // Unsicher = rot (niedrige Konfidenz / rote Pruefung) oder KI-Vorschlag oder
+  // leeres Pflichtfeld. Tab springt nur zwischen diesen (siehe Tab-Handler).
+  const ki = da && cur.source === 'llm' && st !== 'unsicher';
+  const fehlt = !da && def.required;
+  const uns = st === 'unsicher' || ki || fehlt;
+  const unsCls = uns ? ' uns' + (st === 'unsicher' ? '' : ' kuenstlich') : (da ? ' sicher' : '');
+  return `<div class="af ${cls}${unsCls}" data-field="${esc(name)}" onclick="selectField('${esc(name)}', this)">
+    <label>${esc(label)}${def.required ? ' *' : ''}${ki ? ' <span class="hint">(KI-Vorschlag)</span>' : ''}${fehlt ? ' <span class="hint">(fehlt)</span>' : ''}</label>
+    <input class="ab-in val-input ${st}" data-field="${esc(name)}" ${uns ? 'data-unsicher="1"' : ''} value="${esc(val)}"
            title="${esc(name)}${cur.source ? ' · ' + esc(cur.source) : ''}${cur.confidence ? ' · ' + cur.confidence : ''}"
-           onchange="saveCorrection('${esc(name)}', this.value)">${CP_KNOPF}<button class="mk-btn" tabindex="-1"
+           onchange="saveCorrection('${esc(name)}', this.value); entwarne(this)">${CP_KNOPF}<button class="mk-btn" tabindex="-1"
       title="Korrigieren: danach in der Rechnung den richtigen Wert markieren (Rahmen ziehen)"
       onclick="korrigieren(event, '${esc(name)}', this)">⌖</button>
     ${raw}${rot.map(g => `<div class="chk bad">✗ ${esc(g)}</div>`).join('')}<div class="ass"></div></div>`;
@@ -1048,7 +1165,48 @@ function renderInvoice(d) {
   paintMarkierungen();
   paint();
   paintTabRahmen();
+  unsicherHinweis();
 }
+
+/* ---- Pruefen im Rutsch: Tab springt von unsicherem zu unsicherem Feld ---- */
+// Vom Menschen geprueft/korrigiert: nicht mehr als unsicher fuehren
+function entwarne(inp) {
+  if (!inp.value.trim()) return;
+  delete inp.dataset.unsicher;
+  inp.classList.remove('unsicher', 'vorschlag'); inp.classList.add('gut');
+  const af = inp.closest('.af'); if (af) { af.classList.remove('uns', 'kuenstlich'); af.classList.add('sicher'); }
+  const h = $('#uns-hinweis'); if (h) { h.remove(); unsicherHinweis(); }
+}
+function unsicherHinweis() {
+  const f = $('#fields'); if (!f) return;
+  const n = f.querySelectorAll('input.val-input[data-unsicher="1"]').length;
+  const el = document.createElement('div'); el.id = 'uns-hinweis';
+  el.className = n ? '' : 'ok';
+  el.textContent = n ? `⚠ ${n} Feld${n === 1 ? '' : 'er'} prüfen (rot/orange) – Tab springt von einem zum nächsten; grüne Felder brauchen keinen Blick.`
+                     : '✓ Alles sicher erkannt – kurz ansehen und senden.';
+  f.insertBefore(el, f.firstChild);
+}
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Tab' || ev.ctrlKey || ev.altKey || ev.metaKey) return;
+  const f = $('#fields'); if (!f) return;
+  const a = document.activeElement;
+  const alle = [...f.querySelectorAll('input.val-input')];
+  const imFeld = a && alle.includes(a);
+  if (!imFeld && a !== document.body) return;       // Tab in anderen Masken bleibt wie er ist
+  const uns = alle.filter(i => i.dataset.unsicher === '1');
+  if (!uns.length) return;
+  const pos = imFeld ? alle.indexOf(a) : -1;
+  const ziel = ev.shiftKey ? uns.filter(i => alle.indexOf(i) < (pos < 0 ? alle.length : pos)).pop()
+                           : uns.find(i => alle.indexOf(i) > pos);
+  if (ziel) {
+    ev.preventDefault(); ziel.focus(); ziel.select();
+    ziel.scrollIntoView({ block: 'nearest' });
+    const af = ziel.closest('.af'); if (af && af.dataset.field) selectField(af.dataset.field, af);
+  } else if (!ev.shiftKey) {
+    const b = document.querySelector('button.senden');
+    if (b) { ev.preventDefault(); b.focus(); }       // alles geprueft -> Senden
+  }
+});
 
 /* -------- Vorschlaege im PDF umrahmen (Baustein 11b) -------- */
 // Rahmen je vorausgefuelltem Feld (KI/Vorlage/E-Rechnung) und je Tabellenzeile,
@@ -2152,8 +2310,7 @@ function learnedMsg(r) {
 async function sendeRechnung() {
   // Ein Klick (Aaron 11.10.2026): pruefen -> lernen -> an JobRouter freigeben
   // -> aus der Liste -> naechste Rechnung.
-  const idx = LIST_FILES.indexOf(STATE.file);
-  const next = idx >= 0 ? (LIST_FILES[idx + 1] || null) : null;
+  const alteListe = [...LIST_FILES], alt = STATE.file;
   $('#msg').textContent = 'Sende …';
   const sende = trotzdem => fetch('/api/senden', { method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ file: STATE.file, template_id: STATE.tid || null, trotzdem }) });
@@ -2166,33 +2323,35 @@ async function sendeRechnung() {
   if (!r.ok) { $('#msg').textContent = '✗ ' + (d.detail || ('Fehler ' + r.status)); alert(d.detail || ('Fehler ' + r.status)); return; }
   const wohin = (d.jobrouter_live ? 'an JobRouter übergeben' : 'freigegeben – geht an JobRouter, sobald die Anbindung steht')
     + (d.als_dummy ? ' (als Dummy Lieferant)' : '');
+  STATE.file = null;
   await loadList();
-  if (next) {
-    const row = document.querySelector(`#list .row[data-file="${CSS.escape(next)}"]`);
-    if (row) { await openInvoice(next, row); }
-  } else {
-    $('#work').innerHTML = '<p class="hint" style="padding:12px">Keine weitere Rechnung in der Liste.</p>';
+  const row = naechsteBereite(alteListe, alt);
+  if (row) { await openInvoice(row.dataset.file, row); }
+  else {
+    $('#work').innerHTML = `<p class="hint" style="padding:12px">${esc(keineBereite())}</p>`;
   }
   const m = $('#msg'); if (m) m.textContent = `✓ Vorige Rechnung ${wohin}.`;
+  else if (!row) $('#work').insertAdjacentHTML('beforeend', `<p class="hint" style="padding:0 12px">✓ Vorige Rechnung ${esc(wohin)}.</p>`);
 }
 
 async function confirmTpl() {
   // Naechste Datei VOR dem Neuladen merken -- loadList() baut #list komplett
   // neu auf, danach ist die alte Reihenfolge/Position weg.
-  const idx = LIST_FILES.indexOf(STATE.file);
-  const next = idx >= 0 ? LIST_FILES[idx + 1] : null;
+  const alteListe = [...LIST_FILES], alt = STATE.file;
 
   const r = await api('/api/confirm', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ file: STATE.file, template_id: STATE.tid }),
   });
+  STATE.file = null;
   await loadList();
-  if (next) {
-    const row = document.querySelector(`#list .row[data-file="${CSS.escape(next)}"]`);
-    openInvoice(next, row);
-    $('#msg').textContent = `bestätigt ${r.confirmations}× ${r.secured ? '· GESICHERT' : ''}${learnedMsg(r)} – nächste Rechnung geöffnet`;
+  const row = naechsteBereite(alteListe, alt);
+  const kopf = `bestätigt ${r.confirmations}× ${r.secured ? '· GESICHERT' : ''}${learnedMsg(r)}`;
+  if (row) {
+    openInvoice(row.dataset.file, row);
+    $('#msg').textContent = `${kopf} – nächste bereite Rechnung geöffnet`;
   } else {
-    $('#msg').textContent = `bestätigt ${r.confirmations}× ${r.secured ? '· GESICHERT' : ''}${learnedMsg(r)} – keine weitere Rechnung in der Liste`;
+    $('#msg').textContent = `${kopf} – ${keineBereite()}`;
   }
 }
 
@@ -2797,9 +2956,25 @@ async function loadJournal() {
 const pct = v => (v === null || v === undefined) ? '–' : v.toFixed(1).replace('.', ',') + ' %';
 let TESTSATZ_TIMER = null;
 
+function lernfortschrittHtml(d) {
+  const g = d.gesichert_anteil || {};
+  const kopf = g.prozent != null
+    ? `<p><b>${g.prozent} %</b> der wartenden Rechnungen (${g.gesichert} von ${g.wartend}) kommen von Lieferanten mit gesicherter Vorlage.</p>`
+    : '<p class="hint">Keine wartenden Rechnungen (oder Liste noch nicht geladen).</p>';
+  const rows = d.lernfortschritt || [];
+  const quote = r => r.korrekturquote == null ? '–' : Math.round(100 * r.korrekturquote) + ' % (letzte ' + r.in_stichprobe + ')';
+  return kopf + (!rows.length ? '<p class="hint">Noch keine bestätigten Rechnungen.</p>' :
+    '<table><tr><th>Lieferant</th><th class="num">bestätigt</th><th>Vorlage gesichert</th>' +
+    '<th class="num">Korrekturquote</th><th class="num">wartend</th></tr>' +
+    rows.map(r => `<tr><td>${esc(r.name)}</td><td class="num">${r.bestaetigt}</td>
+      <td>${r.gesichert ? '<span class="chk ok">ja</span>' : (r.vorlage ? '<span class="chk warn">noch nicht</span>' : '<span class="hint">keine Vorlage</span>')}</td>
+      <td class="num">${quote(r)}</td><td class="num">${r.wartend || ''}</td></tr>`).join('') + '</table>');
+}
+
 async function loadQualitaet() {
   loadTestsatz(); loadLernbericht();
   const d = await api('/api/qualitaet');
+  $('#q-lernfortschritt').innerHTML = lernfortschrittHtml(d);
   $('#q-prof-min').textContent = d.min_rechnungen;
   const geld = v => v == null ? '' : Number(v).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   $('#q-profile').innerHTML = !d.profile.length ? '<p class="hint">Noch keine bestätigten Rechnungen.</p>' :

@@ -24,6 +24,10 @@ if not exist "%PY%" (
 )
 echo ==== %date% %time% Update ==== >> "%RECHNUNG_DATA%\nacht.log"
 "%PY%" -m rechnung.cli --data "%RECHNUNG_DATA%" update >> "%RECHNUNG_DATA%\nacht.log" 2>&1
+rem Vorab alles auslesen (Postfach abholen + Texterkennung/KI), damit am Morgen
+rem niemand warten muss. Nichts wird bestaetigt oder gesendet.
+echo ==== %date% %time% Vorbereiten ==== >> "%RECHNUNG_DATA%\nacht.log"
+"%PY%" -m rechnung.cli --data "%RECHNUNG_DATA%" --samples "%RECHNUNG_EINGANG%" vorbereiten >> "%RECHNUNG_DATA%\nacht.log" 2>&1
 rem Der eigentliche Nachtlauf (findet die venv ueber app\.venv, Daten ueber
 rem die oben gesetzten Variablen) -- erst nach dem Update aufgerufen.
 call "%BASIS%\app\windows\nachtlauf.cmd"

@@ -406,12 +406,48 @@ def create_app(store: Store, samples: Path) -> FastAPI:
     from ..config import vorverarbeitung_an
     from ..vorverarbeitung import Vorverarbeiter
 
+    from .. import vorbereitung
+    from contextlib import nullcontext
+
     vorverarbeiter = None
     if vorverarbeitung_an():
         bg_guard = Guard(store.root, timeout=VORVERARBEITUNG_TIMEOUT_S, mode="thread")
-        vorverarbeiter = Vorverarbeiter(lambda p: bg_guard.process(p, use_llm=True))
+        vorverarbeiter = Vorverarbeiter(
+            lambda p: vorbereitung.vorbereite_datei(bg_guard, store, p),
+            neu_auswerten=lambda p: vorbereitung.neu_auswerten(bg_guard, store, p),
+            ueberspringen=lambda p: vorbereitung.ist_bereit(store.root, p))
         if samples.is_dir():
             vorverarbeiter.einreihen(invoice_files(samples))
+    app.state.vorverarbeiter = vorverarbeiter
+
+    def _mensch():
+        """Klick des Menschen hat Vorrang vor dem Hintergrund."""
+        return vorverarbeiter.mensch() if vorverarbeiter is not None else nullcontext()
+
+    # Stand der zuletzt gelieferten Liste (fuer "neu auswerten nach dem Lernen"
+    # und die Zeile "X % von Lieferanten mit gesicherter Vorlage")
+    liste_stand: dict = {"eintraege": []}
+
+    def _nach_lernen_neu_auswerten(res) -> None:
+        """Nach jedem Senden/Bestaetigen (= Lernen): schon vorbereitete, noch
+        nicht bestaetigte Rechnungen DESSELBEN Lieferanten im Hintergrund neu
+        auswerten. Nichts bestaetigen, nichts senden."""
+        sid = getattr(res, "supplier_id", None)
+        if vorverarbeiter is None or not sid:
+            return
+        try:
+            _neu_einreihen(res, sid)
+        except Exception:  # noqa: BLE001 -- Neu-Auswerten darf das Lernen nie stoeren
+            pass
+
+    def _neu_einreihen(res, sid: str) -> None:
+        eigene = Path(res.file).name
+        namen = [e["name"] for e in liste_stand["eintraege"]
+                 if e["lieferant"] == sid and e["zustand"] == vorbereitung.BEREIT
+                 and e["name"] != eigene]
+        pfade = [samples / n for n in namen]
+        if pfade:
+            vorverarbeiter.neu_auswerten(pfade)
 
     abholer = aus_konfiguration(samples, store=store,
                                 bei_neuen=vorverarbeiter.einreihen if vorverarbeiter else None)
@@ -680,7 +716,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                             headers={"Cache-Control": "no-store"})
 
     @app.get("/api/scan")
-    def scan() -> JSONResponse:
+    def scan(sortierung: str = "lernwert", bereite_zuerst: bool = True) -> JSONResponse:
         # use_llm=False: die Liste braucht nur Status/Konfidenz je Datei, und
         # der LLM-Fallback ist konfidenz-gedeckelt (siehe pipeline.CONF_MIN) --
         # er kann res.status hier nie veraendern, wuerde aber bei vielen
@@ -688,24 +724,70 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         # 30-50s pro betroffener Datei verzoegern. Der volle Fallback laeuft
         # weiterhin beim Oeffnen einer einzelnen Rechnung (/api/invoice) und
         # beim tatsaechlichen Bestaetigen (/api/confirm).
-        out = []
+        #
+        # ``sortierung`` ("lernwert" | "eingang") und ``bereite_zuerst``
+        # (vorbereitung.py): bereite Rechnungen oben, darin nach Lernwert.
+        res_je_datei: dict[str, dict] = {}
         split.prepare_folder(samples, store)
-        for p in invoice_files(samples):
+        dateien = invoice_files(samples)
+        for p in dateien:
             # Echte Verarbeitung des Posteingangs (wie CLI "rechnung scan") --
             # legt bei einem unbekannten Lieferanten einen Entwurf an.
             r = _process(p, use_llm=False, create_draft_supplier=True)
             # Unsichere Rechnungen in den Ordner "Menschliche Bearbeitung"
             dispatch(r, store)
-            out.append(r.to_dict())
+            res_je_datei[p.name] = r.to_dict()
+        # Was eben aus dem Eingang genommen wurde, gehoert nicht in die Liste
+        dateien = [p for p in dateien if p.is_file()]
+        if vorverarbeiter is not None:
+            vorverarbeiter.einreihen(dateien)      # Nachzuegler und geaenderte Dateien
+        zst = vorbereitung.zustaende(
+            store.root, dateien, vorverarbeiter.in_arbeit() if vorverarbeiter else None)
+        eintraege = [vorbereitung.eintrag(res_je_datei[p.name], zst[p.name], i)
+                     for i, p in enumerate(dateien)]
+        liste_stand["eintraege"] = eintraege
+        geordnet = vorbereitung.reihenfolge(
+            eintraege, lernwert=(sortierung != "eingang"), bereite_zuerst=bereite_zuerst)
+        out = []
+        for e in geordnet:
+            d = res_je_datei[e["name"]]
+            d["vorbereitung"] = {"zustand": e["zustand"], "text": vorbereitung.ZUSTAND_TEXT[e["zustand"]],
+                                 "stufe": e.get("stufe"), "grund": e.get("grund") or "",
+                                 "unsicher": len(e["unsicher"]), "faellig": e["faellig"],
+                                 "fehler": zst[e["name"]]["fehler"]}
+            out.append(d)
         return JSONResponse({
             "results": out,
             "status_labels": STATUS_LABELS,
+            "vorbereitung": _vorbereitung_uebersicht(zst, eintraege),
             "fields": {k: {"value_type": v[0], "required": v[1]}
                        for k, v in sichtbare_felder().items()},
         })
 
+    def _vorbereitung_uebersicht(zst: dict, eintraege: list[dict]) -> dict:
+        u = vorbereitung.zaehler(zst)
+        u["aktiv"] = vorverarbeiter is not None
+        u["gesichert"] = vorbereitung.gesichert_anteil(eintraege)
+        return u
+
+    @app.get("/api/vorbereitung")
+    def vorbereitung_ep() -> JSONResponse:
+        """Leichte Abfrage (ohne Neuverarbeitung): Zaehler und Zustand je Datei,
+        fuer die Anzeige "N bereit zur Pruefung, M in Vorbereitung"."""
+        dateien = invoice_files(samples) if samples.is_dir() else []
+        zst = vorbereitung.zustaende(
+            store.root, dateien, vorverarbeiter.in_arbeit() if vorverarbeiter else None)
+        return JSONResponse({
+            **_vorbereitung_uebersicht(zst, liste_stand["eintraege"]),
+            "dateien": {n: v["zustand"] for n, v in zst.items()},
+            "fehler": vorverarbeiter.status["fehler"] if vorverarbeiter else ""})
+
     @app.get("/api/invoice")
     def invoice(file: str, address: str | None = None) -> JSONResponse:
+        with _mensch():
+            return _invoice(file, address)
+
+    def _invoice(file: str, address: str | None = None) -> JSONResponse:
         """``address`` (optional): Mensch uebersteuert die erkannte
         Rechnungsadresse im Reiter "1 Rechnungsadresse" (``#variant`` ->
         ``zeigeAdresse()``) -- die Lieferantensuche laeuft dann unter dieser
@@ -1183,6 +1265,10 @@ def create_app(store: Store, samples: Path) -> FastAPI:
 
     @app.post("/api/confirm")
     def confirm(body: ConfirmPost) -> JSONResponse:
+        with _mensch():
+            return _confirm(body)
+
+    def _confirm(body: ConfirmPost) -> JSONResponse:
         from ..config import operator as _operator
 
         if body.template_id is None:
@@ -1220,6 +1306,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         # Lag die Rechnung im Ordner "Menschliche Bearbeitung", verlaesst sie
         # ihn jetzt (erst NACH dem Lernen -- die Arbeitskopie wird entfernt).
         human.erledigt(store, res, _operator())
+        _nach_lernen_neu_auswerten(res)
         return JSONResponse({"confirmations": tpl.confirmations, "secured": tpl.secured,
                              "learned": learned.to_dict()})
 
@@ -1322,6 +1409,10 @@ def create_app(store: Store, samples: Path) -> FastAPI:
 
     @app.post("/api/senden")
     def senden(body: SendenPost) -> JSONResponse:
+        with _mensch():
+            return _senden(body)
+
+    def _senden(body: SendenPost) -> JSONResponse:
         """Ein Klick fuer die taegliche Arbeit (Aaron 11.10.2026): pruefen,
         bestaetigen (= lernen, Goldstandard), fuer JobRouter freigeben
         (finalize -> Warteschlange) und aus dem Eingang nehmen."""
@@ -1389,6 +1480,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         eventlog.record(store, res, operator)
         learned = learn.learn_from_confirmed(store, res, _load(path), operator)
         human.erledigt(store, res, operator)
+        _nach_lernen_neu_auswerten(res)
         return JSONResponse({"confirmed": True, "status": res.status,
                              "confirmations": 0, "secured": False,
                              "learned": learned.to_dict()})
@@ -1862,9 +1954,15 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         bewusst entfernt (Aaron 10.10.2026: nicht Aufgabe des Programms)."""
         from .. import plausi
 
+        wartend: dict[str, int] = {}
+        for e in liste_stand["eintraege"]:
+            if e["lieferant"]:
+                wartend[e["lieferant"]] = wartend.get(e["lieferant"], 0) + 1
         return JSONResponse({"profile": plausi.profile(store),
                              "min_rechnungen": plausi.MIN_RECHNUNGEN,
-                             "fehlerstatistik": eventlog.fehlerstatistik(store)})
+                             "fehlerstatistik": eventlog.fehlerstatistik(store),
+                             "lernfortschritt": vorbereitung.lernfortschritt(store, wartend),
+                             "gesichert_anteil": vorbereitung.gesichert_anteil(liste_stand["eintraege"])})
 
     @app.post("/api/testsatz")
     def testsatz_start() -> JSONResponse:
