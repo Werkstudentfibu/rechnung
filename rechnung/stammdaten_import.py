@@ -903,6 +903,11 @@ def _antworten_einmischen(zeile: dict, antworten: dict) -> None:
 # ---- Gesamtvorschau ---------------------------------------------------------
 
 def vorschau(store, sheets: dict[str, dict], antworten: dict | None = None) -> dict:
+    return _vorschau_intern(store, sheets, antworten)[0]
+
+
+def _vorschau_intern(store, sheets: dict[str, dict],
+                     antworten: dict | None = None) -> tuple[dict, list[dict]]:
     """``sheets``: {blattname: {"headers": [...], "rows": [[...], ...],
     "mapping": {...} oder None, "art": "..." oder None}}. Ohne ``mapping``/
     ``art`` werden sie vorgeschlagen (ggf. aus dem Layout-Gedaechtnis).
@@ -945,13 +950,120 @@ def vorschau(store, sheets: dict[str, dict], antworten: dict | None = None) -> d
         zaehler[z["status"]] += 1
         if not z["weglassen"] and z["beantwortet"]:
             bereit += 1
-    return {"blaetter": blaetter, "zusammenfassung": {
+    gruppen = gruppen_bilden(alle_zeilen)
+    vorschau_ergebnis = {"blaetter": blaetter, "zusammenfassung": {
         **zaehler, "bereit_zum_uebernehmen": bereit,
         # DE/CH-Namensdubletten, die ohne Rueckfrage zu EINEM Lieferanten
         # werden (Zeilen bzw. Paare) -- damit nachvollziehbar bleibt, was
         # automatisch passiert ist.
         "automatisch_verschmolzen_zeilen": len(verschmolzen),
         "automatisch_verschmolzen_paare": len(verschmolzen) // 2}}
+    vorschau_ergebnis["gruppen"] = [{k: v for k, v in g.items() if not k.startswith("_")}
+                                    for g in gruppen]
+    return vorschau_ergebnis, alle_zeilen
+
+
+def sammelantwort(store, sheets: dict[str, dict], antworten: dict | None,
+                  gruppen_id: str, antwort: str = "", wert: str | None = None,
+                  vorschlaege: bool = False) -> dict:
+    """Neu pruefen, Gruppe ``gruppen_id`` suchen und ihre Antwort in eine KOPIE
+    von ``antworten`` eintragen. -> {"antworten": ..., "gesetzt": n}. Schreibt
+    nichts in die Bibliothek; uebernommen wird erst durch ``anwenden()``."""
+    antworten = dict(antworten or {})
+    _, zeilen = _vorschau_intern(store, sheets, antworten)
+    neu = gruppen_antwort(gruppen_bilden(zeilen), gruppen_id, antwort, wert, vorschlaege)
+    antworten.update(neu)
+    return {"antworten": antworten, "gesetzt": len(neu)}
+
+
+# ---- Fragen buendeln + Sammel-Antwort ---------------------------------------
+# Reine Komfortebene (Aaron 17.10.2026: ~7000 offene Fragen kann niemand einzeln
+# durchklicken): gleichartige UNBEANTWORTETE Fragen werden zu Gruppen
+# zusammengefasst; eine Gruppen-Antwort traegt exakt denselben ``antworten``-
+# Eintrag fuer jede Frage der Gruppe ein, den der Mensch sonst einzeln gesetzt
+# haette. Entschieden wird weiterhin nur vom Menschen; ``anwenden()`` prueft
+# alles serverseitig neu und ist davon unberuehrt.
+
+_QUOTE_RE = re.compile(r"'[^']*'|[„“][^“”]*[“”]")
+_KLAMMER_RE = re.compile(r"\s*\([^)]*\)")
+
+# Antworten, die nur fuer EINE Zeile Sinn ergeben: "diese Zeile uebernehmen,
+# andere weglassen" gaebe in einer Gruppe beiden Dubletten dieselbe Antwort.
+NICHT_SAMMELFAEHIG = frozenset({"diese zeile übernehmen, andere weglassen"})
+
+
+def _grund_muster(feld: str, grund: str) -> str:
+    """Grund-Text ohne den eingebetteten konkreten Wert. Die Gruende stehen im
+    Code als feste Saetze mit Wert NACH dem ':' bzw. in Hochkommata; die
+    Bibliotheks-Frage nennt die Datensatz-ID in Klammern."""
+    muster = grund.split(":", 1)[0]
+    muster = _QUOTE_RE.sub("'…'", muster)
+    if feld == "bibliothek":
+        muster = _KLAMMER_RE.sub("", muster)
+    return " ".join(muster.split())
+
+
+def gruppen_bilden(zeilen: list[dict]) -> list[dict]:
+    """Gruppiert alle noch unbeantworteten Fragen ueber alle Zeilen/Blaetter nach
+    (Zeilen-Art, Feld, Grund-Muster, Antwortmoeglichkeiten). ``zeilen``: die
+    Zeilen aus ``vorschau()`` (nach dem Einmischen der Antworten). -> absteigend
+    nach Anzahl sortiert; ``beispiele`` nennt nur Zeilen-Schluessel (keine Werte)."""
+    gruppen: dict[str, dict] = {}
+    for z in zeilen:
+        for f in z["fragen"]:
+            if f.get("beantwortet"):
+                continue
+            antw = tuple(f["antwortmoeglichkeiten"])
+            muster = _grund_muster(f["feld"], f["grund"])
+            roh = "\x1f".join([z["art"], f["feld"], muster, *antw])
+            gid = hashlib.sha1(roh.encode("utf-8")).hexdigest()[:12]
+            g = gruppen.setdefault(gid, {
+                "id": gid, "art": z["art"], "feld": f["feld"], "muster": muster,
+                "anzahl": 0, "antwortmoeglichkeiten": list(antw),
+                "sammelfaehig": [a for a in antw if a.lower() not in NICHT_SAMMELFAEHIG],
+                "hat_vorschlag": False, "anzahl_vorschlaege": 0, "beispiele": [],
+                "_eintraege": []})
+            g["anzahl"] += 1
+            g["_eintraege"].append((z["schluessel"], f))
+            if f.get("vorschlag"):
+                g["hat_vorschlag"] = True
+                g["anzahl_vorschlaege"] += 1
+            if len(g["beispiele"]) < 5:
+                g["beispiele"].append(z["schluessel"])
+    return sorted(gruppen.values(), key=lambda g: (-g["anzahl"], g["muster"], g["id"]))
+
+
+def gruppen_antwort(gruppen: list[dict], gruppen_id: str, antwort: str,
+                    wert: str | None = None, vorschlaege: bool = False) -> dict:
+    """Erzeugt die ``antworten``-Eintraege (Format wie ``_antwort_schluessel``)
+    fuer JEDE Frage der Gruppe. ``vorschlaege=True``: je Frage "korrigieren auf
+    …" mit deren eigenem Vorschlag (Fragen ohne Vorschlag bleiben offen).
+    ValueError bei unbekannter Gruppe / unzulaessiger Antwort."""
+    g = next((x for x in gruppen if x["id"] == gruppen_id), None)
+    if g is None:
+        raise KeyError(gruppen_id)
+    korr = next((a for a in g["sammelfaehig"] if a.lower().startswith("korrigieren")), None)
+    out: dict[str, dict] = {}
+    if vorschlaege:
+        if not korr:
+            raise ValueError("Diese Gruppe kennt keine Korrektur -- Vorschläge nicht übernehmbar")
+        for schluessel, f in g["_eintraege"]:
+            if f.get("vorschlag"):
+                out[_antwort_schluessel(schluessel, f["feld"])] = {
+                    "antwort": korr, "wert": f["vorschlag"]}
+        if not out:
+            raise ValueError("Diese Gruppe hat keine Vorschläge")
+        return out
+    if antwort not in g["sammelfaehig"]:
+        raise ValueError("Antwort für diese Gruppe nicht zulässig")
+    if antwort.lower().startswith("korrigieren") and not (wert or "").strip():
+        raise ValueError("Für „korrigieren“ muss ein Wert angegeben werden")
+    eintrag = {"antwort": antwort}
+    if antwort.lower().startswith("korrigieren"):
+        eintrag["wert"] = wert
+    for schluessel, f in g["_eintraege"]:
+        out[_antwort_schluessel(schluessel, f["feld"])] = dict(eintrag)
+    return out
 
 
 # ---- Anwenden ---------------------------------------------------------------

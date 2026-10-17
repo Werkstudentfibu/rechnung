@@ -56,6 +56,10 @@
   .warn { background: #fff2c6; color: #5c4400; padding: 10px 12px; border-radius: 4px; margin: 10px 0; }
   .leiste { position: sticky; bottom: 0; background: #fff; border-top: 1px solid #d5ddd9; padding: 10px 0; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
   .klein { font-size: 12px; color: #666; }
+  .gruppe { display: grid; grid-template-columns: 5.5em 1fr; gap: 4px 12px; padding: 8px 0; border-bottom: 1px solid #eee; }
+  .gruppe .anz { font-weight: 700; font-size: 16px; text-align: right; }
+  .gruppe .steuer { grid-column: 2; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .gruppe input[type=text] { min-width: 220px; }
   .zeile-btn { display: flex; gap: 8px; flex-wrap: wrap; }
   @media (prefers-reduced-motion: no-preference) { .drop { transition: background .15s; } }
 </style>
@@ -93,7 +97,7 @@ const SLOTS = [
 ];
 
 const S = { slots: {}, slotFehler: {}, zielfelder: [], vor: null, antworten: {}, fehler: '', ergebnis: null,
-            busy: false, nurOffen: true, sicherung: '', warnung: '' };
+            busy: false, nurOffen: true, detail: false, gruppenEingabe: {}, sicherung: '', warnung: '' };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const lbl = (k) => LABEL[k] || k;
@@ -210,6 +214,60 @@ function setAntwort(key, antwort, vorschlag) {
 function setWert(key, wert) { if (S.antworten[key]) S.antworten[key].wert = wert; return pruefen(); }
 function umschalten(v) { S.nurOffen = v; render(); }
 
+// ---- Sammel-Antwort: eine Antwort fuer eine ganze Gruppe gleichartiger Fragen ----------------
+// Reiner Komfortweg: der Server traegt dieselben Antworten ein, die Sie sonst Zeile fuer Zeile
+// gesetzt haetten. Uebernommen wird erst beim Klick auf "Zeile(n) uebernehmen" (dort wird alles
+// serverseitig neu geprueft); Einzelantworten lassen sich in der Detailansicht weiter aendern.
+function gruppeEingabe(id) { return S.gruppenEingabe[id] || (S.gruppenEingabe[id] = { antwort: '', wert: '' }); }
+function gruppeWaehlen(id, antwort) { gruppeEingabe(id).antwort = antwort; render(); }
+function gruppeWert(id, wert) { gruppeEingabe(id).wert = wert; }
+
+async function gruppeAnwenden(id, mitVorschlaegen) {
+  const g = S.vor.gruppen.find((x) => x.id === id);
+  const e = gruppeEingabe(id);
+  if (!g || (!mitVorschlaegen && !e.antwort)) return;
+  const korr = !mitVorschlaegen && e.antwort.toLowerCase().startsWith('korrigieren');
+  if (korr && !e.wert.trim()) { S.fehler = 'Für „korrigieren“ bitte den neuen Wert eintragen.'; return render(); }
+  const n = mitVorschlaegen ? g.anzahl_vorschlaege : g.anzahl;
+  const was = mitVorschlaegen ? 'den jeweiligen Vorschlag' : `„${e.antwort}${korr ? ' ' + e.wert : ''}“`;
+  if (!confirm(`${n} Frage(n) („${g.muster}“) mit ${was} beantworten?`)) return;
+  S.busy = true; S.fehler = ''; render();
+  try {
+    const res = await post('/api/stammdaten/gruppen-antwort', {
+      sheets: alleSheets(), antworten: payloadAntworten(), gruppen_id: id,
+      antwort: e.antwort, wert: korr ? e.wert : undefined, vorschlaege: mitVorschlaegen });
+    Object.assign(S.antworten, res.antworten);
+    delete S.gruppenEingabe[id];
+  } catch (err) { S.fehler = err.message; }
+  S.busy = false;
+  return pruefen();
+}
+
+function gruppenHtml(v) {
+  const gr = v.gruppen || [];
+  if (!gr.length) return '';
+  const offen = gr.reduce((n, g) => n + g.anzahl, 0);
+  let h = `<div class="card"><div class="kopf"><h3>Gleichartige Fragen gebündelt</h3>
+    <span class="klein">${offen} offene Fragen in ${gr.length} Gruppen</span></div><div class="inhalt">
+    <p class="hint">Eine Antwort gilt für alle Fragen der Gruppe. Nichts wird übernommen, bevor Sie unten auf „übernehmen“ klicken;
+    in der Einzelansicht darunter können Sie nachprüfen und einzelne Zeilen anders beantworten.</p>`;
+  for (const g of gr.slice(0, 100)) {
+    const e = gruppeEingabe(g.id);
+    const opts = `<option value="">— bitte antworten —</option>`
+      + g.sammelfaehig.map((o) => `<option value="${esc(o)}"${e.antwort === o ? ' selected' : ''}>${esc(o)}</option>`).join('');
+    const korr = e.antwort.toLowerCase().startsWith('korrigieren');
+    h += `<div class="gruppe"><div class="anz">${g.anzahl}×</div>
+      <div>${esc(g.muster)} <span class="klein">(${esc(ART[g.art] || g.art)}, Feld ${esc(lbl(g.feld))}; z. B. ${g.beispiele.map(esc).join(', ')})</span></div>
+      <div class="steuer"><select aria-label="Antwort für ${g.anzahl} Fragen: ${esc(g.muster)}" data-act="gantwort" data-id="${esc(g.id)}">${opts}</select>
+      ${korr ? `<input type="text" aria-label="Neuer Wert für alle" placeholder="neuer Wert für alle ${g.anzahl}" value="${esc(e.wert)}" data-act="gwert" data-id="${esc(g.id)}">` : ''}
+      <button data-act="ganwenden" data-id="${esc(g.id)}" ${e.antwort && !S.busy ? '' : 'disabled'}>für alle ${g.anzahl} anwenden</button>
+      ${g.hat_vorschlag ? `<button class="sek" data-act="gvorschlag" data-id="${esc(g.id)}" ${S.busy ? 'disabled' : ''}>${g.anzahl_vorschlaege === g.anzahl ? 'alle' : g.anzahl_vorschlaege + ' von ' + g.anzahl} Vorschläge übernehmen</button>` : ''}
+      </div></div>`;
+  }
+  if (gr.length > 100) h += `<p class="hint">… und ${gr.length - 100} kleinere Gruppen (nach Anwenden der obigen erscheinen sie).</p>`;
+  return h + `</div></div>`;
+}
+
 async function uebernehmen() {
   const n = S.vor ? S.vor.zusammenfassung.bereit_zum_uebernehmen : 0;
   if (!n || !confirm(`${n} Zeile(n) in die Bibliothek übernehmen?`)) return;
@@ -217,14 +275,14 @@ async function uebernehmen() {
   try {
     S.ergebnis = await post('/api/stammdaten/uebernehmen', { sheets: alleSheets(), antworten: payloadAntworten() });
     S.fehler = '';
-    S.slots = {}; S.slotFehler = {}; S.vor = null; S.antworten = {};
+    S.slots = {}; S.slotFehler = {}; S.vor = null; S.antworten = {}; S.gruppenEingabe = {};
   } catch (e) { S.fehler = e.message; }
   S.busy = false; render();
 }
 
 function neu() {
   if (hatDaten() && !S.ergebnis && !confirm('Alle hochgeladenen Listen und Antworten verwerfen?\nDer gespeicherte Zwischenstand wird dabei ebenfalls gelöscht.')) return;
-  S.slots = {}; S.slotFehler = {}; S.vor = null; S.antworten = {}; S.ergebnis = null; S.fehler = ''; render();
+  S.slots = {}; S.slotFehler = {}; S.vor = null; S.antworten = {}; S.gruppenEingabe = {}; S.ergebnis = null; S.fehler = ''; render();
 }
 
 function beispiel(b, i) {
@@ -306,8 +364,10 @@ function vorschauHtml() {
     : '';
   let h = `<h2>Vorschau</h2><div class="chips"><span class="chip gruen">${zs.gruen} grün</span><span class="chip gelb">${zs.gelb} gelb – Frage offen</span>
     <span class="chip rot">${zs.rot} rot</span><span class="chip neutral">${offen} noch zu beantworten</span>${verschmolzenChip}</div>
-    <label><input type="checkbox" ${S.nurOffen ? 'checked' : ''} data-act="nuroffen"> nur Zeilen mit Fragen zeigen</label>`;
-  for (const [name, b] of Object.entries(v.blaetter)) {
+    ${gruppenHtml(v)}
+    <label><input type="checkbox" ${S.detail ? 'checked' : ''} data-act="detail"> Einzelansicht je Zeile zeigen (zum Nachprüfen / für Einzelfälle)</label>
+    <label style="margin-left:12px"><input type="checkbox" ${S.nurOffen ? 'checked' : ''} data-act="nuroffen"> nur Zeilen mit Fragen zeigen</label>`;
+  for (const [name, b] of Object.entries(S.detail || !(v.gruppen || []).length ? v.blaetter : {})) {
     const alle = b.zeilen;
     const sicht = alle.filter((z) => !S.nurOffen || z.status !== 'gruen' || z.fragen.length);
     const zeigen = sicht.slice(0, 300);
@@ -386,6 +446,11 @@ function aktion(el) {
   if (a === 'map') return setMapping(d.slot, d.blatt, d.header, el.value);
   if (a === 'antwort') return setAntwort(d.key, el.value, d.vorschlag);
   if (a === 'wert') return setWert(d.key, el.value);
+  if (a === 'gantwort') return gruppeWaehlen(d.id, el.value);
+  if (a === 'gwert') return gruppeWert(d.id, el.value);
+  if (a === 'ganwenden') return gruppeAnwenden(d.id, false);
+  if (a === 'gvorschlag') return gruppeAnwenden(d.id, true);
+  if (a === 'detail') { S.detail = el.checked; return render(); }
   if (a === 'nuroffen') return umschalten(el.checked);
   if (a === 'bestaetigen') return slotBestaetigen(d.slot);
   if (a === 'entfernen') return slotEntfernen(d.slot);
