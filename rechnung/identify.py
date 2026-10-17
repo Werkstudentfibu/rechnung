@@ -115,6 +115,10 @@ class Supplier:
     bestaetigt: bool = True
     entwurf_quelle: str = ""
     entwurf_am: str = ""
+    # Der EINE Dummy-Lieferant (dummy.py, Aaron 17.10.2026): Platzhalter fuer
+    # "Lieferant unbekannt". Taucht in der Lieferantenerkennung, im Lernen und
+    # im Stammdaten-Import nie auf (Store.suppliers() blendet ihn aus).
+    dummy: bool = False
     # --- gepflegte Stammdaten -------------------------------------------
     address_lines: list[str] = field(default_factory=list)
     bank_name: str = ""
@@ -176,7 +180,7 @@ class Supplier:
             "default_tax_rate": self.default_tax_rate, "notes": self.notes,
             "fixed_fields": self.fixed_fields, "currency": self.currency,
             "bestaetigt": self.bestaetigt, "entwurf_quelle": self.entwurf_quelle,
-            "entwurf_am": self.entwurf_am,
+            "entwurf_am": self.entwurf_am, "dummy": self.dummy,
             "positionsmodus": self.positionsmodus,
             "positionsbezeichnung": self.positionsbezeichnung,
             "positionsmodus_gesetzt": self.positionsmodus_gesetzt,
@@ -205,6 +209,7 @@ class Supplier:
             bestaetigt=d.get("bestaetigt", True),
             entwurf_quelle=d.get("entwurf_quelle", ""),
             entwurf_am=d.get("entwurf_am", ""),
+            dummy=bool(d.get("dummy", False)),
             # Fehlt in altem suppliers.json (vor dieser Aenderung) --
             # "einzeln"/unentschieden als Standard (siehe Positionsmodus-Doku
             # oben).

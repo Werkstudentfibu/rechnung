@@ -643,6 +643,14 @@ def zeilen_aufbauen(store, blatt: str, headers: list[str], data_rows: list[list[
             if uebersprungen is not None:
                 uebersprungen.append({"blatt": blatt, "zeile": i, "grund": "leerzeile"})
             continue
+        if art in ARTEN_KREDITOR or art in (ART_GEMISCHT_LAND, ART_UNKLAR):
+            from .dummy import ist_dummy_zeile
+            if ist_dummy_zeile(werte):
+                # Der Dummy-Lieferant gehoert dem Programm (dummy.py): nie
+                # importieren, nie als Dublette/Konflikt fragen.
+                if uebersprungen is not None:
+                    uebersprungen.append({"blatt": blatt, "zeile": i, "grund": "dummy"})
+                continue
         rohwerte = {h: text_saeubern(v) for h, v in zip(headers, row) if text_saeubern(v)}
         schluessel = f"{blatt}:{i}"
         zeilen_art = art
@@ -1253,7 +1261,7 @@ def _auto_details(alle_zeilen: list[dict], uebersprungen: list[dict]) -> dict:
     nachsehen kann."""
     d: dict[str, list[dict]] = {k: [] for k in (
         "identisch", "ergaenzend", "fuehrende_null", "getrennte_lieferanten",
-        "leerzeilen", "kopfzeilen")}
+        "leerzeilen", "kopfzeilen", "dummy")}
     for z in alle_zeilen:
         zus = z.get("zusammengefasst")
         if zus:
@@ -1266,7 +1274,8 @@ def _auto_details(alle_zeilen: list[dict], uebersprungen: list[dict]) -> dict:
             d["getrennte_lieferanten"].append(
                 {"zeile": z["schluessel"], "mit": ", ".join(z["getrennt_von"])})
     for u in uebersprungen:
-        d["kopfzeilen" if u["grund"] == "kopfzeile" else "leerzeilen"].append(
+        d["kopfzeilen" if u["grund"] == "kopfzeile" else
+          "dummy" if u["grund"] == "dummy" else "leerzeilen"].append(
             {"zeile": f"{u['blatt']}:{u['zeile']}"})
     return d
 
@@ -1335,7 +1344,8 @@ def _vorschau_intern(store, sheets: dict[str, dict],
         "fuehrende_nullen_ergaenzt": len(auto["fuehrende_null"]),
         "getrennte_lieferanten_gleicher_name": len(auto["getrennte_lieferanten"]),
         "leerzeilen_uebersprungen": len(auto["leerzeilen"]),
-        "kopfzeilen_uebersprungen": len(auto["kopfzeilen"])}}
+        "kopfzeilen_uebersprungen": len(auto["kopfzeilen"]),
+        "dummy_zeilen_ignoriert": len(auto["dummy"])}}
     vorschau_ergebnis["automatisch"] = auto
     vorschau_ergebnis["gruppen"] = [{k: v for k, v in g.items() if not k.startswith("_")}
                                     for g in gruppen]

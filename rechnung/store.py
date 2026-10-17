@@ -125,8 +125,19 @@ class Store:
         self._supplier_index_sig: tuple | None = None
 
     # ---- Lieferanten --------------------------------------------------
-    def suppliers(self) -> list[Supplier]:
+    def _alle_lieferanten(self) -> list[Supplier]:
         return [Supplier.from_dict(d) for d in _read_json_safe(self._suppliers, [])]
+
+    def suppliers(self) -> list[Supplier]:
+        """Echte Lieferanten -- der Dummy-Lieferant (dummy.py) ist bewusst
+        nicht dabei, damit Erkennung, Lernen und Import ihn nie sehen."""
+        return [s for s in self._alle_lieferanten() if not s.dummy]
+
+    def dummy_lieferant(self) -> Supplier | None:
+        return next((s for s in self._alle_lieferanten() if s.dummy), None)
+
+    def _save_dummy(self, s: Supplier) -> None:
+        self._schreibe_lieferanten([x for x in self._alle_lieferanten() if not x.dummy] + [s])
 
     def supplier_index(self, address_id: str | None = None) -> dict:
         """USt-IdNr/IBAN -> Lieferanten-IDs (identify.build_identifier_index),
@@ -157,24 +168,31 @@ class Store:
             self._supplier_index_cache[key] = build_identifier_index(cands)
         return self._supplier_index_cache[key]
 
-    def save_supplier(self, s: Supplier) -> None:
-        rows = {x.id: x for x in self.suppliers()}
-        rows[s.id] = s
+    def _schreibe_lieferanten(self, rows: list[Supplier]) -> None:
         _atomic_write(
             self._suppliers,
-            json.dumps([x.to_dict() for x in rows.values()], indent=2, ensure_ascii=False),
+            json.dumps([x.to_dict() for x in rows], indent=2, ensure_ascii=False),
         )
         self._supplier_index_cache = None
+
+    def save_supplier(self, s: Supplier) -> None:
+        from .dummy import ist_dummy_id
+
+        if s.dummy or ist_dummy_id(s.id):
+            raise ValueError("Der Dummy-Lieferant ist reserviert und wird nicht gespeichert/gelernt")
+        rows = {x.id: x for x in self._alle_lieferanten()}
+        rows[s.id] = s
+        self._schreibe_lieferanten(list(rows.values()))
 
     def supplier(self, supplier_id: str) -> Supplier | None:
         return next((s for s in self.suppliers() if s.id == supplier_id), None)
 
     def delete_supplier(self, supplier_id: str) -> None:
-        rows = [x for x in self.suppliers() if x.id != supplier_id]
-        _atomic_write(
-            self._suppliers, json.dumps([x.to_dict() for x in rows], indent=2, ensure_ascii=False)
-        )
-        self._supplier_index_cache = None
+        from .dummy import ist_dummy_id
+
+        if ist_dummy_id(supplier_id):
+            return   # der Dummy bleibt immer
+        self._schreibe_lieferanten([x for x in self._alle_lieferanten() if x.id != supplier_id])
         for t in self.templates_for(supplier_id):
             self.delete_template(t.id)
 

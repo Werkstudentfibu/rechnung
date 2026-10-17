@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import billing
+from .. import dummy
 from .. import einvoice
 from .. import eventlog
 from .. import human
@@ -332,6 +333,12 @@ def _render_png(path: Path, page_index: int) -> bytes:
 def create_app(store: Store, samples: Path) -> FastAPI:
     app = FastAPI(title="Rechnung Training-UI")
     samples = Path(samples)
+    dummy.sicherstellen(store)     # der eine Dummy-Lieferant (Aaron 17.10.2026)
+
+    def _kein_dummy(sid: str) -> None:
+        if dummy.ist_dummy_id(sid):
+            raise HTTPException(400, "Der Dummy-Lieferant ist reserviert – er wird nicht "
+                                     "angelernt oder bearbeitet. Bitte einen echten Lieferanten anlegen.")
     # Zeitgrenze je Rechnung (guard.py). Thread-Modus: die UI muss den KI-
     # Antwort-Cache mit /api/invoice teilen -- bestaetigt wird, was angezeigt wurde.
     guard = Guard(store.root, mode="thread")
@@ -930,6 +937,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "ki_positionen": _ki_positionen(),
             "fixed_field_types": FIXED_FIELD_TYPES,
             "supplier": supplier_obj.to_dict() if supplier_obj else None,
+            "dummy_name": dummy.name(),     # Hinweis "wird als Dummy gesendet" (Pruefmaske)
             "addresses": [a.to_dict() for a in store.addresses()],
             "detected_address": ({"id": addr_match[0].id, "name": addr_match[0].name,
                                   "score": addr_match[1]} if addr_match else None),
@@ -1014,6 +1022,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "ki_positionen": _ki_positionen(),
             "fixed_field_types": FIXED_FIELD_TYPES,
             "supplier": supplier_obj.to_dict() if supplier_obj else None,
+            "dummy_name": dummy.name(),     # Hinweis "wird als Dummy gesendet" (Pruefmaske)
             "addresses": [a.to_dict() for a in store.addresses()],
             "detected_address": None,
             "suggested_terms": None,
@@ -1059,6 +1068,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         doc = _load(path)
         pages_words = [pg.words for pg in doc.pages]
 
+        _kein_dummy(body.supplier_id)
         sup = store.supplier(body.supplier_id)
         if sup is None:
             sup = supplier_from_doc(doc, body.supplier_id, body.supplier_name)
@@ -1323,11 +1333,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         path = _resolve(body.file)
         res = _process_for_confirm(path)
         fehlt = []
-        sup = store.supplier(res.supplier_id) if res.supplier_id else None
-        if sup is None:
-            fehlt.append("Lieferant (über „Suchen...“ wählen oder anlegen)")
-        elif not sup.bestaetigt:
-            fehlt.append("Lieferant bestätigen")
+        # Kein oder nur ein unbestaetigter Lieferant (Entwurf): nicht blockieren,
+        # sondern als Dummy-Lieferant senden (dummy.py, Aaron 17.10.2026).
+        als_dummy = dummy.noetig(store, res)
         if store.addresses() and not res.billing_address_id:
             fehlt.append("Geschäftsbereich")
         if not res.einvoice:
@@ -1345,7 +1353,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                 "code": "dublette"})
         gelernt = confirm(ConfirmPost(file=body.file, template_id=body.template_id))            # lernen + Goldstandard + Ereignisse
         res = _process_for_confirm(path)   # Stand nach dem Lernen
-        fin = finalize(res, store)
+        fin = finalize(res, store, als_dummy=als_dummy)
         if not fin.get("finalized"):
             raise HTTPException(409, f"Freigabe nicht möglich: {fin.get('error')}")
         if path.parent.resolve() == samples.resolve():
@@ -1355,7 +1363,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if abholer is not None:
             abholer.anstossen()            # JobRouter-Nachschicken gleich versuchen
         from ..config import jobrouter as _jr
-        return JSONResponse({"gesendet": True, "queued": fin.get("queued"),
+        return JSONResponse({"gesendet": True, "als_dummy": als_dummy,
+                             "queued": fin.get("queued"),
                              "jobrouter_live": _jr().live,
                              "gelernt": __import__("json").loads(gelernt.body)})
 
@@ -1567,6 +1576,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         path = _resolve(body.file)
         doc = _load(path)
 
+        _kein_dummy(body.target_supplier_id)
         sup = store.supplier(body.target_supplier_id)
         if sup is None:
             sup = supplier_from_doc(doc, body.target_supplier_id, body.target_supplier_name)
@@ -1597,6 +1607,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
 
     @app.post("/api/suppliers")
     def save_supplier_ep(body: SupplierPost) -> JSONResponse:
+        _kein_dummy(body.id)
         existing = store.supplier(body.id)
         fp = existing.fingerprint if existing else []
         fixed = {k: v.strip() for k, v in (body.fixed_fields or {}).items()

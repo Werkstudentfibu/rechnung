@@ -865,6 +865,12 @@ function renderInvoice(d) {
 
   // ===== Prüfmaske wie Abbyy FlexiCapture "European Invoice" (Vorlage Aaron, 09.10.2026) =====
   const isDraft = !!(d.supplier && d.supplier.bestaetigt === false);
+  // Kein bestätigter Lieferant -> "Senden" nimmt den Dummy-Lieferanten (Aaron 17.10.2026)
+  if (!d.supplier || d.supplier.bestaetigt === false) {
+    fbox.insertAdjacentHTML('beforeend', `<div class="box" id="dummy-hinweis"><div class="hint" style="font-weight:600">
+      Lieferant unbekannt → wird als „${esc(d.dummy_name || 'Dummy Lieferant')}“ gesendet.
+      Die erkannten Daten gehen als Bemerkung mit. Wer es besser weiß: oben einen echten Lieferanten wählen.</div></div>`);
+  }
   const kiL = d.ki_lieferant || {};
   const kiE = d.ki_empfaenger || {};
   const addrObj = (STATE.addresses || []).find(a => a.id === variant) || null;
@@ -2158,7 +2164,8 @@ async function sendeRechnung() {
     r = await sende(true); d = await r.json().catch(() => ({}));
   }
   if (!r.ok) { $('#msg').textContent = '✗ ' + (d.detail || ('Fehler ' + r.status)); alert(d.detail || ('Fehler ' + r.status)); return; }
-  const wohin = d.jobrouter_live ? 'an JobRouter übergeben' : 'freigegeben – geht an JobRouter, sobald die Anbindung steht';
+  const wohin = (d.jobrouter_live ? 'an JobRouter übergeben' : 'freigegeben – geht an JobRouter, sobald die Anbindung steht')
+    + (d.als_dummy ? ' (als Dummy Lieferant)' : '');
   await loadList();
   if (next) {
     const row = document.querySelector(`#list .row[data-file="${CSS.escape(next)}"]`);

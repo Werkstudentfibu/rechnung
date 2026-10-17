@@ -108,4 +108,8 @@ def pruefen(store, samples: Path) -> list[dict]:
     out.append(_p("Stammdaten", OK if n_sup and n_adr else WARN,
                   f"{n_sup} Lieferanten, {n_adr} Geschäftsbereiche",
                   "" if n_sup and n_adr else "Abbyy-Listen im Reiter „Lieferanten“ einlesen"))
+    dsup = store.dummy_lieferant()
+    out.append(_p("Dummy-Lieferant vorhanden", OK if dsup else FEHLER,
+                  f"{dsup.name} (Nr. {dsup.external_id})" if dsup else "fehlt",
+                  "" if dsup else "Programm neu starten – er wird beim Start angelegt"))
     return out
