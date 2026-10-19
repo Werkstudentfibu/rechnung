@@ -67,7 +67,7 @@
 </style>
 </head>
 <body>
-<header><b>Rechnung – Stammdaten aus Excel</b><a href="/">← zurück zu den Rechnungen</a></header>
+<header><b>Rechnung – Stammdaten aus Excel</b><span id="programmstand" class="klein" style="margin-left:auto;margin-right:1em;opacity:.7"></span><a href="/">← zurück zu den Rechnungen</a></header>
 <main id="app" aria-live="polite"></main>
 <script>
 const LABEL = {
@@ -569,6 +569,11 @@ async function entwurfLaden() {
 
 render();
 entwurfLaden();
+// Programmstand im Kopf (Aaron 19.10.2026: sichtbar machen, ob ein Update wirklich angekommen ist)
+fetch('/api/version').then((r) => r.ok ? r.json() : null).then((v) => {
+  const el = document.getElementById('programmstand');
+  if (el && v) el.textContent = v.commit ? `Programmstand ${v.commit} vom ${v.datum}` : 'Programmstand: kein Git-Klon';
+}).catch(() => {});
 </script>
 </body>
 </html>
