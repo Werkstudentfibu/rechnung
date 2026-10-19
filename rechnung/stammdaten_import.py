@@ -967,6 +967,9 @@ def _markiere_dubletten(zeilen: list[dict]) -> None:
     c) gleicher Name, andere Kontonummer, sonst kein Widerspruch -> getrennte
        Lieferanten (Entscheidung Aaron 17.10.2026), keine Frage;
     d) echte Widersprueche -> EINE Frage je betroffener Zeile (nie N*(N-1)).
+       Bei Kreditoren gibt es dort auch die Antwort „zusammenführen (gleicher
+       Lieferant)“ (Entscheidung Aaron 19.10.2026, sammelfaehig), siehe
+       ``_dubletten_zusammenfuehren``.
 
     Dazu die Ausnahme vom 16.10.2026: dieselbe Firma einmal im Kreditor-DE- und
     einmal im Kreditor-CH-Blatt, Treffer NUR ueber den Namen (genau ein DE- und
@@ -1048,13 +1051,150 @@ def _markiere_dubletten(zeilen: list[dict]) -> None:
         z = records[i]["keeper"]
         arten = sorted({g.split(":", 1)[0] for gem in partner.values() for g in gem})
         andere = ", ".join(sorted(_nr(records[j]["keeper"]) for j in partner))
+        antworten = ["beide übernehmen (sind unterschiedlich)",
+                     "diese Zeile übernehmen, andere weglassen",
+                     "Zeile weglassen"]
+        # „zusammenführen“ nur bei Kreditoren und nur mit Partnern derselben Art
+        gleiche_art = sorted(_nr(records[j]["keeper"]) for j in partner
+                             if records[j]["keeper"]["art"] == z["art"])
+        if z["art"] in ARTEN_KREDITOR and gleiche_art:
+            antworten.insert(1, ANTWORT_ZUSAMMENFUEHREN)
+            z["dublette_partner"] = gleiche_art
         z["fragen"].append(_frage(
             "dublette", f"Dublette in dieser Datei ({'/'.join(arten)}): auch in Zeile {andere}",
-            antworten=["beide übernehmen (sind unterschiedlich)",
-                      "diese Zeile übernehmen, andere weglassen",
-                      "Zeile weglassen"]))
+            antworten=antworten))
         if z["status"] != STATUS_ROT:
             z["status"] = STATUS_GELB
+
+
+ANTWORT_ZUSAMMENFUEHREN = "zusammenführen (gleicher Lieferant)"
+
+# Felder, die das Modell als Liste fuehrt (``Supplier.ibans/ustids/addresses``):
+# beim Zusammenfuehren bleiben ALLE Werte; der erste steht in ``werte``, die
+# weiteren in ``zeile["zusatzwerte"]``.
+_MEHRWERT_FELDER = ("iban", "ustid", "mandant_verweis")
+_FELDNAMEN = {"name": "Name", "strasse": "Straße", "plz": "PLZ", "ort": "Ort",
+              "land": "Land", "ustid": "USt-ID", "steuernummer": "Steuernummer",
+              "iban": "IBAN", "bic": "BIC", "kreditorennummer": "Kreditorennummer",
+              "mandant_verweis": "Mandant"}
+
+
+def _fuelle(z: dict) -> int:
+    return sum(1 for v in z["werte"].values() if (v or "").strip())
+
+
+def _dubletten_zusammenfuehren(zeilen: list[dict], antworten: dict) -> None:
+    """Antwort „zusammenführen (gleicher Lieferant)“ (Aaron 19.10.2026) auf die
+    Dubletten-Frage. Wird aus den ENDGUELTIGEN Antworten berechnet (nie aus der
+    Reihenfolge, in der geantwortet wurde) -> deterministisch, bei jeder Vorschau
+    und in ``anwenden`` neu.
+
+    Regeln:
+    * Verbund = Zeilen, die ALLE „zusammenführen“ gewaehlt haben, gleiche Art
+      (DE mit DE, CH mit CH) und ueber Dubletten-Beziehungen verbunden sind
+      (transitiv, auch > 2 Zeilen). Der DE/CH-Sonderfall (``verschmelzen``) bleibt.
+    * Mischantworten: nur Zeilen mit „zusammenführen“ auf BEIDEN Seiten werden
+      vereinigt; „beide übernehmen“, „diese Zeile übernehmen, andere weglassen“
+      und „Zeile weglassen“ nehmen eine Zeile aus dem Verbund (sie bleibt wie
+      beantwortet; „weglassen“ wird nicht uebernommen und nicht hineingezogen).
+    * EIN Lieferant: die vollstaendigere Zeile (mehr nicht-leere Felder,
+      Gleichstand -> fruehere Zeile) gewinnt; leere Felder fuellen die uebrigen
+      Zeilen in derselben Rangfolge auf.
+    * Mehrwertfelder (IBAN, UID, Mandant) -> alle Werte bleiben (``zusatzwerte``);
+      ein Zusatzwert, der die Pruefung nicht besteht, steht nur in der Notiz.
+    * Einwertfelder: abweichende Werte der anderen Zeilen (auch deren
+      Kreditorennummer; das Modell kennt keine Aliasse) stehen als Notiz am
+      Lieferanten -- kein Informationsverlust.
+    * Die uebrigen Zeilen: ``zusammengefasst`` (Art ``dublette``), wie bei (a)/(b)
+      nie uebernommen; Hinweis an allen beteiligten Zeilen."""
+    pos = {_nr(z): i for i, z in enumerate(zeilen)}
+    wollen: dict[str, dict] = {}
+    for z in zeilen:
+        if z["art"] not in ARTEN_KREDITOR or z.get("zusammengefasst"):
+            continue
+        a = antworten.get(_antwort_schluessel(_nr(z), "dublette"))
+        if a and (a.get("antwort") or "").strip().lower() == ANTWORT_ZUSAMMENFUEHREN.lower():
+            wollen[_nr(z)] = z
+    if len(wollen) < 2:
+        return
+
+    def kanten(nr: str) -> set[str]:
+        return {"|".join(sorted((nr, p))) for p in wollen[nr].get("dublette_partner", ())
+                if p in wollen and wollen[p]["art"] == wollen[nr]["art"]}
+
+    for gruppe in _gruppen_nach(sorted(wollen, key=pos.__getitem__), kanten):
+        if len(gruppe) > 1:
+            _verbund_zusammenfuehren([wollen[nr] for nr in gruppe], zeilen, pos)
+
+
+def _verbund_zusammenfuehren(rows: list[dict], zeilen: list[dict], pos: dict[str, int]) -> None:
+    rang = sorted(rows, key=lambda z: (-_fuelle(z), pos[_nr(z)]))
+    gewinner, verlierer = rang[0], sorted(rang[1:], key=lambda z: pos[_nr(z)])
+    art = gewinner["art"]
+    merged = dict(gewinner["werte"])
+    for z in rang[1:]:
+        for k, v in z["werte"].items():
+            if k in _MEHRWERT_FELDER or k == "notiz":
+                continue
+            if not (merged.get(k) or "").strip() and (v or "").strip():
+                merged[k] = v
+    # Mehrwertfelder: erster Wert nach Rangfolge nach ``werte``, der Rest nach ``zusatzwerte``
+    zusatz: dict[str, list[str]] = {}
+    notizen: list[str] = []
+    for k in _MEHRWERT_FELDER:
+        gesehen = {_vgl(k, merged[k])} if (merged.get(k) or "").strip() else set()
+        for z in rang:
+            v = (z["werte"].get(k) or "").strip()
+            if not v or _vgl(k, v) in gesehen:
+                continue
+            gesehen.add(_vgl(k, v))
+            if not (merged.get(k) or "").strip():
+                merged[k] = v
+            elif k == "mandant_verweis" or not any(
+                    f["feld"] == k for f in _kreditor_pruefen(art, {**merged, k: v})):
+                zusatz.setdefault(k, []).append(v)
+            else:
+                notizen.append(f"zusammengeführt aus Zeile {_nr(z)}: {_FELDNAMEN[k]} = {v} "
+                               "(Prüfung nicht bestanden, nicht als Wert übernommen)")
+    # Abweichende Einwertfelder + Notizen der anderen Zeilen -> Notiz am Lieferanten
+    for z in verlierer:
+        abw = []
+        for k, v in z["werte"].items():
+            v = (v or "").strip()
+            if k in _MEHRWERT_FELDER or k == "notiz" or not v:
+                continue
+            if _vgl(k, v) != _vgl(k, merged.get(k, "")):
+                abw.append(f"{_FELDNAMEN.get(k, k)} = {v}")
+        if abw:
+            notizen.append(f"zusammengeführt aus Zeile {_nr(z)}: " + "; ".join(sorted(abw)))
+        if (z["werte"].get("notiz") or "").strip():
+            merged["notiz"] = _notizen_ergaenzen(merged.get("notiz", ""), z["werte"]["notiz"])
+    if notizen:
+        merged["notiz"] = _notizen_ergaenzen(merged.get("notiz", ""), "\n".join(sorted(notizen)))
+    # Fragen: die des Gewinners (ohne „Pflichtfeld fehlt“) + Pruefung der vereinigten Werte
+    fragen = [f for f in gewinner["fragen"] if "Pflichtfeld fehlt" not in f["grund"]]
+    felder = {f["feld"] for f in fragen}
+    for f in _kreditor_pruefen(art, merged):
+        if f["feld"] not in felder:
+            felder.add(f["feld"])
+            fragen.append(f)
+    alle = ", ".join(_nr(z) for z in sorted(rows, key=lambda x: pos[_nr(x)]))
+    gewinner["werte"] = merged
+    gewinner["fragen"] = fragen
+    if zusatz:
+        gewinner["zusatzwerte"] = zusatz
+    gewinner["status"] = _status_aus_fragen(gewinner)
+    gewinner["hinweise"].append(f"zusammengeführt (gleicher Lieferant) aus Zeilen {alle}")
+    gewinner["zusammengefuehrt_dublette"] = [_nr(z) for z in verlierer]
+    for z in verlierer:
+        z["zusammengefasst"] = {"art": "dublette", "mit": _nr(gewinner)}
+        z["fragen"] = []
+        z["status"] = STATUS_GRUEN
+        z["hinweise"].append(f"zusammengeführt (gleicher Lieferant) in Zeile {_nr(gewinner)}")
+        gewinner["auto"] |= z["auto"]
+        for y in zeilen:   # vorher still zusammengefasste Zeilen zeigen jetzt auf den Gewinner
+            if y is not z and (y.get("zusammengefasst") or {}).get("mit") == _nr(z):
+                y["zusammengefasst"]["mit"] = _nr(gewinner)
 
 
 def _supplier_feld_diff(sup, werte: dict[str, str]) -> list[str]:
@@ -1176,6 +1316,21 @@ def _mandant_referenz_pruefen(zeile: dict, bekannt: set[str]) -> None:
             zeile["status"] = STATUS_GELB
 
 
+def _zusatz_mandanten_pruefen(zeile: dict, bekannt: set[str]) -> None:
+    """Beim Zusammenfuehren zusaetzlich behaltene Mandanten-Verweise: nur mit
+    Verknuepfung, wenn bekannt; sonst nur als Notiz (nicht raten)."""
+    extras = zeile.get("zusatzwerte", {}).get("mandant_verweis")
+    if not extras:
+        return
+    ok = [r for r in extras if norm(r) in bekannt or _mandant_key(r) in bekannt]
+    for r in extras:
+        if r not in ok:
+            zeile["werte"]["notiz"] = _notizen_ergaenzen(
+                zeile["werte"].get("notiz", ""),
+                f"zusammengeführt: Mandant = {r} (nicht auffindbar, nicht verknüpft)")
+    zeile["zusatzwerte"]["mandant_verweis"] = ok
+
+
 def _kuerzel_pruefen(zeilen: list[dict], store) -> None:
     """Postfach-Bezeichnung (Kuerzel) gegen das Kuerzel des Mandanten, auf den
     der MDT zeigt -- faengt einen vertippten MDT ab (Rechnungen landeten sonst
@@ -1260,12 +1415,13 @@ def _auto_details(alle_zeilen: list[dict], uebersprungen: list[dict]) -> dict:
     Zeilen-Schluessel (``<Blatt>:<Zeile>``), damit Aaron stichprobenartig
     nachsehen kann."""
     d: dict[str, list[dict]] = {k: [] for k in (
-        "identisch", "ergaenzend", "fuehrende_null", "getrennte_lieferanten",
+        "identisch", "ergaenzend", "zusammengefuehrt", "fuehrende_null", "getrennte_lieferanten",
         "leerzeilen", "kopfzeilen", "dummy")}
     for z in alle_zeilen:
         zus = z.get("zusammengefasst")
         if zus:
-            d["identisch" if zus["art"] == "identisch" else "ergaenzend"].append(
+            d["identisch" if zus["art"] == "identisch" else
+              "zusammengefuehrt" if zus["art"] == "dublette" else "ergaenzend"].append(
                 {"zeile": z["schluessel"], "mit": zus["mit"]})
             continue
         if "fuehrende_null" in z["auto"]:
@@ -1308,6 +1464,7 @@ def _vorschau_intern(store, sheets: dict[str, dict],
             mandanten_namen |= {z["werte"].get("name", "") for z in zeilen if z["werte"].get("name")}
 
     _markiere_dubletten(alle_zeilen)
+    _dubletten_zusammenfuehren(alle_zeilen, antworten)
     _kuerzel_pruefen(alle_zeilen, store)
     bib = _Bibliothek(store)
     mandanten_codes = {_mandant_key(z["werte"]["mandant_verweis"]) for z in alle_zeilen
@@ -1317,6 +1474,7 @@ def _vorschau_intern(store, sheets: dict[str, dict],
     for z in alle_zeilen:
         _konflikt_mit_bibliothek(bib, z)
         _mandant_referenz_pruefen(z, bekannt)
+        _zusatz_mandanten_pruefen(z, bekannt)
         _antworten_einmischen(z, antworten)
 
     zaehler = {STATUS_GRUEN: 0, STATUS_GELB: 0, STATUS_ROT: 0}
@@ -1341,6 +1499,7 @@ def _vorschau_intern(store, sheets: dict[str, dict],
         "automatisch_verschmolzen_paare": len(verschmolzen) // 2,
         "identische_zeilen_zusammengefasst": len(auto["identisch"]),
         "zeilen_ergaenzend_zusammengefuehrt": len(auto["ergaenzend"]),
+        "zeilen_dublette_zusammengefuehrt": len(auto["zusammengefuehrt"]),
         "fuehrende_nullen_ergaenzt": len(auto["fuehrende_null"]),
         "getrennte_lieferanten_gleicher_name": len(auto["getrennte_lieferanten"]),
         "leerzeilen_uebersprungen": len(auto["leerzeilen"]),
@@ -1524,10 +1683,13 @@ def _anwenden_kreditor(store, zeile: dict, operator: str) -> str:
                 sup.address_lines = zeile_adresse + [land_code]
     if werte.get("notiz"):
         sup.notes = _notizen_ergaenzen(sup.notes, werte["notiz"])
-    if werte.get("ustid"):
-        sup.ustids = sorted(set(sup.ustids) | {werte["ustid"]})
-    if werte.get("iban"):
-        sup.ibans = sorted(set(sup.ibans) | {re.sub(r"\s+", "", werte["iban"]).upper()})
+    zusatz = zeile.get("zusatzwerte", {})   # beim Zusammenfuehren behaltene Mehrwerte
+    ustids = [x for x in [werte.get("ustid", ""), *zusatz.get("ustid", [])] if x]
+    if ustids:
+        sup.ustids = sorted(set(sup.ustids) | set(ustids))
+    ibans = [re.sub(r"\s+", "", x).upper() for x in [werte.get("iban", ""), *zusatz.get("iban", [])] if x]
+    if ibans:
+        sup.ibans = sorted(set(sup.ibans) | set(ibans))
     if werte.get("bic") and not (merge and bestand and sup.bic):
         sup.bic = werte["bic"]
     if werte.get("steuernummer") and not (merge and bestand and sup.creditor_id):
@@ -1543,10 +1705,11 @@ def _anwenden_kreditor(store, zeile: dict, operator: str) -> str:
         else:
             sup.external_id = nr
     sup.currency = "CHF" if zeile["art"] == ART_KREDITOR_CH else "EUR"
-    if werte.get("mandant_verweis"):
-        addr_id = _slug(werte["mandant_verweis"])
-        if addr_id not in sup.addresses:
-            sup.addresses = sorted(set(sup.addresses) | {addr_id})
+    for verweis in [werte.get("mandant_verweis", ""), *zusatz.get("mandant_verweis", [])]:
+        if verweis:
+            addr_id = _slug(verweis)
+            if addr_id not in sup.addresses:
+                sup.addresses = sorted(set(sup.addresses) | {addr_id})
     store.save_supplier(sup)
     store.audit("stammdaten_kreditor_import", {"id": sid, "blatt": zeile["blatt"],
                                                "zeile": zeile["zeile"]}, operator)
@@ -1636,7 +1799,8 @@ def anwenden(store, sheets: dict[str, dict], antworten: dict | None, operator: s
     vor = vorschau(store, sheets, antworten)
     ergebnis = {"kreditoren": 0, "mandanten": 0, "postfaecher": 0,
                "uebersprungen": 0, "passwoerter_gesetzt": 0,
-               "verschmolzene_lieferanten": 0, "zusammengefasst": 0}
+               "verschmolzene_lieferanten": 0, "zusammengefasst": 0,
+               "dubletten_zusammengefuehrt": 0}
     # Reihenfolge unabhaengig von der Blattreihenfolge: Postfaecher verweisen auf
     # Mandanten, die dafuer schon in der Bibliothek stehen muessen.
     reihenfolge = {ART_MANDANT: 0, ART_KREDITOR_DE: 1, ART_KREDITOR_CH: 1, ART_POSTFACH: 2}
@@ -1660,6 +1824,8 @@ def anwenden(store, sheets: dict[str, dict], antworten: dict | None, operator: s
             kreditor_ids.add(sid0)
             sid = _anwenden_kreditor(store, z, operator)
             ergebnis["kreditoren"] += 1
+            if z.get("zusammengefuehrt_dublette"):
+                ergebnis["dubletten_zusammengefuehrt"] += 1
             if merge:
                 verschmolzen_ids.add(sid)
         elif z["art"] == ART_MANDANT:
