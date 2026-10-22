@@ -29,6 +29,7 @@ angefasst. Jeder Versuch steht in ``<data>/update.log``.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import time
@@ -93,14 +94,28 @@ def _rev(root: Path, ref: str) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def _quelle(root: Path) -> str:
+    """GitHub-Quelle ohne moegliche Zugangsdaten aus der Remote-URL."""
+    r = _git(root, "remote", "get-url", "origin")
+    raw = r.stdout.strip() if r.returncode == 0 else ""
+    raw = re.sub(r"^(https?://)[^/@]+@", r"\1", raw)
+    raw = raw.removeprefix("git@").replace(":", "/", 1).removesuffix(".git")
+    return raw
+
+
 def version(root: Path | None = None) -> dict:
-    """Aktueller Stand fuer die Anzeige: Commit, Datum, Betreff."""
+    """Aktueller Stand und eindeutige Update-Quelle fuer die Anzeige."""
     root = root or repo_root()
     if not ist_git_klon(root):
         return {"git": False, "commit": "", "datum": "", "betreff": ""}
     r = _git(root, "log", "-1", "--format=%h%x1f%cd%x1f%s", "--date=format:%d.%m.%Y %H:%M")
     teile = (r.stdout.strip().split("\x1f") + ["", "", ""])[:3] if r.returncode == 0 else ["", "", ""]
-    return {"git": True, "commit": teile[0], "datum": teile[1], "betreff": teile[2]}
+    aktiv = _git(root, "branch", "--show-current")
+    ziel = _rev(root, f"origin/{BRANCH}")
+    return {"git": True, "commit": teile[0], "datum": teile[1], "betreff": teile[2],
+            "update_branch": BRANCH,
+            "aktiver_branch": aktiv.stdout.strip() if aktiv.returncode == 0 else "",
+            "update_remote": _quelle(root), "update_ziel": ziel[:7]}
 
 
 def _pip_install(root: Path, python: str) -> subprocess.CompletedProcess:
@@ -208,10 +223,12 @@ def _aktualisieren(root: Path, data_root: Path | None, tests: bool, python: str)
 
     alt = _rev(root, "HEAD")
     neu = _rev(root, f"origin/{BRANCH}")
+    quelle = _quelle(root)
     if not neu:
-        return Ergebnis("fehler", alt=alt, meldung=f"Zweig {BRANCH} nicht gefunden.")
+        return Ergebnis("fehler", alt=alt, meldung=f"Zweig {BRANCH} nicht gefunden in {quelle or 'der eingestellten Quelle'}.")
     if alt == neu:
-        return Ergebnis("aktuell", alt=alt, neu=neu, meldung="Schon auf dem neuesten Stand.")
+        return Ergebnis("aktuell", alt=alt, neu=neu,
+                        meldung=f"Schon auf dem neuesten Stand von {quelle or 'origin'} ({BRANCH}).")
 
     if data_root is not None and lock.is_locked(data_root):
         return Ergebnis("beschaeftigt", alt=alt, neu=neu,
