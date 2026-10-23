@@ -11,6 +11,9 @@
   header b { font-size: 15px; margin-right: 12px; }
   header button { background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.4); color: #fff; }
   header button.active { background: #fff; color: #1c7550; }
+  .nav-mehr { position: relative; }
+  .nav-mehr-menu { position: absolute; top: calc(100% + 4px); left: 0; background: #1c7550; border: 1px solid rgba(255,255,255,.4); border-radius: 4px; flex-direction: column; min-width: 190px; z-index: 50; box-shadow: 0 4px 12px rgba(0,0,0,.25); padding: 4px; }
+  .nav-mehr-menu button { width: 100%; text-align: left; margin: 2px 0; }
   main { padding: 0; }
   .view { display: none; }
   .view.active { display: block; }
@@ -210,14 +213,19 @@
   <b>Rechnung</b>
   <button id="nav-scan" class="active" onclick="show('scan')">Rechnungen</button>
   <button id="nav-human" onclick="show('human')">Menschliche Bearbeitung <span id="human-count"></span></button>
-  <button id="nav-keine-rechnung" onclick="show('keine-rechnung')">Keine Rechnung <span id="keine-rechnung-count"></span></button>
-  <button id="nav-suppliers" onclick="show('suppliers')">Lieferanten <span id="sup-unconfirmed-count"></span></button>
-  <button id="nav-addresses" onclick="show('addresses')">Rechnungsadressen</button>
-  <button id="nav-categories" onclick="show('categories')">Kategorien</button>
-  <button id="nav-journal" onclick="show('journal')">Journal</button>
-  <button id="nav-vorlernen" onclick="show('vorlernen')">Vorlernen</button>
-  <button id="nav-qualitaet" onclick="show('qualitaet')">Qualität</button>
-  <button id="nav-stammdaten" onclick="location.href='/static/stammdaten.html'">Excel-Import</button>
+  <div class="nav-mehr">
+    <button type="button" onclick="toggleMehrMenu(event)">Mehr ▾</button>
+    <div class="nav-mehr-menu" id="nav-mehr-menu" style="display:none">
+      <button id="nav-keine-rechnung" onclick="show('keine-rechnung')">Keine Rechnung <span id="keine-rechnung-count"></span></button>
+      <button id="nav-suppliers" onclick="show('suppliers')">Lieferanten <span id="sup-unconfirmed-count"></span></button>
+      <button id="nav-addresses" onclick="show('addresses')">Rechnungsadressen</button>
+      <button id="nav-categories" onclick="show('categories')">Kategorien</button>
+      <button id="nav-journal" onclick="show('journal')">Journal</button>
+      <button id="nav-vorlernen" onclick="show('vorlernen')">Vorlernen</button>
+      <button id="nav-qualitaet" onclick="show('qualitaet')">Qualität</button>
+      <button id="nav-stammdaten" onclick="location.href='/static/stammdaten.html'">Excel-Import</button>
+    </div>
+  </div>
   <span id="stats" class="hint" style="color:#eaf5ef"></span>
   <button id="btn-postfach" style="display:none" onclick="postfachJetzt()"
           title="Postfach sofort auf neue Rechnungen prüfen">Postfach prüfen</button>
@@ -391,11 +399,23 @@ let STATE = null;
 let LIST_FILES = [];  // Reihenfolge der zuletzt geladenen Liste, fuer "naechste Rechnung"
 let SUP_ADDRESSES = [];  // Rechnungsadressen fuer die Checkboxen im Lieferanten-Formular
 
+function toggleMehrMenu(e) {
+  e.stopPropagation();
+  const m = $('#nav-mehr-menu');
+  m.style.display = m.style.display === 'none' ? 'flex' : 'none';
+}
+document.addEventListener('click', () => {
+  const m = $('#nav-mehr-menu');
+  if (m) m.style.display = 'none';
+});
+
 function show(v) {
   document.querySelectorAll('.view').forEach(e => e.classList.remove('active'));
   $('#v-'+v).classList.add('active');
   document.querySelectorAll('header button').forEach(e => e.classList.remove('active'));
   $('#nav-'+v).classList.add('active');
+  const mehrToggle = $('.nav-mehr > button');
+  if (mehrToggle) mehrToggle.classList.toggle('active', !!$('#nav-mehr-menu')?.contains($('#nav-'+v)));
   if (v === 'human') loadHuman();
   if (v === 'keine-rechnung') loadKeineRechnung();
   if (v === 'suppliers') loadSuppliers();
