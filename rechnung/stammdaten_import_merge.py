@@ -183,10 +183,11 @@ def install() -> None:
                 werte.pop("_bibliothek_id", None)
         return alt_anwenden_kreditor(store, zeile, operator)
 
-    def anwenden(store, sheets, antworten, operator=""):
+    def anwenden(store, sheets, antworten, operator="", fortschritt=None, vor=None):
         token = _IN_APPLY.set(True)
         try:
-            return alt_anwenden_import(store, sheets, antworten, operator)
+            return alt_anwenden_import(store, sheets, antworten, operator,
+                                       fortschritt=fortschritt, vor=vor)
         finally:
             _IN_APPLY.reset(token)
 

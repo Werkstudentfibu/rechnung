@@ -323,6 +323,69 @@ def test_korrektur_wert_wird_uebernommen(tmp_path):
     assert richtige_iban in sup.ibans
 
 
+def test_anwenden_prueft_nur_einmal_wenn_kein_vor_mitgegeben(tmp_path, monkeypatch):
+    """Ohne ``vor``-Parameter berechnet ``anwenden()`` die Pruefung selbst --
+    aber nur EINMAL (Regressionstest gegen die frueher doppelte Pruefung bei
+    grossen Dateien, Aaron 23.10.2026)."""
+    store = _store(tmp_path)
+    headers = ["Name", "IBAN"]
+    rows = [["Muster GmbH", "DE00000000000000000000"]]
+    sheets = {"Blatt1": {"headers": headers, "rows": rows, "mapping": None,
+                        "art": si.ART_KREDITOR_DE}}
+    aufrufe = []
+    original = si._vorschau_intern
+
+    def zaehlend(*a, **kw):
+        aufrufe.append(1)
+        return original(*a, **kw)
+
+    monkeypatch.setattr(si, "_vorschau_intern", zaehlend)
+    antworten = {"Blatt1:1|iban": {"antwort": "so übernehmen"}}
+    si.anwenden(store, sheets, antworten, operator="aaron")
+    assert len(aufrufe) == 1
+
+
+def test_anwenden_mit_vorberechnetem_vor_prueft_gar_nicht_neu(tmp_path, monkeypatch):
+    """Server-Weg: ``vorschau()`` wird einmal aufgerufen und das Ergebnis an
+    ``anwenden()`` weitergegeben -- dort darf die Pruefung dann NICHT noch
+    einmal laufen."""
+    store = _store(tmp_path)
+    headers = ["Name", "IBAN"]
+    rows = [["Muster GmbH", "DE00000000000000000000"]]
+    sheets = {"Blatt1": {"headers": headers, "rows": rows, "mapping": None,
+                        "art": si.ART_KREDITOR_DE}}
+    antworten = {"Blatt1:1|iban": {"antwort": "so übernehmen"}}
+    vor = si.vorschau(store, sheets, antworten)
+
+    aufrufe = []
+    original = si._vorschau_intern
+
+    def zaehlend(*a, **kw):
+        aufrufe.append(1)
+        return original(*a, **kw)
+
+    monkeypatch.setattr(si, "_vorschau_intern", zaehlend)
+    ergebnis = si.anwenden(store, sheets, antworten, operator="aaron", vor=vor)
+    assert len(aufrufe) == 0
+    assert ergebnis["kreditoren"] == 1
+
+
+def test_anwenden_fortschritt_wird_pro_zeile_mit_steigenden_werten_aufgerufen(tmp_path):
+    store = _store(tmp_path)
+    headers = ["Name", "IBAN"]
+    rows = [
+        ["Erste GmbH", ""],
+        ["Zweite GmbH", ""],
+        ["Dritte GmbH", ""],
+    ]
+    sheets = {"Blatt1": {"headers": headers, "rows": rows, "mapping": None,
+                        "art": si.ART_KREDITOR_DE}}
+    aufrufe = []
+    si.anwenden(store, sheets, {}, operator="aaron",
+               fortschritt=lambda fertig, gesamt: aufrufe.append((fertig, gesamt)))
+    assert aufrufe == [(1, 3), (2, 3), (3, 3)]
+
+
 def test_apply_revalidates_server_side_ignores_client_claimed_green(tmp_path):
     """Sicherheitsrelevant: ``anwenden`` darf dem Client NIE eine falsche
     Ampel glauben -- die Pruefung laeuft serverseitig komplett neu."""

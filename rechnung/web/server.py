@@ -605,30 +605,64 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             raise HTTPException(400, str(e))
         return JSONResponse(res)
 
+    # Laeuft im Hintergrund wie der Testsatz-Lauf (siehe unten): bei >10.000
+    # Zeilen dauert die komplette Pruefung zu lange fuer eine synchrone
+    # Antwort, das UI fragt den Fortschritt ab (Aaron 23.10.2026).
+    import threading as _threading_uebernehmen
+
+    uebernehmen_lauf: dict = {"laeuft": False, "fertig": 0, "gesamt": 0,
+                              "fehler": "", "ergebnis": None}
+
+    @app.get("/api/stammdaten/uebernehmen/fortschritt")
+    def stammdaten_uebernehmen_fortschritt() -> JSONResponse:
+        return JSONResponse(dict(uebernehmen_lauf))
+
     @app.post("/api/stammdaten/uebernehmen")
     def stammdaten_uebernehmen(body: dict) -> JSONResponse:
         """Nur gruene Zeilen + vollstaendig beantwortete gelbe/rote Zeilen
         werden uebernommen -- die komplette Pruefung laeuft dabei
         serverseitig NEU (vertraut nie einer vom Client mitgeschickten
-        Ampel). Lernt dabei die bestaetigte Spaltenzuordnung je Blatt-Layout."""
+        Ampel). Lernt dabei die bestaetigte Spaltenzuordnung je Blatt-Layout.
+        Laeuft im Hintergrund, Fortschritt per /uebernehmen/fortschritt."""
         from .. import stammdaten_import as si
         from ..config import operator as _operator
 
         sheets = body.get("sheets") or {}
         if not sheets:
             raise HTTPException(400, "keine Blaetter uebergeben")
+        if uebernehmen_lauf["laeuft"]:
+            raise HTTPException(409, "Uebernehmen laeuft bereits")
         op = _operator()
         antworten = body.get("antworten") or {}
-        # Die tatsaechlich VERWENDETE Zuordnung (inkl. automatisch
-        # vorgeschlagener, falls der Client ``mapping``/``art`` leer liess)
-        # merken -- nicht nur, was der Client zufaellig mitschickte.
-        vor = si.vorschau(store, sheets, antworten)
-        ergebnis = si.anwenden(store, sheets, antworten, op)
-        for name, blatt in vor["blaetter"].items():
-            headers = (sheets.get(name) or {}).get("headers")
-            if headers and blatt.get("mapping") and blatt.get("art"):
-                si.zuordnung_lernen(store, headers, blatt["mapping"], blatt["art"], op)
-        return JSONResponse(ergebnis)
+        uebernehmen_lauf.update(laeuft=True, fertig=0, gesamt=0, fehler="", ergebnis=None)
+
+        def fortschritt(fertig: int, gesamt: int) -> None:
+            uebernehmen_lauf.update(fertig=fertig, gesamt=gesamt)
+
+        def run() -> None:
+            try:
+                # Die tatsaechlich VERWENDETE Zuordnung (inkl. automatisch
+                # vorgeschlagener, falls der Client ``mapping``/``art`` leer
+                # liess) merken -- nicht nur, was der Client zufaellig
+                # mitschickte. ``vor`` wird an ``anwenden()`` weitergegeben,
+                # damit die komplette Pruefung nicht zweimal laeuft.
+                vor = si.vorschau(store, sheets, antworten)
+                uebernehmen_lauf["gesamt"] = sum(
+                    len(blatt["zeilen"]) for blatt in vor["blaetter"].values())
+                ergebnis = si.anwenden(store, sheets, antworten, op,
+                                       fortschritt=fortschritt, vor=vor)
+                for name, blatt in vor["blaetter"].items():
+                    headers = (sheets.get(name) or {}).get("headers")
+                    if headers and blatt.get("mapping") and blatt.get("art"):
+                        si.zuordnung_lernen(store, headers, blatt["mapping"], blatt["art"], op)
+                uebernehmen_lauf["ergebnis"] = ergebnis
+            except Exception as e:  # noqa: BLE001 -- Fehler im UI anzeigen
+                uebernehmen_lauf["fehler"] = f"{type(e).__name__}: {e}"
+            finally:
+                uebernehmen_lauf["laeuft"] = False
+
+        _threading_uebernehmen.Thread(target=run, daemon=True, name="stammdaten-uebernehmen").start()
+        return JSONResponse({"gestartet": True})
 
     # ---- Mehrere Postfaecher (Entscheidung Aaron 15.10.2026) -----------
     @app.get("/api/postfaecher")

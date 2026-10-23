@@ -99,7 +99,8 @@ const SLOTS = [
 ];
 
 const S = { slots: {}, slotFehler: {}, zielfelder: [], vor: null, antworten: {}, fehler: '', ergebnis: null,
-            busy: false, nurOffen: true, detail: false, gruppenEingabe: {}, sicherung: '', warnung: '' };
+            busy: false, nurOffen: true, detail: false, gruppenEingabe: {}, sicherung: '', warnung: '',
+            uebernehmenFortschritt: null };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const lbl = (k) => LABEL[k] || k;
@@ -112,6 +113,12 @@ async function post(url, body) {
   try { j = await r.json(); } catch (e) { /* leere Antwort */ }
   if (!r.ok) throw new Error((j && j.detail) || ('Fehler ' + r.status));
   return j;
+}
+
+async function get(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('Fehler ' + r.status);
+  return r.json();
 }
 
 // Alle geladenen Bereiche ZUSAMMEN pruefen (Postfaecher brauchen die Mandanten, DE/CH-Dubletten
@@ -273,13 +280,34 @@ function gruppenHtml(v) {
 async function uebernehmen() {
   const n = S.vor ? S.vor.zusammenfassung.bereit_zum_uebernehmen : 0;
   if (!n || !confirm(`${n} Zeile(n) in die Bibliothek übernehmen?`)) return;
-  S.busy = true; render();
+  S.busy = true; S.uebernehmenFortschritt = null; render();
   try {
-    S.ergebnis = await post('/api/stammdaten/uebernehmen', { sheets: alleSheets(), antworten: payloadAntworten() });
+    await post('/api/stammdaten/uebernehmen', { sheets: alleSheets(), antworten: payloadAntworten() });
     S.fehler = '';
-    S.slots = {}; S.slotFehler = {}; S.vor = null; S.antworten = {}; S.gruppenEingabe = {};
-  } catch (e) { S.fehler = e.message; }
-  S.busy = false; render();
+    await uebernehmenAbwarten();
+  } catch (e) { S.fehler = e.message; S.busy = false; render(); }
+}
+
+// Laeuft im Hintergrund (grosse Listen > 10.000 Zeilen) -- den Fortschritt
+// per Polling abfragen, bis der Lauf fertig ist (Aaron 23.10.2026).
+async function uebernehmenAbwarten() {
+  for (;;) {
+    let st;
+    try { st = await get('/api/stammdaten/uebernehmen/fortschritt'); }
+    catch (e) { S.fehler = e.message; break; }
+    S.uebernehmenFortschritt = st;
+    render();
+    if (!st.laeuft) {
+      if (st.fehler) S.fehler = st.fehler;
+      else {
+        S.ergebnis = st.ergebnis;
+        S.slots = {}; S.slotFehler = {}; S.vor = null; S.antworten = {}; S.gruppenEingabe = {};
+      }
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  S.busy = false; S.uebernehmenFortschritt = null; render();
 }
 
 function neu() {
@@ -425,7 +453,10 @@ function render() {
       ${S.warnung ? `<div class="warn" role="alert">${esc(S.warnung)}</div>` : ''}
       <p class="klein" id="sicherung">${esc(S.sicherung)}</p>
       <div class="slots">${SLOTS.map(slotHtml).join('')}</div>`;
-    if (S.busy) h += `<p>Bitte warten …</p>`;
+    if (S.uebernehmenFortschritt && S.uebernehmenFortschritt.gesamt) {
+      const f = S.uebernehmenFortschritt;
+      h += `<p>Übernehmen läuft … Zeile ${f.fertig} von ${f.gesamt}</p>`;
+    } else if (S.busy) h += `<p>Bitte warten …</p>`;
     if (hatDaten()) {
       for (const sl of SLOTS) {
         const d = S.slots[sl.id];

@@ -1792,11 +1792,19 @@ def _anwenden_postfach(store, zeile: dict, operator: str) -> str:
     return pid
 
 
-def anwenden(store, sheets: dict[str, dict], antworten: dict | None, operator: str = "") -> dict:
+def anwenden(store, sheets: dict[str, dict], antworten: dict | None, operator: str = "",
+            fortschritt=None, vor: dict | None = None) -> dict:
     """Komplette Pruefung NEU (nie dem Client vertrauen) -- uebernimmt nur
     gruene Zeilen und gelbe Zeilen mit vollstaendig beantworteten Fragen,
-    die nicht per "Zeile weglassen" ausgeschlossen sind."""
-    vor = vorschau(store, sheets, antworten)
+    die nicht per "Zeile weglassen" ausgeschlossen sind. ``vor``: bereits
+    berechnetes ``vorschau()``-Ergebnis wiederverwenden -- der Server braucht
+    es ohnehin fuer das Lernen der Spaltenzuordnung, ohne ``vor`` wuerde die
+    komplette Pruefung (Bibliotheksabgleich, Dublettenerkennung, ...) bei
+    grossen Dateien unnoetig zweimal laufen. ``fortschritt(fertig, gesamt)``
+    wird nach jeder verarbeiteten Zeile aufgerufen (Fortschrittsanzeige bei
+    vielen Zeilen)."""
+    if vor is None:
+        vor = vorschau(store, sheets, antworten)
     ergebnis = {"kreditoren": 0, "mandanten": 0, "postfaecher": 0,
                "uebersprungen": 0, "passwoerter_gesetzt": 0,
                "verschmolzene_lieferanten": 0, "zusammengefasst": 0,
@@ -1806,17 +1814,16 @@ def anwenden(store, sheets: dict[str, dict], antworten: dict | None, operator: s
     reihenfolge = {ART_MANDANT: 0, ART_KREDITOR_DE: 1, ART_KREDITOR_CH: 1, ART_POSTFACH: 2}
     alle = [z for blatt in vor["blaetter"].values() for z in blatt["zeilen"]]
     alle.sort(key=lambda z: reihenfolge.get(z["art"], 9))
+    gesamt = len(alle)
     kreditor_ids: set[str] = set()
     verschmolzen_ids: set[str] = set()
-    for z in alle:
+    for i, z in enumerate(alle):
         if z.get("zusammengefasst"):
             ergebnis["zusammengefasst"] += 1   # in der Hauptzeile enthalten
-            continue
-        if z["weglassen"] or not (
+        elif z["weglassen"] or not (
                 z["status"] == STATUS_GRUEN or (z["status"] == STATUS_GELB and z["beantwortet"])):
             ergebnis["uebersprungen"] += 1
-            continue
-        if z["art"] in ARTEN_KREDITOR:
+        elif z["art"] in ARTEN_KREDITOR:
             merge = z.get("verschmelzen")
             sid0 = _supplier_id(z["werte"], merge)
             if sid0 in kreditor_ids and not merge:
@@ -1838,6 +1845,8 @@ def anwenden(store, sheets: dict[str, dict], antworten: dict | None, operator: s
                 ergebnis["passwoerter_gesetzt"] += 1
         else:
             ergebnis["uebersprungen"] += 1
+        if fortschritt:
+            fortschritt(i + 1, gesamt)
     ergebnis["verschmolzene_lieferanten"] = len(verschmolzen_ids)
     if any(blatt["zeilen"] and any(z["werte"].get("passwort") for z in blatt["zeilen"])
           for blatt in vor["blaetter"].values()):
