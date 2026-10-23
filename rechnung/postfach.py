@@ -24,6 +24,13 @@ class Postfach:
     source_folder: str = "INBOX"
     done_folder: str = ""
     aktiv: bool = True
+    # Inhalts-Fingerabdruck der zuletzt angewendeten Stammdaten-Import-Zeile
+    # (stammdaten_import._zeilen_fingerabdruck) -- auf dem KLARTEXT-Passwort
+    # aus der Excel-Zeile berechnet, nicht auf dem verschluesselten Blob (der
+    # aendert sich bei jeder Verschluesselung durch neues IV/Salt, auch bei
+    # gleichem Passwort). Fehlt das Feld (alter Datensatz vor dieser
+    # Aenderung), gilt die Zeile IMMER als geaendert -- siehe ``from_dict``.
+    stammdaten_import_hash: str = ""
 
     @property
     def label(self) -> str:
@@ -33,7 +40,7 @@ class Postfach:
         return {"id": self.id, "mandant_id": self.mandant_id, "mandant_name": self.mandant_name,
                 "user": self.user, "host": self.host, "port": self.port, "ssl": self.ssl,
                 "source_folder": self.source_folder, "done_folder": self.done_folder,
-                "aktiv": self.aktiv}
+                "aktiv": self.aktiv, "stammdaten_import_hash": self.stammdaten_import_hash}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Postfach":
@@ -41,4 +48,5 @@ class Postfach:
                   mandant_name=d.get("mandant_name", ""), user=d.get("user", ""),
                   host=d.get("host") or DEFAULT_HOST, port=int(d.get("port") or DEFAULT_PORT),
                   ssl=d.get("ssl", True), source_folder=d.get("source_folder") or "INBOX",
-                  done_folder=d.get("done_folder", ""), aktiv=d.get("aktiv", True))
+                  done_folder=d.get("done_folder", ""), aktiv=d.get("aktiv", True),
+                  stammdaten_import_hash=d.get("stammdaten_import_hash", ""))

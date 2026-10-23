@@ -145,6 +145,14 @@ class Supplier:
     # unterbleibt der "Langer Beleg"-Hinweis (pipeline._positionsmodus_hint)
     # -- unterscheidet "noch nie entschieden" vom Standardwert "einzeln".
     positionsmodus_gesetzt: bool = False
+    # Inhalts-Fingerabdruck der zuletzt angewendeten Stammdaten-Import-Zeile
+    # (stammdaten_import._zeilen_fingerabdruck) -- erlaubt, bei einem erneuten
+    # Lauf (z.B. nach einem Neustart mitten in einem grossen Import)
+    # unveraenderte Zeilen zu erkennen und zu ueberspringen. Fehlt das Feld
+    # (alter Datensatz vor dieser Aenderung), gilt die Zeile IMMER als
+    # geaendert -- siehe ``from_dict``. Nicht zu verwechseln mit
+    # ``fingerprint`` oben (Rechnungserkennung, voellig anderer Zweck).
+    stammdaten_import_hash: str = ""
 
     def external_id_fuer(self, land: str | None) -> str:
         """Fremd-Lieferantennummer fuer einen Beleg aus ``land`` ("DE"/"CH"/
@@ -184,6 +192,7 @@ class Supplier:
             "positionsmodus": self.positionsmodus,
             "positionsbezeichnung": self.positionsbezeichnung,
             "positionsmodus_gesetzt": self.positionsmodus_gesetzt,
+            "stammdaten_import_hash": self.stammdaten_import_hash,
         }
 
     @classmethod
@@ -216,6 +225,7 @@ class Supplier:
             positionsmodus=d.get("positionsmodus") or POSITIONSMODUS_EINZELN,
             positionsbezeichnung=d.get("positionsbezeichnung", ""),
             positionsmodus_gesetzt=d.get("positionsmodus_gesetzt", False),
+            stammdaten_import_hash=d.get("stammdaten_import_hash", ""),
         )
 
 

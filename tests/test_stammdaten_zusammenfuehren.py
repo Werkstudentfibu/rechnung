@@ -258,7 +258,11 @@ def test_sammelantwort_fuer_ganze_gruppe_und_idempotenz(tmp_path):
     assert len(store.suppliers()) == 3
     assert stand == sorted((s.id, s.name, tuple(s.ibans), s.notes, tuple(s.address_lines))
                            for s in store.suppliers())
-    assert erg2["dubletten_zusammengefuehrt"] == 3
+    # Zweiter Lauf mit identischem Inhalt: Fingerabdruck-Vergleich erkennt
+    # die Zeilen als unveraendert und ueberSPRINGT sie, statt sie (ohne
+    # Datenaenderung) erneut zu schreiben.
+    assert erg2["unveraendert_uebersprungen"] == 3
+    assert erg2["kreditoren"] == 0 and erg2["dubletten_zusammengefuehrt"] == 0
 
 
 def test_zufaellige_zeilenreihenfolge_der_antworten_aendert_nichts(tmp_path):

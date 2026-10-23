@@ -443,7 +443,7 @@ function render() {
   if (S.ergebnis) {
     const e = S.ergebnis;
     h += `<h2>Fertig</h2><div class="ok">Übernommen: ${e.kreditoren} Kreditoren, ${e.mandanten} Mandanten, ${e.postfaecher} Postfächer
-      (${e.uebersprungen} Zeile(n) nicht übernommen – Frage offen oder weggelassen)${e.verschmolzene_lieferanten ? `, davon ${e.verschmolzene_lieferanten} automatisch verschmolzen (DE/CH)` : ''}${e.zusammengefasst ? `; ${e.zusammengefasst} Zeile(n) waren automatisch in eine andere zusammengefasst` : ''}.</div>`;
+      (${e.uebersprungen} Zeile(n) nicht übernommen – Frage offen oder weggelassen)${e.verschmolzene_lieferanten ? `, davon ${e.verschmolzene_lieferanten} automatisch verschmolzen (DE/CH)` : ''}${e.zusammengefasst ? `; ${e.zusammengefasst} Zeile(n) waren automatisch in eine andere zusammengefasst` : ''}${e.unveraendert_uebersprungen ? `; ${e.unveraendert_uebersprungen} Zeile(n) bereits unverändert vorhanden, übersprungen` : ''}.</div>`;
     if (e.hinweis_passwoerter) h += `<div class="warn"><b>Wichtig:</b> ${esc(e.hinweis_passwoerter)}</div>`;
     h += `<button data-act="neu">Weitere Dateien einlesen</button>`;
   } else {

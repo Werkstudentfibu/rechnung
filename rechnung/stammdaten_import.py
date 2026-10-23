@@ -1640,7 +1640,37 @@ def _address_id(werte: dict[str, str]) -> str:
     return "mandant-" + _slug(werte.get("name", ""))
 
 
-def _anwenden_kreditor(store, zeile: dict, operator: str) -> str:
+def _ohne_interne_werte(werte: dict[str, str]) -> dict[str, str]:
+    """``werte`` ohne mit ``_`` beginnende Schluessel -- das sind interne,
+    nur waehrend des Anwendens zwischen den Erweiterungen (siehe
+    ``stammdaten_import_merge.py``) durchgereichte Marker wie
+    ``_bibliothek_id``, keine echten Zeilenwerte aus der Excel-Datei. Ohne
+    diesen Filter wuerde ``_anwenden_kreditor`` dieselbe Zeile faelschlich
+    als "geaendert" werten, sobald der Kreditor erst NACH dem ersten Lauf in
+    der Bibliothek auftaucht und die Bibliotheks-Erkennung deshalb erst beim
+    zweiten Lauf anschlaegt -- der eigentliche Zeileninhalt ist dabei gleich
+    geblieben."""
+    return {k: v for k, v in werte.items() if not k.startswith("_")}
+
+
+def _zeilen_fingerabdruck(payload: dict) -> str:
+    """Inhalts-Fingerabdruck einer Stammdaten-Import-Zeile: deterministisch
+    ueber eine stabile JSON-Serialisierung von ``payload`` (sortierte
+    Schluessel), damit zwei Laeufe mit identischem Zeileninhalt denselben
+    Fingerabdruck ergeben -- unabhaengig von Dict-Reihenfolge oder
+    Programm-Neustart dazwischen. Dient NUR der Aenderungserkennung, nicht
+    der Sicherheit (bei Postfaechern wird das Klartext-Passwort aus der
+    Excel-Zeile mit eingerechnet, siehe ``_anwenden_postfach``)."""
+    if "werte" in payload:
+        payload = {**payload, "werte": _ohne_interne_werte(payload["werte"])}
+    serial = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(serial.encode("utf-8")).hexdigest()
+
+
+def _anwenden_kreditor(store, zeile: dict, operator: str) -> tuple[str, bool]:
+    """-> (sid, unveraendert). ``unveraendert=True`` heisst: die Zeile hat
+    denselben Fingerabdruck wie beim letzten erfolgreichen Anwenden -- es
+    wurde nichts geschrieben."""
     from .identify import Supplier
 
     werte = zeile["werte"]
@@ -1657,6 +1687,12 @@ def _anwenden_kreditor(store, zeile: dict, operator: str) -> str:
         sid = f"{sid}-{zeile['schluessel'].replace(':', '-')}"
     land = "CH" if zeile["art"] == ART_KREDITOR_CH else "DE"
     sup = store.supplier(sid)
+    fingerabdruck = _zeilen_fingerabdruck({
+        "art": zeile["art"], "werte": werte, "zusatzwerte": zeile.get("zusatzwerte", {}),
+        "verschmelzen": merge, "neu_anlegen": bool(zeile.get("neu_anlegen")),
+    })
+    if sup is not None and sup.stammdaten_import_hash and sup.stammdaten_import_hash == fingerabdruck:
+        return sid, True
     if sup is None:
         sup = Supplier(id=sid, name=werte.get("name", ""))
     bestand = bool(merge) and bool(sup.address_lines or sup.ustids or sup.ibans)
@@ -1710,13 +1746,15 @@ def _anwenden_kreditor(store, zeile: dict, operator: str) -> str:
             addr_id = _slug(verweis)
             if addr_id not in sup.addresses:
                 sup.addresses = sorted(set(sup.addresses) | {addr_id})
+    sup.stammdaten_import_hash = fingerabdruck
     store.save_supplier(sup)
     store.audit("stammdaten_kreditor_import", {"id": sid, "blatt": zeile["blatt"],
                                                "zeile": zeile["zeile"]}, operator)
-    return sid
+    return sid, False
 
 
-def _anwenden_mandant(store, zeile: dict, operator: str) -> str:
+def _anwenden_mandant(store, zeile: dict, operator: str) -> tuple[str, bool]:
+    """-> (aid, unveraendert), siehe ``_anwenden_kreditor``."""
     from .billing import BillingAddress
 
     werte = zeile["werte"]
@@ -1724,6 +1762,11 @@ def _anwenden_mandant(store, zeile: dict, operator: str) -> str:
     if zeile.get("neu_anlegen") and store.address(aid) is not None:
         aid = f"{aid}-{zeile['schluessel'].replace(':', '-')}"
     addr = store.address(aid)
+    fingerabdruck = _zeilen_fingerabdruck({
+        "art": zeile["art"], "werte": werte, "neu_anlegen": bool(zeile.get("neu_anlegen")),
+    })
+    if addr is not None and addr.stammdaten_import_hash and addr.stammdaten_import_hash == fingerabdruck:
+        return aid, True
     if addr is None:
         addr = BillingAddress(id=aid, name=werte.get("name", ""))
     if werte.get("name"):
@@ -1746,13 +1789,19 @@ def _anwenden_mandant(store, zeile: dict, operator: str) -> str:
         addr.match_terms = sorted(set(addr.match_terms) | set(zeile_adresse))
     if werte.get("mandant_verweis") and werte.get("mandant_verweis") != werte.get("name"):
         addr.company_code = werte["mandant_verweis"]
+    addr.stammdaten_import_hash = fingerabdruck
     store.save_address(addr)
     store.audit("stammdaten_mandant_import", {"id": aid, "blatt": zeile["blatt"],
                                               "zeile": zeile["zeile"]}, operator)
-    return aid
+    return aid, False
 
 
-def _anwenden_postfach(store, zeile: dict, operator: str) -> str:
+def _anwenden_postfach(store, zeile: dict, operator: str) -> tuple[str, bool]:
+    """-> (pid, unveraendert), siehe ``_anwenden_kreditor``. Der Fingerabdruck
+    wird auf dem KLARTEXT-Passwort aus ``werte`` berechnet (vor der
+    Verschluesselung) -- der verschluesselte Blob aendert sich bei jedem
+    Lauf (neues IV/Salt), auch wenn das Passwort gleich bleibt, und waere
+    als Vergleichsgrundlage unbrauchbar."""
     from . import secrets as secrets_mod
     from .postfach import Postfach
 
@@ -1766,6 +1815,9 @@ def _anwenden_postfach(store, zeile: dict, operator: str) -> str:
             break
     pid = _slug(werte.get("email") or ref or werte.get("name", ""))
     pf = store.postfach(pid)
+    fingerabdruck = _zeilen_fingerabdruck({"art": zeile["art"], "werte": werte})
+    if pf is not None and pf.stammdaten_import_hash and pf.stammdaten_import_hash == fingerabdruck:
+        return pid, True
     if pf is None:
         pf = Postfach(id=pid)
     pf.mandant_id = mandant_id
@@ -1784,12 +1836,13 @@ def _anwenden_postfach(store, zeile: dict, operator: str) -> str:
             pf.host = server
     if werte.get("ordner"):
         pf.source_folder = werte["ordner"]
+    pf.stammdaten_import_hash = fingerabdruck
     store.save_postfach(pf)
     if werte.get("passwort"):
         secrets_mod.set_password(store, pid, werte["passwort"], operator)
     store.audit("stammdaten_postfach_import", {"id": pid, "blatt": zeile["blatt"],
                                                "zeile": zeile["zeile"]}, operator)
-    return pid
+    return pid, False
 
 
 def anwenden(store, sheets: dict[str, dict], antworten: dict | None, operator: str = "",
@@ -1802,13 +1855,20 @@ def anwenden(store, sheets: dict[str, dict], antworten: dict | None, operator: s
     komplette Pruefung (Bibliotheksabgleich, Dublettenerkennung, ...) bei
     grossen Dateien unnoetig zweimal laufen. ``fortschritt(fertig, gesamt)``
     wird nach jeder verarbeiteten Zeile aufgerufen (Fortschrittsanzeige bei
-    vielen Zeilen)."""
+    vielen Zeilen).
+
+    Zeilen, deren Inhalt sich seit dem letzten erfolgreichen Anwenden nicht
+    geaendert hat (Fingerabdruck-Vergleich, siehe ``_zeilen_fingerabdruck``),
+    werden nicht neu geschrieben, sondern landen in
+    ``ergebnis["unveraendert_uebersprungen"]`` -- wichtig bei einem Neustart
+    mitten in einem Import mit >10.000 Zeilen (muss sonst komplett neu
+    geschrieben werden, obwohl keine Dubletten entstehen wuerden)."""
     if vor is None:
         vor = vorschau(store, sheets, antworten)
     ergebnis = {"kreditoren": 0, "mandanten": 0, "postfaecher": 0,
                "uebersprungen": 0, "passwoerter_gesetzt": 0,
                "verschmolzene_lieferanten": 0, "zusammengefasst": 0,
-               "dubletten_zusammengefuehrt": 0}
+               "dubletten_zusammengefuehrt": 0, "unveraendert_uebersprungen": 0}
     # Reihenfolge unabhaengig von der Blattreihenfolge: Postfaecher verweisen auf
     # Mandanten, die dafuer schon in der Bibliothek stehen muessen.
     reihenfolge = {ART_MANDANT: 0, ART_KREDITOR_DE: 1, ART_KREDITOR_CH: 1, ART_POSTFACH: 2}
@@ -1829,20 +1889,29 @@ def anwenden(store, sheets: dict[str, dict], antworten: dict | None, operator: s
             if sid0 in kreditor_ids and not merge:
                 z["neu_anlegen"] = True   # gleiche Id in dieser Datei: nie ueberschreiben
             kreditor_ids.add(sid0)
-            sid = _anwenden_kreditor(store, z, operator)
-            ergebnis["kreditoren"] += 1
-            if z.get("zusammengefuehrt_dublette"):
-                ergebnis["dubletten_zusammengefuehrt"] += 1
+            sid, unveraendert = _anwenden_kreditor(store, z, operator)
+            if unveraendert:
+                ergebnis["unveraendert_uebersprungen"] += 1
+            else:
+                ergebnis["kreditoren"] += 1
+                if z.get("zusammengefuehrt_dublette"):
+                    ergebnis["dubletten_zusammengefuehrt"] += 1
             if merge:
                 verschmolzen_ids.add(sid)
         elif z["art"] == ART_MANDANT:
-            _anwenden_mandant(store, z, operator)
-            ergebnis["mandanten"] += 1
+            _, unveraendert = _anwenden_mandant(store, z, operator)
+            if unveraendert:
+                ergebnis["unveraendert_uebersprungen"] += 1
+            else:
+                ergebnis["mandanten"] += 1
         elif z["art"] == ART_POSTFACH:
-            _anwenden_postfach(store, z, operator)
-            ergebnis["postfaecher"] += 1
-            if z["werte"].get("passwort"):
-                ergebnis["passwoerter_gesetzt"] += 1
+            _, unveraendert = _anwenden_postfach(store, z, operator)
+            if unveraendert:
+                ergebnis["unveraendert_uebersprungen"] += 1
+            else:
+                ergebnis["postfaecher"] += 1
+                if z["werte"].get("passwort"):
+                    ergebnis["passwoerter_gesetzt"] += 1
         else:
             ergebnis["uebersprungen"] += 1
         if fortschritt:

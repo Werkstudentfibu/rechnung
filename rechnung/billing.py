@@ -20,11 +20,19 @@ class BillingAddress:
     cost_center: str = ""                                 # Kostenstelle / Buchungskreis
     company_code: str = ""                                # Mandant / Firmennummer
     notes: str = ""
+    # Inhalts-Fingerabdruck der zuletzt angewendeten Stammdaten-Import-Zeile
+    # (stammdaten_import._zeilen_fingerabdruck) -- erlaubt, bei einem erneuten
+    # Lauf unveraenderte Zeilen zu erkennen und zu ueberspringen, auch nach
+    # einem Neustart des Programms (Entscheidung Aaron 23.10.2026). Fehlt das
+    # Feld (alter Datensatz vor dieser Aenderung), gilt die Zeile IMMER als
+    # geaendert -- siehe ``from_dict``.
+    stammdaten_import_hash: str = ""
 
     def to_dict(self) -> dict:
         return {"id": self.id, "name": self.name, "lines": self.lines,
                 "match_terms": self.match_terms, "cost_center": self.cost_center,
-                "company_code": self.company_code, "notes": self.notes}
+                "company_code": self.company_code, "notes": self.notes,
+                "stammdaten_import_hash": self.stammdaten_import_hash}
 
     @classmethod
     def from_dict(cls, d: dict) -> "BillingAddress":
@@ -32,7 +40,8 @@ class BillingAddress:
                    match_terms=d.get("match_terms", []),
                    cost_center=d.get("cost_center", ""),
                    company_code=d.get("company_code", ""),
-                   notes=d.get("notes", ""))
+                   notes=d.get("notes", ""),
+                   stammdaten_import_hash=d.get("stammdaten_import_hash", ""))
 
 
 def detect(doc: Document, addresses: list[BillingAddress], min_hits: int = 1):

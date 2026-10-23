@@ -28,8 +28,9 @@ def _liste_union(alt: list[str], neu: list[str], normalisieren=lambda x: x) -> l
     return sorted(out)
 
 
-def _bibliothek_merge(store, zeile: dict, operator: str) -> str:
-    """Keep the existing creditor and merge the imported row into it."""
+def _bibliothek_merge(store, zeile: dict, operator: str) -> tuple[str, bool]:
+    """Keep the existing creditor and merge the imported row into it.
+    -> (sid, unveraendert), siehe ``stammdaten_import._anwenden_kreditor``."""
     from . import stammdaten_import as si
 
     sid = zeile.get("bibliothek_id")
@@ -38,6 +39,10 @@ def _bibliothek_merge(store, zeile: dict, operator: str) -> str:
         raise ValueError("Der ausgewählte Bibliotheks-Kreditor ist nicht mehr vorhanden. Bitte Vorschau neu laden.")
     werte = zeile["werte"]
     land = "CH" if zeile["art"] == si.ART_KREDITOR_CH else "DE"
+    fingerabdruck = si._zeilen_fingerabdruck(
+        {"art": zeile["art"], "werte": werte, "bibliothek_merge": True})
+    if sup.stammdaten_import_hash and sup.stammdaten_import_hash == fingerabdruck:
+        return sid, True
 
     name = (werte.get("name") or "").strip()
     if name:
@@ -103,10 +108,11 @@ def _bibliothek_merge(store, zeile: dict, operator: str) -> str:
         address_id = si._slug(verweis)
         sup.addresses = sorted(set(sup.addresses or []) | {address_id})
 
+    sup.stammdaten_import_hash = fingerabdruck
     store.save_supplier(sup)
     store.audit("stammdaten_kreditor_zusammengefuehrt",
                 {"id": sid, "blatt": zeile["blatt"], "zeile": zeile["zeile"]}, operator)
-    return sid
+    return sid, False
 
 
 def install() -> None:

@@ -244,7 +244,9 @@ def test_erneuter_import_dupliziert_nichts(tmp_path):
     # beim zweiten Mal meldet die Bibliothek Konflikte nur bei ABWEICHENDEN Werten
     assert (len(store.suppliers()), len(store.addresses()), len(store.postfaecher())) == n
     assert (store.supplier("70000").notes, store.address("001").notes) == notes
-    assert erg["kreditoren"] + erg["uebersprungen"] >= 3
+    # Zweiter Lauf mit identischen Daten: unveraenderte Zeilen werden anhand
+    # ihres Fingerabdrucks erkannt und ueberSPRUNGEN statt neu geschrieben.
+    assert erg["kreditoren"] + erg["uebersprungen"] + erg["unveraendert_uebersprungen"] >= 3
 
 
 def test_passwort_steht_nirgends_im_klartext_ausser_in_der_geheimdatei(tmp_path):
