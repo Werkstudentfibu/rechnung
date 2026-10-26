@@ -12,17 +12,29 @@ Der Nachtlauf-Lock gilt weiter (``ingest.fetch`` wartet darauf).
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from pathlib import Path
 from typing import Callable
 
 
+KEIN_POSTFACH = ("Noch kein Postfach eingerichtet – im Reiter „Excel-Import“ die "
+                 "Postfach-Liste (MDT / E-Mail / Passwort) hochladen")
+PASSWORT_FEHLT = ("Passwort fehlt – Postfach-Liste mit Passwort-Spalte erneut im "
+                  "„Excel-Import“ hochladen")
+
+
+# Wie oft (Sekunden) im Hintergrund nach neu eingespielten Postfaechern
+# gesehen wird -- unabhaengig vom Abhol-Takt.
+PRUEF_SEKUNDEN = 30
+
+
 class Abholer:
     def __init__(self, dest: Path, minuten: float, fetch: Callable | None = None,
                  bei_neuen: Callable | None = None,
                  mailboxes: list[tuple[str, object, str | None]] | None = None,
-                 store=None):
+                 store=None, quelle: Callable | None = None):
         self.dest = Path(dest)
         # z.B. Vorverarbeitung im Hintergrund anstossen (vorverarbeitung.py)
         self.bei_neuen = bei_neuen
@@ -34,6 +46,10 @@ class Abholer:
         # Verhalten/den Status-Umfang unveraendert wie vor dieser Erweiterung.
         self.mailboxes = mailboxes
         self.store = store
+        # Postfach-Liste bei JEDER Abholung neu lesen (Befund Aaron 26.10.2026:
+        # per Excel eingespielte Postfaecher/Passwoerter griffen erst nach einem
+        # Neustart). ``quelle`` -> [(Anzeigename, ImapConfig, Mandant-Id)].
+        self.quelle = quelle
         self._lock = threading.Lock()
         self._jetzt = threading.Event()
         self._stop = threading.Event()
@@ -41,6 +57,15 @@ class Abholer:
         self.status = {"aktiv": minuten > 0, "minuten": minuten, "letzte_pruefung": "",
                        "laeuft": False, "neu_gesamt": 0, "zuletzt_neu": 0,
                        "mails_zuletzt": 0, "fehler": ""}
+
+    def eingerichtet(self) -> bool:
+        """Gibt es (jetzt gerade) mindestens ein Postfach?"""
+        if self.quelle is None:
+            return True
+        try:
+            return bool(self.quelle())
+        except Exception:  # noqa: BLE001
+            return False
 
     def _call_fetch(self):
         if self._fetch is not None:
@@ -64,6 +89,11 @@ class Abholer:
         fehler_teile: list[str] = []
         je_postfach: list[dict] = []
         for label, cfg, mandant_id in self.mailboxes:
+            if not getattr(cfg, "password", "x"):
+                je_postfach.append({"postfach": label, "ok": False, "fehler": PASSWORT_FEHLT,
+                                    "neu": 0, "mails": 0})
+                fehler_teile.append(f"{label}: {PASSWORT_FEHLT}")
+                continue
             try:
                 r = fetch(cfg=cfg, dest=self.dest, warten=False, store=self.store,
                          mandant_address_id=mandant_id)
@@ -80,6 +110,8 @@ class Abholer:
                                     "neu": 0, "mails": 0})
                 fehler_teile.append(f"{label}: {msg}")
         self.status["postfaecher"] = je_postfach
+        self.status["postfaecher_gesamt"] = len(je_postfach)
+        self.status["postfaecher_fehler"] = sum(1 for p in je_postfach if not p["ok"])
         return FetchResult(saved, mails, False, "; ".join(fehler_teile), human)
 
     def nur_abholen(self):
@@ -106,6 +138,19 @@ class Abholer:
         if not self._lock.acquire(blocking=False):
             return dict(self.status)
         try:
+            if self.quelle is not None:
+                try:
+                    self.mailboxes = list(self.quelle())
+                except Exception as e:  # noqa: BLE001
+                    self.mailboxes = []
+                    self.status["fehler"] = f"Postfach-Liste nicht lesbar: {type(e).__name__}: {e}"
+                    return dict(self.status)
+                if not self.mailboxes:
+                    self.status.update({"fehler": KEIN_POSTFACH, "postfaecher": [],
+                                        "postfaecher_gesamt": 0, "postfaecher_fehler": 0,
+                                        "zuletzt_neu": 0, "mails_zuletzt": 0,
+                                        "letzte_pruefung": time.strftime("%H:%M")})
+                    return dict(self.status)
             self.status["laeuft"] = True
             try:
                 res = self._call_fetch()
@@ -147,10 +192,53 @@ class Abholer:
     def anstossen(self) -> None:
         self._jetzt.set()
 
+    def _kennung(self):
+        """Aenderungen an Adresse, Mandant, Ordnern oder Passwort erkennen.
+
+        Das Passwort fliesst nur als nicht rueckfuehrbarer Digest in den
+        Arbeitsspeicher-Vergleich ein und wird weder gespeichert noch geloggt.
+        """
+        try:
+            signaturen = []
+            for label, cfg, mandant_id in self.quelle():
+                passwort = str(getattr(cfg, "password", "") or "")
+                passwort_digest = hashlib.blake2b(
+                    passwort.encode("utf-8"), digest_size=16
+                ).digest()
+                signaturen.append((
+                    str(label), str(getattr(cfg, "host", "")),
+                    int(getattr(cfg, "port", 0) or 0),
+                    str(getattr(cfg, "user", "")),
+                    bool(getattr(cfg, "ssl", True)),
+                    str(getattr(cfg, "source_folder", "")),
+                    str(getattr(cfg, "done_folder", "")),
+                    str(mandant_id or ""), passwort_digest,
+                ))
+            return tuple(sorted(signaturen))
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _warten(self) -> None:
+        """Bis zur naechsten Abholung warten. Mit ``quelle`` alle
+        ``PRUEF_SEKUNDEN`` nachsehen, ob neue Postfaecher dazugekommen sind --
+        dann nicht erst den vollen Takt abwarten (Aaron 26.10.2026)."""
+        gesamt = self.minuten * 60
+        if self.quelle is None:
+            self._jetzt.wait(gesamt)
+            return
+        vorher = self._kennung()
+        ende = time.monotonic() + gesamt
+        while not self._stop.is_set():
+            rest = ende - time.monotonic()
+            if rest <= 0 or self._jetzt.wait(min(PRUEF_SEKUNDEN, rest)):
+                return
+            if self._kennung() != vorher:
+                return
+
     def _schleife(self) -> None:
         while not self._stop.is_set():
             self.einmal()
-            self._jetzt.wait(self.minuten * 60)
+            self._warten()
             self._jetzt.clear()
 
     def start(self) -> None:
@@ -165,15 +253,24 @@ class Abholer:
 
 
 def aus_konfiguration(dest: Path, store=None, bei_neuen: Callable | None = None) -> Abholer | None:
-    """Abholer fuer die App -- nur, wenn mindestens ein Postfach eingerichtet
-    ist (ENV-Postfach 1 und/oder in ``store`` gepflegte, Entscheidung Aaron
-    15.10.2026). Ohne ``store`` (z.B. bestehende Tests) wird nur das alte
-    ENV-Postfach geprueft -- unveraendertes Verhalten."""
+    """Abholer fuer die App.
+
+    Mit ``store`` bleibt der Abholer auch ohne eingerichtetes Postfach aktiv:
+    so erkennt er spaetere Excel-Importe im laufenden Programm. Ohne ``store``
+    (z.B. CLI und bestehende Tests) wird nur das alte ENV-Postfach geprueft.
+    """
     from .config import ImapConfig, imap_poll_minutes
 
     if store is not None:
-        from .config import postfaecher as postfaecher_cfg
-        mailboxes = postfaecher_cfg(store)
+        # Bei deaktiviertem Polling und noch ganz leerer Konfiguration braucht
+        # es keinen Hintergrund-Ueberwacher. Sobald Auto-Polling aktiv ist,
+        # bleibt dieser auch ohne Postfach bestehen, damit spaetere Excel-
+        # Importe im laufenden Programm erkannt werden.
+        if imap_poll_minutes() <= 0:
+            from .config import postfaecher as postfaecher_cfg
+            if not postfaecher_cfg(store):
+                return None
+        return fuer_app(dest, store, bei_neuen=bei_neuen)
     else:
         mailboxes = [("Postfach 1 (ENV)", ImapConfig(), None)] if ImapConfig().configured else []
     if not mailboxes:
@@ -185,3 +282,23 @@ def aus_konfiguration(dest: Path, store=None, bei_neuen: Callable | None = None)
         # dieses Verhalten ueber ``self.status`` ohne ``postfaecher``-Key).
         return Abholer(dest, minuten, bei_neuen=bei_neuen)
     return Abholer(dest, minuten, bei_neuen=bei_neuen, mailboxes=mailboxes, store=store)
+
+
+def fuer_app(dest: Path, store, bei_neuen: Callable | None = None) -> Abholer:
+    """Abholer fuer die App: Postfach-Liste (ENV + Excel) bei jeder Abholung
+    neu lesen, damit neu importierte/geaenderte Konten ohne Neustart greifen."""
+    from .config import imap_poll_minutes
+    from .config import postfaecher as postfaecher_cfg
+
+    a = Abholer(dest, imap_poll_minutes(), bei_neuen=bei_neuen, store=store,
+                quelle=lambda: postfaecher_cfg(store))
+    try:
+        a.mailboxes = list(a.quelle()) or None   # Stand beim Start (Anzeige/Tests)
+        if not a.mailboxes:
+            a.status["fehler"] = KEIN_POSTFACH
+            a.status["postfaecher_gesamt"] = 0
+            a.status["postfaecher_fehler"] = 0
+    except Exception as e:  # noqa: BLE001 -- wird bei der ersten Abholung gemeldet
+        a.mailboxes = None
+        a.status["fehler"] = f"Postfach-Liste nicht lesbar: {type(e).__name__}: {e}"
+    return a
