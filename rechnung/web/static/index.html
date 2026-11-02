@@ -2443,12 +2443,26 @@ async function keineRechnungVonHand() {
   loadKeineRechnung();
 }
 
-async function postfachBericht() {
+async function postfachBericht(nr = 0) {
   show('scan');
   const w = $('#work'); w.className = '';
   w.innerHTML = '<p class="hint">Postfach wird gelesen (nur lesen, nichts wird verändert) …</p>';
-  const r = await api('/api/postfach-bericht');
+  const r = await api('/api/postfach-bericht?nr=' + encodeURIComponent(nr));
   const ab = r.abholung || {};
+  const pf = r.postfaecher || [];
+  const pfStatus = p => {
+    if (p.hinweis) return `<span style="color:#b07800">${esc(p.hinweis)}</span>`;
+    const l = p.letzte_abholung;
+    if (!l) return '<span class="hint">noch nicht abgeholt</span>';
+    return l.ok ? `<span style="color:#1c7550">OK</span> · ${l.mails ?? 0} Mail(s), ${l.neu ?? 0} neu`
+      : `<b style="color:#b22">Fehler: ${esc(l.fehler || '')}</b>`;
+  };
+  const nOk = pf.filter(p => !p.hinweis && p.letzte_abholung && p.letzte_abholung.ok).length;
+  const nFehler = pf.filter(p => !p.hinweis && p.letzte_abholung && !p.letzte_abholung.ok).length;
+  const nNicht = pf.filter(p => p.hinweis).length;
+  const pfZeilen = pf.map(p => `<tr${p.nr === r.nr && !p.hinweis ? ' style="background:#eef6f1"' : ''}>
+      <td>${esc(p.name || '')}</td><td>${esc(p.adresse || '–')}</td><td>${pfStatus(p)}</td>
+      <td>${p.nr !== null && p.nr !== undefined ? `<button class="ghost" onclick="postfachBericht(${p.nr})">Mails ansehen</button>` : ''}</td></tr>`).join('');
   const zeilen = (r.mails || []).map(m => `<tr>
       <td>${esc(m.datum || '')}</td><td>${esc(m.von || '')}</td><td>${esc(m.betreff || '')}</td>
       <td>${m.gelesen ? 'ja' : 'nein'}</td>
@@ -2469,6 +2483,8 @@ async function postfachBericht() {
       <tr><td>Andere Ordner</td><td>${esc((r.alle_ordner || []).join(' · '))}</td></tr>
       <tr><td>Eingang</td><td>${esc(r.eingang || '')}: ${(r.im_eingang || []).length} Datei(en)</td></tr>
     </table>
+    <h4>Alle Postfächer (${pf.length}): ${nOk} OK · ${nFehler} mit Fehler · ${nNicht} werden nicht abgeholt</h4>
+    <table><tr><th>Name</th><th>Adresse</th><th>Letzte Abholung</th><th></th></tr>${pfZeilen}</table>
     <h4>Programm</h4>
     <table>${Object.entries(r.system || {}).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(String(v))}</td></tr>`).join('')}</table>
     <h4>Letzte Mails im Ordner „${esc(r.ordner || '')}“</h4>

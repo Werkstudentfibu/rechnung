@@ -41,8 +41,10 @@ def _check_ionos() -> dict:
         return {"ok": None, "detail": "nicht konfiguriert (RECHNUNG_IMAP_*)"}
     import imaplib
 
+    from .ingest import _verbinden
+
     try:
-        M = imaplib.IMAP4_SSL(cfg.host, cfg.port) if cfg.ssl else imaplib.IMAP4(cfg.host, cfg.port)
+        M = _verbinden(cfg)
     except OSError as e:
         return {"ok": False, "detail": f"{type(e).__name__}: {e}"}
     try:

@@ -715,13 +715,45 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         return JSONResponse({"ergebnisse": out})
 
     @app.get("/api/postfach-bericht")
-    def postfach_bericht() -> JSONResponse:
+    def postfach_bericht(nr: int = 0) -> JSONResponse:
         """Je Mail im Postfach: wird sie abgeholt, und wenn nicht, warum
-        (ingest.bericht, nur lesend)."""
+        (ingest.bericht, nur lesend). Dazu ALLE Postfaecher mit ihrem letzten
+        Abholergebnis -- vorher sah man hier nur das ENV-Testpostfach, nicht
+        die ~50 per Excel eingespielten (Befund 02.11.2026). ``nr`` waehlt,
+        welches Postfach Mail fuer Mail gelesen wird."""
+        from .. import secrets as secrets_mod
+        from ..config import ImapConfig
+        from ..config import postfaecher as postfaecher_cfg
         from ..ingest import bericht
 
-        r = bericht(dest=samples)
-        r["abholung"] = dict(abholer.status) if abholer is not None else None
+        konten = postfaecher_cfg(store)
+        nr = nr if 0 <= nr < len(konten) else 0
+        r = bericht(cfg=konten[nr][1] if konten else None, dest=samples)
+        r["nr"] = nr
+        st = dict(abholer.status) if abholer is not None else None
+        r["abholung"] = st
+        letzte = {(x.get("adresse") or "").lower(): x
+                  for x in ((st or {}).get("postfaecher") or [])}
+        liste: list[dict] = []
+        env_cfg = ImapConfig()
+        if env_cfg.configured:
+            liste.append({"name": "Postfach 1 (ENV)", "adresse": env_cfg.user,
+                          "aktiv": True, "passwort": True})
+        for p in store.postfaecher():
+            liste.append({"name": p.label, "adresse": p.user, "aktiv": p.aktiv,
+                          "passwort": secrets_mod.has_password(store, p.id)})
+        abholbar = {c.user.lower(): i for i, (_l, c, _m) in enumerate(konten)}
+        for e in liste:
+            a = (e["adresse"] or "").lower()
+            e["nr"] = abholbar.get(a) if e["aktiv"] else None
+            e["letzte_abholung"] = letzte.get(a)
+            if not e["adresse"]:
+                e["hinweis"] = "keine E-Mail-Adresse – wird nicht abgeholt"
+            elif not e["aktiv"]:
+                e["hinweis"] = "deaktiviert – wird nicht abgeholt"
+            elif not e["passwort"]:
+                e["hinweis"] = "kein Passwort hinterlegt – wird nicht abgeholt"
+        r["postfaecher"] = liste
         r["eingang"] = str(samples)
         r["system"] = _systemstatus()
         r["im_eingang"] = [p.name for p in invoice_files(samples)]

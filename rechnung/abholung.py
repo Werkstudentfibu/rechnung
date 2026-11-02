@@ -90,14 +90,14 @@ class Abholer:
         je_postfach: list[dict] = []
         for label, cfg, mandant_id in self.mailboxes:
             if not getattr(cfg, "password", "x"):
-                je_postfach.append({"postfach": label, "ok": False, "fehler": PASSWORT_FEHLT,
+                je_postfach.append({"postfach": label, "adresse": getattr(cfg, "user", ""), "ok": False, "fehler": PASSWORT_FEHLT,
                                     "neu": 0, "mails": 0})
                 fehler_teile.append(f"{label}: {PASSWORT_FEHLT}")
                 continue
             try:
                 r = fetch(cfg=cfg, dest=self.dest, warten=False, store=self.store,
                          mandant_address_id=mandant_id)
-                je_postfach.append({"postfach": label, "ok": not r.error,
+                je_postfach.append({"postfach": label, "adresse": getattr(cfg, "user", ""), "ok": not r.error,
                                     "fehler": r.error, "neu": len(r.saved), "mails": r.mails})
                 saved += r.saved
                 human += r.human
@@ -106,7 +106,7 @@ class Abholer:
                     fehler_teile.append(f"{label}: {r.error}")
             except Exception as e:  # noqa: BLE001 -- ein Postfach darf die anderen nie blockieren
                 msg = f"{type(e).__name__}: {e}"
-                je_postfach.append({"postfach": label, "ok": False, "fehler": msg,
+                je_postfach.append({"postfach": label, "adresse": getattr(cfg, "user", ""), "ok": False, "fehler": msg,
                                     "neu": 0, "mails": 0})
                 fehler_teile.append(f"{label}: {msg}")
         self.status["postfaecher"] = je_postfach

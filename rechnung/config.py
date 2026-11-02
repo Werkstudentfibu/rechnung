@@ -113,6 +113,17 @@ def imap_poll_minutes() -> float:
         return 5.0
 
 
+def imap_timeout() -> float:
+    """Zeitgrenze in Sekunden je IMAP-Netzwerkschritt (Verbinden, Login,
+    Abruf). Ohne Grenze hing ein einziges nicht antwortendes Postfach die
+    komplette, nacheinander laufende Abholung aller ~50 Postfaecher auf
+    (Befund 02.11.2026). 0 = ohne Grenze (altes Verhalten)."""
+    try:
+        return max(0.0, float(os.environ.get("RECHNUNG_IMAP_TIMEOUT", "60")))
+    except ValueError:
+        return 60.0
+
+
 def inbox_dir() -> Path:
     """Ablage fuer per IMAP abgeholte PDFs (Standard: <data>/inbox)."""
     v = os.environ.get("RECHNUNG_INBOX")

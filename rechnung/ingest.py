@@ -644,6 +644,17 @@ def _ids(M, crit: str) -> list[bytes]:
     return data[0].split() if typ == "OK" and data and data[0] else []
 
 
+def _verbinden(cfg: ImapConfig):
+    """IMAP-Verbindung mit Zeitgrenze (``RECHNUNG_IMAP_TIMEOUT``): ein
+    haengendes Postfach soll die Abholung der uebrigen nicht blockieren."""
+    from .config import imap_timeout
+
+    t = imap_timeout() or None
+    if cfg.ssl:
+        return imaplib.IMAP4_SSL(cfg.host, cfg.port, timeout=t)
+    return imaplib.IMAP4(cfg.host, cfg.port, timeout=t)
+
+
 def fetch(cfg: ImapConfig | None = None, dest: Path | None = None,
           dry_run: bool = False, limit: int = 0, store=None,
           warten: bool = True, mandant_address_id: str | None = None) -> FetchResult:
@@ -659,7 +670,7 @@ def fetch(cfg: ImapConfig | None = None, dest: Path | None = None,
     if not warten and lock.is_locked(data_dir()):
         return FetchResult([], 0, dry_run, "Nachtlauf-Sperre aktiv (data\\nacht.lock) -- wartet")
     lock.wait_until_unlocked(data_dir())
-    M = imaplib.IMAP4_SSL(cfg.host, cfg.port) if cfg.ssl else imaplib.IMAP4(cfg.host, cfg.port)
+    M = _verbinden(cfg)
     saved: list[str] = []
     to_human: list[str] = []
     mails = 0
@@ -725,7 +736,7 @@ def check_connection(cfg: ImapConfig | None = None) -> dict:
     if not cfg.configured:
         return {"ok": None, "detail": "IMAP nicht konfiguriert (RECHNUNG_IMAP_*)", "folders": []}
     try:
-        M = imaplib.IMAP4_SSL(cfg.host, cfg.port) if cfg.ssl else imaplib.IMAP4(cfg.host, cfg.port)
+        M = _verbinden(cfg)
     except OSError as e:
         return {"ok": False, "detail": f"{type(e).__name__}: {e}", "folders": []}
     try:
@@ -764,7 +775,7 @@ def bericht(cfg: ImapConfig | None = None, dest: Path | None = None, anzahl: int
     bekannte = _bekannte_laden()
     grenze = time.time() - LESEFENSTER_TAGE * 86400
     try:
-        M = imaplib.IMAP4_SSL(cfg.host, cfg.port) if cfg.ssl else imaplib.IMAP4(cfg.host, cfg.port)
+        M = _verbinden(cfg)
     except OSError as e:
         out["fehler"] = f"{type(e).__name__}: {e}"
         return out
