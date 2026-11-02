@@ -215,7 +215,12 @@ def _aktualisieren(root: Path, data_root: Path | None, tests: bool, python: str)
         return Ergebnis("kein_git", meldung="Programm laeuft nicht aus einem Git-Klon (z.B. als rechnung.exe).")
 
     try:
-        f = _git(root, "fetch", "--quiet", "origin", BRANCH)
+        # Explizite Zielangabe: ohne ``remote.origin.fetch`` in der Klon-
+        # Konfiguration (Laptop, Befund 02.11.2026) aktualisierte ein blankes
+        # ``fetch origin release`` nur FETCH_HEAD, nie origin/release -- das
+        # Programm meldete dann wochenlang "schon aktuell".
+        f = _git(root, "fetch", "--quiet", "origin",
+                 f"+refs/heads/{BRANCH}:refs/remotes/origin/{BRANCH}")
     except (OSError, subprocess.TimeoutExpired) as exc:
         return Ergebnis("offline", meldung=f"Update-Server nicht erreichbar: {exc}")
     if f.returncode != 0:

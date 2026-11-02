@@ -210,3 +210,14 @@ def test_testsatz_echter_prozess(tmp_path):
     assert fehler == "" and bericht["anzahl"] == 0
     assert bericht["filter"]["nur_ohne_ki"] is True
     assert not (data / "berichte").exists()
+
+
+def test_neuer_stand_auch_ohne_fetch_regel_im_klon(repos):
+    """Laptop 02.11.2026: im Klon fehlte ``remote.origin.fetch`` -- das Update
+    meldete trotz neuem Stand auf GitHub wochenlang "schon aktuell"."""
+    dev, laptop, data = repos
+    git(laptop, "config", "--unset-all", "remote.origin.fetch")
+    commit(dev, "test_d.py", PASSING, "Stand nach fehlender Fetch-Regel")
+    e = selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    assert e.status == "aktualisiert", e.meldung
+    assert git(laptop, "rev-parse", "HEAD") == git(dev, "rev-parse", "HEAD")
