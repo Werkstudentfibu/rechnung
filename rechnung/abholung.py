@@ -88,7 +88,23 @@ class Abholer:
         mails = 0
         fehler_teile: list[str] = []
         je_postfach: list[dict] = []
-        for label, cfg, mandant_id in self.mailboxes:
+        # Fortschritt LAUFEND zeigen (Aaron 05.11.2026: erste Abholung mit
+        # langem Lesefenster ueber ~50 Postfaecher dauert, die Uebersicht
+        # stand solange auf "noch nicht abgeholt"). Noch nicht erreichte
+        # Postfaecher behalten ihr Ergebnis aus der vorigen Runde.
+        vorher = {(x.get("adresse") or "").lower(): x
+                  for x in (self.status.get("postfaecher") or [])}
+        gesamt = len(self.mailboxes)
+
+        def zwischenstand(i: int) -> None:
+            rest = [vorher[a] for a in ((getattr(c, "user", "") or "").lower()
+                                        for _l, c, _m in self.mailboxes[i:]) if a in vorher]
+            self.status["postfaecher"] = je_postfach + rest
+            self.status["fortschritt"] = f"{i}/{gesamt}"
+
+        for i, (label, cfg, mandant_id) in enumerate(self.mailboxes):
+            zwischenstand(i)
+            self.status["aktuelles_postfach"] = label
             if not getattr(cfg, "password", "x"):
                 je_postfach.append({"postfach": label, "adresse": getattr(cfg, "user", ""), "ok": False, "fehler": PASSWORT_FEHLT,
                                     "neu": 0, "mails": 0})
@@ -110,6 +126,8 @@ class Abholer:
                                     "neu": 0, "mails": 0})
                 fehler_teile.append(f"{label}: {msg}")
         self.status["postfaecher"] = je_postfach
+        self.status["fortschritt"] = ""
+        self.status["aktuelles_postfach"] = ""
         self.status["postfaecher_gesamt"] = len(je_postfach)
         self.status["postfaecher_fehler"] = sum(1 for p in je_postfach if not p["ok"])
         return FetchResult(saved, mails, False, "; ".join(fehler_teile), human)

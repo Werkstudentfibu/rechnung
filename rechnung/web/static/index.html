@@ -2495,7 +2495,7 @@ async function postfachBericht(nr = 0) {
       <tr><td>Postfach</td><td>${esc(r.postfach || '')} · Ordner „${esc(r.ordner || '')}“ · ${r.anzahl_im_ordner ?? '?'} Mail(s) darin</td></tr>
       <tr><td>Verbindung</td><td>${r.ok ? 'OK' : 'FEHLER: ' + esc(r.fehler || '')}</td></tr>
       <tr><td>Automatische Abholung</td><td>${ab.minuten ? `alle ${ab.minuten} Min.` : 'aus'} · zuletzt ${esc(ab.letzte_pruefung || '–')}
-        · ${ab.mails_zuletzt ?? 0} Mail(s), ${ab.zuletzt_neu ?? 0} neu ${ab.laeuft ? '· <b>läuft gerade</b>' : ''}
+        · ${ab.mails_zuletzt ?? 0} Mail(s), ${ab.zuletzt_neu ?? 0} neu ${ab.laeuft ? '· <b>läuft gerade</b>' + (ab.fortschritt ? ` (Postfach ${esc(ab.fortschritt)}: ${esc(ab.aktuelles_postfach || '')})` : '') : ''}
         ${ab.fehler ? '<br><b>Fehler: ' + esc(ab.fehler) + '</b>' : ''}</td></tr>
       ${r.nachtsperre ? '<tr><td>Sperre</td><td><b>Nachtlauf-Sperre aktiv – Abholung wartet</b></td></tr>' : ''}
       <tr><td>Andere Ordner</td><td>${esc((r.alle_ordner || []).join(' · '))}</td></tr>

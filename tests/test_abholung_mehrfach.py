@@ -74,3 +74,27 @@ def test_aus_konfiguration_ohne_store_bleibt_einzelpostfach_verhalten(tmp_path: 
                         lambda: ImapConfig(host="x", user="u", password="p"))
     a = aus_konfiguration(tmp_path)
     assert a is not None and a.mailboxes is None
+
+
+def test_fortschritt_laufend_sichtbar(tmp_path: Path, monkeypatch):
+    """Aaron 05.11.2026: erste lange Abholung ueber ~50 Postfaecher -- die
+    Uebersicht zeigt schon waehrend des Laufs, was erledigt ist."""
+    mailboxes = [(f"Postfach {x}", ImapConfig(host="x", user=f"{x}@example.de", password="p"), x)
+                 for x in "abc"]
+    a = Abholer(tmp_path, 5, mailboxes=mailboxes)
+    a.status["postfaecher"] = [{"postfach": "Postfach c", "adresse": "c@example.de",
+                                "ok": True, "fehler": "", "neu": 0, "mails": 3}]
+    gesehen = []
+
+    def fake_fetch(cfg=None, **_k):
+        gesehen.append((a.status["fortschritt"], a.status["aktuelles_postfach"],
+                        [p["adresse"] for p in a.status["postfaecher"]]))
+        return FetchResult([], 0, False)
+
+    import rechnung.ingest as ingest_mod
+    monkeypatch.setattr(ingest_mod, "fetch", fake_fetch)
+    st = a.einmal()
+    assert gesehen[0] == ("0/3", "Postfach a", ["c@example.de"])   # altes Ergebnis von c bleibt
+    assert gesehen[1] == ("1/3", "Postfach b", ["a@example.de", "c@example.de"])
+    assert gesehen[2][:2] == ("2/3", "Postfach c")
+    assert st["fortschritt"] == "" and len(st["postfaecher"]) == 3
