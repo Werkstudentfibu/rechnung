@@ -35,6 +35,11 @@ class ImapConfig:
     source_folder: str = os.environ.get("RECHNUNG_IMAP_FOLDER", "INBOX")
     # Nach erfolgreichem Abholen dorthin verschieben (leer = nur als gelesen markieren)
     done_folder: str = os.environ.get("RECHNUNG_IMAP_DONE_FOLDER", "")
+    # Nur lesen (Aaron 05.11.2026): Postfaecher gehoeren ABBYY FlexiCapture,
+    # das Programm liest dessen Ordner "Done"/"Error" mit -- nichts als
+    # gelesen markieren, nichts verschieben. Abgeholt wird dann nur, was im
+    # Lesefenster (RECHNUNG_IMAP_TAGE) liegt und noch nicht bekannt ist.
+    nur_lesen: bool = _b("RECHNUNG_IMAP_NUR_LESEN", False)
     # nur Anhaenge mit diesen Endungen (kommagetrennt). .xml fuer reine
     # E-Rechnungen (XRechnung); ZUGFeRD steckt im PDF und braucht das nicht.
     # Bild-Endungen (Scans als Foto/TIFF) laufen in der Pipeline automatisch
@@ -270,6 +275,16 @@ def imap() -> ImapConfig:
     return ImapConfig()
 
 
+def postfach_ordner() -> str:
+    """``RECHNUNG_POSTFACH_ORDNER`` (kommagetrennt, z.B. ``Done,Error``):
+    Abholordner fuer alle per Excel eingespielten Postfaecher, die keinen
+    eigenen Ordner haben (Standard INBOX). Gesetzt -> diese Postfaecher
+    werden nur gelesen (Aaron 05.11.2026: INBOX ist immer leer, weil ABBYY
+    FlexiCapture die Mails sofort nach Done/Error verschiebt)."""
+    teile = [t.strip() for t in os.environ.get("RECHNUNG_POSTFACH_ORDNER", "").split(",")]
+    return ",".join(t for t in teile if t)
+
+
 def postfaecher(store) -> list[tuple[str, ImapConfig, str | None]]:
     """Alle konfigurierten Postfaecher (Entscheidung Aaron 15.10.2026: ~50
     IONOS-Postfaecher, je Mandant eines): das alte Einzelpostfach ueber
@@ -285,13 +300,20 @@ def postfaecher(store) -> list[tuple[str, ImapConfig, str | None]]:
     env_cfg = ImapConfig()
     if env_cfg.configured:
         out.append(("Postfach 1 (ENV)", env_cfg, None))
+    ordner = postfach_ordner()
     for p in store.postfaecher():
         if not p.aktiv or not p.user:
             continue
-        cfg = ImapConfig(host=p.host, port=p.port, user=p.user,
-                         password=secrets_mod.get_password(store, p.id),
-                         ssl=p.ssl, source_folder=p.source_folder,
-                         done_folder=p.done_folder)
+        eigener = (p.source_folder or "INBOX").upper() != "INBOX"
+        if ordner and not eigener:
+            cfg = ImapConfig(host=p.host, port=p.port, user=p.user,
+                             password=secrets_mod.get_password(store, p.id),
+                             ssl=p.ssl, source_folder=ordner, done_folder="", nur_lesen=True)
+        else:
+            cfg = ImapConfig(host=p.host, port=p.port, user=p.user,
+                             password=secrets_mod.get_password(store, p.id),
+                             ssl=p.ssl, source_folder=p.source_folder,
+                             done_folder=p.done_folder)
         out.append((p.label, cfg, p.mandant_id or None))
     return out
 
