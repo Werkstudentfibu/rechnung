@@ -154,3 +154,66 @@ def test_einseitige_vorlage_bleibt_einseitig(tmp_path):
     assert spec is not None
     got = apply_line_items(load(soll["path"]), spec)
     assert len(got) == 4
+
+
+# ---- End-to-End: Rahmen je Seite -> speichern -> lernen -> naechste Rechnung ----
+
+def test_ende_zu_ende_rahmen_speichern_lernen_und_andere_seitenzahl(tmp_path):
+    pytest.importorskip("fastapi.testclient")
+    from fastapi.testclient import TestClient
+
+    from rechnung import learn, pipeline
+    from rechnung.identify import Supplier
+    from rechnung.store import Store
+    from rechnung.web import server as server_mod
+
+    store = Store(tmp_path / "data")
+    store.save_supplier(Supplier(id="muster", name="Muster Handels GmbH", ustids=["DE123456789"]))
+    samples = tmp_path / "s"
+    samples.mkdir()
+    kw = dict(kopf_folgeseiten=False, seitenkopf=True, uebertrag_oben=True)
+    a = synth.make_multipage_table_invoice(samples / "a.pdf", seiten=3,
+                                           positionen_je_seite=[5, 4, 3], **kw)
+    client = TestClient(server_mod.create_app(store, samples))
+
+    # Rahmen je Seite, bewusst in falscher Reihenfolge gezogen
+    boxes = _rahmen(load(a["path"]), mit_uebertrag=True)
+    r = client.post("/api/tabelle/markieren", json={"file": "a.pdf", "boxes": [boxes[2], boxes[0], boxes[1]]}).json()
+    assert [i["beschreibung"] for i in r["items"]] == _soll_namen(a)
+    assert round(sum(i["gesamt_netto"] for i in r["items"]), 2) == a["netto"]
+
+    # speichern (Positionen uebernehmen), jede Zeile bestaetigt
+    zeilen = [{k: v for k, v in i.items() if not k.startswith("_")} for i in r["items"]]
+    assert client.post("/api/tabelle", json={
+        "file": "a.pdf", "art": "positionen", "rows": zeilen,
+        "zeilen_status": ["bestaetigt"] * len(zeilen)}).status_code == 200
+
+    # Bestaetigen -> Vorlage lernt die mehrseitige Tabelle
+    doc_a = load(a["path"])
+    res = pipeline.process(a["path"], store, use_llm=False)
+    res.supplier_id = "muster"
+    store.mark_confirmed(res.sha256, "tester")
+    outcome = learn.learn_from_confirmed(store, res, doc_a, "tester")
+    assert "_positionen" in outcome.learned, outcome.skipped
+    spec = store.template(outcome.template_id).line_items
+    assert spec.folgeseiten is True
+
+    # naechste Rechnung desselben Lieferanten: 2 Seiten, andere Zeilenzahl
+    b = synth.make_multipage_table_invoice(samples / "b.pdf", seiten=2,
+                                           positionen_je_seite=[6, 5], rechnungsnr="RE-B", **kw)
+    res_b = pipeline.process(b["path"], store, use_llm=False)
+    assert res_b.template_id == outcome.template_id
+    assert [i["beschreibung"] for i in res_b.line_items] == _soll_namen(b)
+
+
+def test_rahmen_tabelle_ohne_pos_spalte_mit_ganzzahl_betraegen_ist_lernbar(tmp_path):
+    """Befund 05.11.2026: die Rahmen-Markierung liefert Ganzzahlen als Float
+    (19.0, 1.0) und nummeriert ``pos`` selbst durch -- beides machte jede so
+    erfasste Tabelle "nicht reproduzierbar", die Vorlage lernte nie Positionen."""
+    from rechnung import learn
+
+    soll = synth.make_multipage_table_invoice(tmp_path / "m.pdf", seiten=1, positionen_je_seite=3)
+    doc = load(soll["path"])
+    items = tabelle.anwenden_markierung(tabelle.markiere_tabelle(doc, _rahmen(doc)))
+    assert items[0]["pos"] == 1 and items[0]["mwst_satz"] == 19.0
+    assert learn.learn_line_items(doc, items) is not None

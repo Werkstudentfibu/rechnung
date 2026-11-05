@@ -316,6 +316,9 @@ def same_value(raw: str, value, value_type: str) -> bool:
             return False
         return want is not None and parse_date(raw) == want
     if value_type in ("number", "iban", "ustid"):
+        # 19.0 (aus einer Betragsspalte gelesen) ist die Nummer "19", nicht "190"
+        if isinstance(value, float) and value == int(value):
+            value = int(value)
         a, b = compact(raw), compact(value)
         return bool(a) and a == b
     return bool(norm(raw)) and norm(raw) == norm(str(value))

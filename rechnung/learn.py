@@ -352,6 +352,19 @@ def _match_header_words(header_line: list[Word], col_spans: dict[str, list[Word]
 
 
 def learn_line_items(doc: Document, items: list[dict], store=None) -> LineItemSpec | None:
+    """Siehe ``_learn_line_items``. Steht die Positionsnummer nicht im PDF (die
+    Rahmen-Markierung und die Anzeige nummerieren fehlende ``pos`` selbst
+    durch 1..n), wird ohne diese erfundene Spalte noch einmal gelernt -- sonst
+    liesse sich eine Tabelle ohne Pos.-Spalte nie als Vorlage anlernen."""
+    spec = _learn_line_items(doc, items, store)
+    if spec is None and items and all(_value_equiv(it.get("pos"), i)
+                                      for i, it in enumerate(items, 1)):
+        spec = _learn_line_items(doc, [{k: v for k, v in it.items() if k != "pos"} for it in items],
+                                 store)
+    return spec
+
+
+def _learn_line_items(doc: Document, items: list[dict], store=None) -> LineItemSpec | None:
     """``LineItemSpec`` aus bestaetigten Positionen ableiten: jede Position
     im PDF wiederfinden (Werte -> Zeile), daraus die Kopfzeile (Label-
     Woerter oberhalb der ersten Position), Spalten-x-Bereiche
