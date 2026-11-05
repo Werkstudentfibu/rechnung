@@ -5,6 +5,7 @@ Laeuft nur auf 127.0.0.1. Keine Auth (Einzelplatz-Werkzeug).
 
 from __future__ import annotations
 
+import collections
 import copy
 import hashlib
 import io
@@ -46,6 +47,7 @@ from ..pipeline import (CONF_MIN, EXTRACT_EINVOICE, EXTRACT_TEMPLATE, MASTER_FIE
                         confirm_supplier, discard_supplier, dispatch, invoice_files,
                         journal_rows, journal_totals, load_document, origin,
                         set_positionsmodus)
+from ..listencache import LABEL_WIRD_GELESEN, STATUS_WIRD_GELESEN, Listencache
 from ..store import Store
 from ..suggest import similar_suppliers
 from ..template import (STANDARD_FIELDS, ausgeblendet, sichtbare_felder, Anchor, Column, FieldResult, LineItemSpec,
@@ -491,8 +493,32 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if pfade:
             vorverarbeiter.neu_auswerten(pfade)
 
+    # Zwischenspeicher der Liste (listencache.py): /api/scan rechnet nicht mehr
+    # bei jedem Laden jede Datei neu, sondern liefert aus data/liste-cache.json
+    def _liste_rechnen(p: Path) -> dict | None:
+        if not p.is_file():
+            return None
+        # Echte Verarbeitung des Posteingangs (wie CLI "rechnung scan") --
+        # legt bei einem unbekannten Lieferanten einen Entwurf an.
+        r = _process(p, use_llm=False, create_draft_supplier=True)
+        # Unsichere Rechnungen in den Ordner "Menschliche Bearbeitung"
+        dispatch(r, store)
+        return r.to_dict()
+
+    liste = Listencache(store, samples, _liste_rechnen,
+                        pause=vorverarbeiter.mensch_aktiv if vorverarbeiter else None)
+    app.state.liste = liste
+    zuletzt_offen: collections.deque = collections.deque(maxlen=5)   # vom Menschen geoeffnet
+    if vorverarbeiter is not None and samples.is_dir():
+        liste.einreihen(invoice_files(samples))      # Liste schon beim Start vorwaermen
+
+    def _bei_neuen(paths) -> None:
+        if vorverarbeiter is not None:
+            vorverarbeiter.einreihen(paths)
+            liste.einreihen(paths)
+
     abholer = aus_konfiguration(samples, store=store,
-                                bei_neuen=vorverarbeiter.einreihen if vorverarbeiter else None)
+                                bei_neuen=_bei_neuen if vorverarbeiter else None)
     if abholer is not None:
         abholer.start()
 
@@ -843,16 +869,11 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         #
         # ``sortierung`` ("lernwert" | "eingang") und ``bereite_zuerst``
         # (vorbereitung.py): bereite Rechnungen oben, darin nach Lernwert.
-        res_je_datei: dict[str, dict] = {}
         split.prepare_folder(samples, store)
         dateien = invoice_files(samples)
-        for p in dateien:
-            # Echte Verarbeitung des Posteingangs (wie CLI "rechnung scan") --
-            # legt bei einem unbekannten Lieferanten einen Entwurf an.
-            r = _process(p, use_llm=False, create_draft_supplier=True)
-            # Unsichere Rechnungen in den Ordner "Menschliche Bearbeitung"
-            dispatch(r, store)
-            res_je_datei[p.name] = r.to_dict()
+        # Aus dem Zwischenspeicher (listencache.py); Neues/Veraltetes rechnet ein
+        # kleines Zeitbudget direkt, der Rest im Hintergrund.
+        res_je_datei, im_hintergrund = liste.abfrage(dateien, heiss=set(zuletzt_offen))
         # Was eben aus dem Eingang genommen wurde, gehoert nicht in die Liste
         dateien = [p for p in dateien if p.is_file()]
         if vorverarbeiter is not None:
@@ -874,7 +895,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             out.append(d)
         return JSONResponse({
             "results": out,
-            "status_labels": STATUS_LABELS,
+            "status_labels": {**STATUS_LABELS, STATUS_WIRD_GELESEN: LABEL_WIRD_GELESEN},
+            "aktualisiert_im_hintergrund": im_hintergrund,
             "vorbereitung": _vorbereitung_uebersicht(zst, eintraege),
             "fields": {k: {"value_type": v[0], "required": v[1]}
                        for k, v in sichtbare_felder().items()},
@@ -896,6 +918,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         return JSONResponse({
             **_vorbereitung_uebersicht(zst, liste_stand["eintraege"]),
             "dateien": {n: v["zustand"] for n, v in zst.items()},
+            "aktualisiert_im_hintergrund": liste.offen(),
             "fehler": vorverarbeiter.status["fehler"] if vorverarbeiter else ""})
 
     @app.get("/api/invoice")
@@ -909,6 +932,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         ``zeigeAdresse()``) -- die Lieferantensuche laeuft dann unter dieser
         Adresse neu (Lieferant je Rechnungsadresse, 09.10.2026)."""
         path = _resolve(file)
+        zuletzt_offen.append(path.name)       # Liste rechnet diese Datei immer sofort neu
         if einvoice.load(path) is not None:
             return JSONResponse(_einvoice_view(path))
         doc, ocr_res = load_document(path, store)

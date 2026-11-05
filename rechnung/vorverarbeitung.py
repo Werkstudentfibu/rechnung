@@ -87,6 +87,9 @@ class Vorverarbeiter:
             with self._sperren_lock:
                 self._mensch -= 1
 
+    def mensch_aktiv(self) -> bool:
+        return self._mensch > 0
+
     def in_arbeit(self) -> set[str]:
         """Namen der Dateien, die gerade laufen oder eingereiht sind."""
         namen = set(self._geplant)

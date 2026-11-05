@@ -56,6 +56,7 @@
   .li-vorschlag:hover { background: #ffdd70; }
 
   .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #ddd; }
+  .badge.wird_gelesen { background: #e8e8e8; color: #555; }
   .badge.auto { background: #c9ecd6; } .badge.review { background: #ffe5b4; }
   .badge.unknown_supplier, .badge.no_template { background: #f7d3d3; }
   .badge.zurueckgestellt { background: #f5222d; color: #fff; }
@@ -423,6 +424,7 @@ const nz = v => (v === null || v === undefined || v === '') ? '' : v;
 const SORT = { lernwert: localStorage.getItem('sortLernwert') !== '0',
                bereite: localStorage.getItem('bereiteZuerst') !== '0' };
 let VB = null;   // letzte Vorbereitungs-Uebersicht (Zaehler, ob die Vorbereitung laeuft)
+let LISTE_OFFEN = 0, LISTE_TIMER = null;   // Dateien, die der Server noch im Hintergrund neu liest
 function setSort() {
   SORT.bereite = $('#vb-bereite').checked;
   SORT.lernwert = $('#vb-sort').value === 'lernwert';
@@ -433,6 +435,7 @@ function setSort() {
 function vbText(v) {
   if (!v) return '';
   let t = `${v.bereit} bereit zur Prüfung, ${v.in_vorbereitung} in Vorbereitung`;
+  if (LISTE_OFFEN) t += ` · ${LISTE_OFFEN} werden gerade aktualisiert`;
   if (v.wartet) t += `, ${v.wartet} warten`;
   if (v.fehler) t += `, ${v.fehler} Fehler`;
   if (!v.aktiv && !v.bereit && v.gesamt) t += ' (Vorbereitung im Hintergrund ist aus)';
@@ -456,6 +459,12 @@ function listKopf(v) {
 async function loadList() {
   const d = await api(`/api/scan?sortierung=${SORT.lernwert ? 'lernwert' : 'eingang'}&bereite_zuerst=${SORT.bereite}`);
   VB = d.vorbereitung; vbTitel(VB);
+  LISTE_OFFEN = d.aktualisiert_im_hintergrund || 0;
+  // Der Server rechnet Neues/Veraltetes im Hintergrund nach: Liste kurz danach erneut holen
+  clearTimeout(LISTE_TIMER);
+  if (LISTE_OFFEN) LISTE_TIMER = setTimeout(() => {
+    if (!document.hidden && $('#v-scan').classList.contains('active')) loadList().catch(() => {});
+  }, 4000);
   const auto = d.results.filter(r => r.status === 'auto').length;
   $('#stats').textContent = `${d.results.length} PDF · ${auto} auto`;
   api('/api/menschlich').then(h =>
