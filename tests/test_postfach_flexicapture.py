@@ -72,7 +72,27 @@ def test_fehlender_ordner_blockiert_die_anderen_nicht(env, monkeypatch):
     cfg = dataclasses.replace(cfg, source_folder="Gibtsnicht,Done", nur_lesen=True)
     fake = FakeOrdner({"Done": {b"1": _pdf("RE-done.pdf")}})
     res = _run(fake, cfg, store, inbox, monkeypatch)
-    assert res.mails == 1 and "Gibtsnicht" in res.error
+    assert res.mails == 1 and res.error == ""     # ein Ordner fehlt: kein Fehler
+
+
+def test_alle_ordner_fehlen_ist_fehler(env, monkeypatch):
+    """Testpostfach ohne FlexiCapture-Ordner: Fehler, nicht still 0."""
+    cfg, store, inbox = env
+    cfg = dataclasses.replace(cfg, source_folder="Done,Error", nur_lesen=True)
+    fake = FakeOrdner({"INBOX": {b"1": _pdf("RE-x.pdf")}})
+    res = _run(fake, cfg, store, inbox, monkeypatch)
+    assert res.mails == 0 and "Ordner nicht vorhanden: Done, Error" in res.error
+    monkeypatch.setattr(ingest.imaplib, "IMAP4_SSL", lambda *a, **k: fake)
+    assert "Done, Error" in ingest.bericht(cfg, inbox)["fehler"]
+
+
+def test_bericht_ueberspringt_fehlenden_ordner(env, monkeypatch):
+    cfg, store, inbox = env
+    cfg = dataclasses.replace(cfg, source_folder="Done,Error", nur_lesen=True)
+    fake = FakeOrdner({"Done": {b"1": _pdf("RE-a.pdf")}})
+    monkeypatch.setattr(ingest.imaplib, "IMAP4_SSL", lambda *a, **k: fake)
+    r = ingest.bericht(cfg, inbox)
+    assert r["ok"] and r["je_ordner"] == {"Done": 1} and r["fehlende_ordner"] == ["Error"]
 
 
 def test_postfaecher_nutzen_ordner_aus_env(env, monkeypatch):

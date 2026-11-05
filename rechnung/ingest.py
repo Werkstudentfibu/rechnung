@@ -685,8 +685,7 @@ def _fetch_ordner(M, ordner: str, cfg: ImapConfig, dest: Path, store, dry_run: b
     # geoeffnet = gelesen, war vorher unsichtbar).
     typ, _ = M.select(ordner, readonly=cfg.nur_lesen)
     if typ != "OK":
-        errors.append(f"Ordner '{ordner}' nicht vorhanden")
-        return 0
+        return -1   # Ordner fehlt -- Fehler erst, wenn KEINER da ist (fetch)
     # nur lesen: ungelesen/gelesen spielt keine Rolle (fremdes Programm),
     # es zaehlt nur das Lesefenster + "noch nicht abgeholt"
     ungelesen = [] if cfg.nur_lesen else _ids(M, "UNSEEN")
@@ -750,9 +749,19 @@ def fetch(cfg: ImapConfig | None = None, dest: Path | None = None,
     try:
         M.login(cfg.user, cfg.password)
         bekannte = _bekannte_laden()
+        # Fehlende Ordner nur melden, wenn gar keiner da ist: dieselbe
+        # Einstellung (z.B. Done,Error) gilt fuer alle Postfaecher, auch fuer
+        # Test-/Einzelpostfaecher ohne FlexiCapture (Laptop 05.11.2026).
+        fehlend = []
         for ordner in _ordner(cfg):
-            mails += _fetch_ordner(M, ordner, cfg, dest, store, dry_run, limit,
-                                   mandant_address_id, bekannte, saved, to_human, errors)
+            n = _fetch_ordner(M, ordner, cfg, dest, store, dry_run, limit,
+                              mandant_address_id, bekannte, saved, to_human, errors)
+            if n < 0:
+                fehlend.append(ordner)
+            else:
+                mails += n
+        if fehlend and len(fehlend) == len(_ordner(cfg)):
+            errors.append("Ordner nicht vorhanden: " + ", ".join(fehlend))
     except (imaplib.IMAP4.error, OSError) as e:
         return FetchResult(saved, mails, dry_run, f"{type(e).__name__}: {e}", to_human)
     finally:
@@ -826,11 +835,14 @@ def bericht(cfg: ImapConfig | None = None, dest: Path | None = None, anzahl: int
         for ordner in _ordner(cfg):
             typ, _ = M.select(ordner, readonly=True)
             if typ != "OK":
-                out["fehler"] = f"Ordner '{ordner}' nicht vorhanden"
-                return out
+                out.setdefault("fehlende_ordner", []).append(ordner)
+                continue
             alle = _ids(M, "ALL")
             out["je_ordner"][ordner] = len(alle)
             liste += [(ordner, n) for n in reversed(alle[-anzahl:])]
+        if not out["je_ordner"]:
+            out["fehler"] = "Ordner nicht vorhanden: " + ", ".join(out.get("fehlende_ordner", []))
+            return out
         out["anzahl_im_ordner"] = sum(out["je_ordner"].values())
         aktuell = None
         for ordner, num in liste:
