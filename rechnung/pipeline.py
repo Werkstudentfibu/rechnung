@@ -1618,6 +1618,16 @@ def _process(path: str | Path, store: Store, use_llm: bool = True,
         with timer.stage("vorlage"):
             res.line_items = positionen.normalize_columns(apply_line_items(doc, tpl.line_items))
         _suggest_categories(res.line_items, tpl, store)
+    elif o is None or not o.partial:
+        # Vorlage ohne Positionstabelle (beim Lernen "nicht reproduzierbar",
+        # Normalfall nach der ersten Rechnung): dieselbe Erkennung wie ohne
+        # Vorlage versuchen, statt dauerhaft ohne Positionen zu bleiben
+        # (Befund Aaron 05.11.2026). Zweiter Versuch mit Netto/Brutto unten.
+        tbl_items, tbl_herkunft = _tabelle_rangfolge(doc, supplier, store, None, None, doc.text, None)
+        if tbl_items:
+            res.line_items = positionen.normalize_columns(tbl_items)
+            if tbl_herkunft:
+                res.hinweise.append(tbl_herkunft)
     machine_items = res.line_items
     _apply_line_item_correction(res, corrections)
     manuell_korrigiert = POSITIONEN_KEY in corrections
@@ -1629,6 +1639,21 @@ def _process(path: str | Path, store: Store, use_llm: bool = True,
         rk = rechnen.rechne(res.fields, res.line_items, doc.text)
         res.fields, res.line_items, res.tax_breakdown = rk.fields, rk.line_items, rk.tax_breakdown
         res.hinweise.extend(g for g in rk.gruende if g not in res.hinweise)
+        if (not res.line_items and not tpl.line_items and not manuell_korrigiert
+                and modus != POSITIONSMODUS_EINE_POSITION and (o is None or not o.partial)):
+            # wie ohne Vorlage: Tabelle, die nur an der fehlenden Summenpruefung
+            # scheiterte, mit jetzt bekanntem Netto/Brutto noch einmal pruefen
+            netto_fr, brutto_fr = res.fields.get("netto"), res.fields.get("brutto")
+            retry, retry_herkunft = _tabelle_rangfolge(
+                doc, supplier, store, _to_amount(netto_fr.value) if netto_fr else None,
+                _to_amount(brutto_fr.value) if brutto_fr else None, doc.text, None)
+            if retry:
+                rk2 = rechnen.rechne(res.fields, positionen.normalize_columns(retry), doc.text)
+                res.fields, res.line_items, res.tax_breakdown = (
+                    rk2.fields, rk2.line_items, rk2.tax_breakdown)
+                res.hinweise.extend(g for g in rk2.gruende if g not in res.hinweise)
+                if retry_herkunft and retry_herkunft not in res.hinweise:
+                    res.hinweise.append(retry_herkunft)
         _positionsmodus_abschliessen(res, supplier, manuell_korrigiert)
 
         res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, [addr_check],

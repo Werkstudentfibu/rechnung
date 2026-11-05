@@ -574,6 +574,7 @@ function applyInvoiceData(d) {
     langerBelegHinweis: (d.hinweise || []).find(h => h.startsWith('Langer Beleg')) || null,
     llmRejected: d.llm_rejected || {},
     kiPositionen: d.ki_positionen,
+    positionenGrund: d.positionen_grund || '',
     lineItems: (d.line_items || []).map(it => ({ ...it })),
     // Herkunft je Zeile aus der vollstaendig ergaenzten Aufstellung
     // (``tax_breakdown``, SPEC Baustein 2/3) in die editierbaren Zeilen
@@ -1799,7 +1800,9 @@ function renderLiPreviewBox(items) {
       }).join('')}${stCell(pr[ri])}
       <td>${fest ? '' : `<button class="danger" style="padding:0 4px" title="Zeile löschen" onclick="liDelRow(${ri})">×</button>`}</td></tr>`).join('')}
     </table></div>
-    ${items.length ? '' : STATE.kiPositionen === false
+    ${items.length ? '' : STATE.positionenGrund
+      ? `<div class="hint">Noch keine Position erkannt – Grund: ${esc(STATE.positionenGrund)}. Die Positionstabelle lässt sich über „Tabelle im PDF markieren“ anlernen.</div>`
+      : STATE.kiPositionen === false
       ? '<div class="hint">Noch keine Position erkannt – das Auslesen der Positionen per KI ist ausgeschaltet (<code>RECHNUNG_LLM_LINE_ITEMS=0</code> in rechnung.env). Einschalten oder die Positionstabelle für diesen Lieferanten anlernen.</div>'
       : '<div class="hint">Noch keine Position erkannt.</div>'}
     ${fest ? '' : `<div style="margin-top:4px">

@@ -37,7 +37,8 @@ from .. import vorlernen
 from ..billing import BillingAddress
 from ..guard import Guard
 from ..ocr import IMAGE_SUFFIXES
-from ..identify import (FIXED_FIELD_TYPES, POSITIONSMODI, POSITIONSMODUS_EINZELN, Supplier,
+from ..identify import (FIXED_FIELD_TYPES, POSITIONSMODI, POSITIONSMODUS_EINE_POSITION,
+                        POSITIONSMODUS_EINZELN, Supplier,
                         identify, supplier_from_doc)
 from ..pipeline import (CONF_MIN, EXTRACT_EINVOICE, EXTRACT_TEMPLATE, MASTER_FIELDS,
                         POSITIONEN_KEY, STATUS_LABELS, _positionsmodus_abschliessen,
@@ -313,6 +314,39 @@ def _ki_positionen() -> bool:
     from ..config import llm
     c = llm()
     return bool(c.enabled and c.line_items)
+
+
+def _positionen_grund(doc, line_items, supplier_obj, llm_rejected, store) -> str:
+    """Warum ist die Positionstabelle leer? (Diagnose fuer die Bearbeitungs-
+    ansicht -- nennt alle zutreffenden Gruende, rät nichts.) Leer, wenn es
+    Positionen gibt."""
+    if line_items:
+        return ""
+    from ..config import llm
+    gruende: list[str] = []
+    if supplier_obj is not None and getattr(supplier_obj, "positionsmodus", "") == POSITIONSMODUS_EINE_POSITION:
+        gruende.append("Lieferant steht auf „eine Position“ – Positionen entstehen nur aus der USt-Aufstellung "
+                       "(die fehlt hier)")
+    if doc is None or not doc.all_words():
+        gruende.append("kein lesbarer Text im PDF (Scan ohne Texterkennung – OCR an?)")
+    else:
+        try:
+            gefunden = tabelle.extract(doc, text=doc.text, woerterbuch=store.spaltenwoerter())
+        except Exception:  # noqa: BLE001 -- Diagnose darf nie die Ansicht kippen
+            gefunden = None
+        if gefunden is None:
+            gruende.append("keine Tabelle erkannt (kein Tabellenkopf mit bekannten Spaltenwörtern "
+                           "oder die Zeilen rechnen nicht auf)")
+    c = llm()
+    if not c.enabled:
+        gruende.append("KI ausgeschaltet")
+    elif not c.line_items:
+        gruende.append("KI liest keine Positionen (RECHNUNG_LLM_LINE_ITEMS=0)")
+    elif not semantic.available():
+        gruende.append("KI nicht erreichbar (Ollama läuft nicht oder Modell fehlt)")
+    if (llm_rejected or {}).get("positionen"):
+        gruende.append("KI: " + str(llm_rejected["positionen"]))
+    return "; ".join(gruende)
 
 
 def _render_png(path: Path, page_index: int) -> bytes:
@@ -1018,6 +1052,10 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             # hier anwenden -- sonst sieht der Mensch beim Pruefen/Bestaetigen
             # nie, was errechnet/vom Kopf uebernommen wuerde. Spaltennamen
             # zuerst normalisieren (Baustein 1, Altvorlagen).
+            if not line_items and not isinstance(corr.get(POSITIONEN_KEY), list):
+                # Vorlage ohne Positionstabelle: die Pipeline hat sie per
+                # Tabellenerkennung gefunden (Befund Aaron 05.11.2026)
+                line_items = res.line_items
             line_items = positionen.normalize_columns(line_items)
             current_fr = {k: FieldResult(k, v["value"], v["raw"], v["confidence"], v["source"])
                          for k, v in current.items()}
@@ -1083,6 +1121,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "template_fields": tpl_fields,
             "template_line_items": tpl_line_items,
             "line_items": line_items,
+            "positionen_grund": _positionen_grund(doc, line_items, supplier_obj, llm_rejected, store),
             # Vollstaendig aggregierte/ergaenzte USt-Aufstellung (SPEC
             # Baustein 2/3) -- je Zeile mit Herkunft (``_herkunft``), unabhaengig
             # davon, ob "ust_aufstellung" als eigenes Feld gelesen wurde.
