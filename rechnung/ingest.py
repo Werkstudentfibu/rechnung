@@ -608,8 +608,13 @@ def _raw_from_fetch(msg_data) -> bytes | None:
 
 # Wie viele Tage zurueck auch GELESENE Mails beruecksichtigt werden
 # (09.10.2026: wer eine Mail im Webmail oeffnet, macht sie "gelesen" --
-# die reine UNSEEN-Suche hat sie dann nie abgeholt).
-LESEFENSTER_TAGE = 7
+# die reine UNSEEN-Suche hat sie dann nie abgeholt). Einstellbar ueber
+# RECHNUNG_IMAP_TAGE (config.imap_lesefenster_tage), Standard 7.
+def _lesefenster_tage() -> int:
+    from .config import imap_lesefenster_tage
+
+    return imap_lesefenster_tage()
+
 ABGEHOLT_NAME = "abgeholt.json"
 
 
@@ -682,7 +687,7 @@ def fetch(cfg: ImapConfig | None = None, dest: Path | None = None,
         # Tage, sofern ihre Message-ID noch nicht abgeholt wurde (im Webmail
         # geoeffnet = gelesen, war vorher unsichtbar).
         ungelesen = _ids(M, "UNSEEN")
-        seit = time.strftime("%d-%b-%Y", time.gmtime(time.time() - LESEFENSTER_TAGE * 86400))
+        seit = time.strftime("%d-%b-%Y", time.gmtime(time.time() - _lesefenster_tage() * 86400))
         ids = list(ungelesen) + [n for n in _ids(M, f"SINCE {seit}") if n not in ungelesen]
         bekannte = _bekannte_laden()
         if limit:
@@ -773,7 +778,7 @@ def bericht(cfg: ImapConfig | None = None, dest: Path | None = None, anzahl: int
         out["fehler"] = "IMAP nicht konfiguriert (RECHNUNG_IMAP_*)"
         return out
     bekannte = _bekannte_laden()
-    grenze = time.time() - LESEFENSTER_TAGE * 86400
+    grenze = time.time() - _lesefenster_tage() * 86400
     try:
         M = _verbinden(cfg)
     except OSError as e:
@@ -810,7 +815,8 @@ def bericht(cfg: ImapConfig | None = None, dest: Path | None = None, anzahl: int
             if a.message_id and a.message_id in bekannte:
                 aktion = "schon abgeholt"
             elif gelesen and ts < grenze:
-                aktion = f"wird NICHT abgeholt: gelesen und älter als {LESEFENSTER_TAGE} Tage"
+                aktion = (f"wird NICHT abgeholt: gelesen und älter als {_lesefenster_tage()} Tage "
+                          "(RECHNUNG_IMAP_TAGE)")
             elif not a.message_id and gelesen:
                 aktion = "wird NICHT abgeholt: gelesen und ohne Message-ID"
             elif not a.attachments and not a.human_items:

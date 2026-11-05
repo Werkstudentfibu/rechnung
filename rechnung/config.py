@@ -113,6 +113,18 @@ def imap_poll_minutes() -> float:
         return 5.0
 
 
+def imap_lesefenster_tage() -> int:
+    """Wie viele Tage zurueck auch schon GELESENE Mails abgeholt werden
+    (``RECHNUNG_IMAP_TAGE``, Standard 7). Groesser stellen, wenn Rechnungen
+    im Postfach liegen, die jemand anderes schon geoeffnet hat (Aaron
+    05.11.2026: ~100 offene, laengst gelesene Rechnungen). Jede Mail wird
+    trotzdem nur einmal geholt (Message-ID in abgeholt.json)."""
+    try:
+        return max(1, int(os.environ.get("RECHNUNG_IMAP_TAGE", "7")))
+    except ValueError:
+        return 7
+
+
 def imap_timeout() -> float:
     """Zeitgrenze in Sekunden je IMAP-Netzwerkschritt (Verbinden, Login,
     Abruf). Ohne Grenze hing ein einziges nicht antwortendes Postfach die
