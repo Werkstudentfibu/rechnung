@@ -492,6 +492,11 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "tessdata": os.environ.get("TESSDATA_PREFIX", ""),
             "ki_an": llm.enabled, "ki_modell": llm.model,
             "daten": str(store.root),
+            # Fehlersuche 05.11.2026: Einstellung stand in C:\Rechnung\rechnung.env,
+            # wirkte aber nicht -- welche Werte sieht DIESER Prozess?
+            "env_postfach_ordner": repr(os.environ.get("RECHNUNG_POSTFACH_ORDNER")),
+            "env_imap_tage": repr(os.environ.get("RECHNUNG_IMAP_TAGE")),
+            "arbeitsordner": os.getcwd(),
         }
 
     @app.post("/api/import-abbyy")
