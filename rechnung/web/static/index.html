@@ -2398,6 +2398,23 @@ async function loadVersion() {
   $('#version').textContent = `Stand ${v.datum}`;
   $('#version').title = `${v.commit} · ${v.betreff}`;
   $('#btn-update').style.display = '';
+  loadUpdateWarnung();
+}
+
+// Gelbe Leiste, wenn ein Update haengt (05.11.2026: Updates kamen zehn Tage
+// unbemerkt nicht an, weil Fehlschlaege nur in update.log standen).
+async function loadUpdateWarnung() {
+  const s = await api('/api/update-status');
+  let bar = $('#update-warnung');
+  if (!s.warnung) { if (bar) bar.remove(); return; }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'update-warnung';
+    bar.style.cssText = 'background:#fffbe6;color:#ad6800;border-bottom:1px solid #ffe58f;' +
+      'padding:6px 12px;font-size:13px;white-space:pre-wrap';
+    document.body.insertBefore(bar, document.body.firstChild);
+  }
+  bar.textContent = '⚠ ' + s.warnung;
 }
 
 async function holeUpdate() {
@@ -2419,6 +2436,7 @@ async function holeUpdate() {
     alert('Update fehlgeschlagen: ' + err);
   }
   b.disabled = false; b.textContent = 'Update holen';
+  loadUpdateWarnung();
 }
 
 async function ausEingangEntfernen() {

@@ -25,10 +25,18 @@ Ablauf ``aktualisieren()``:
 
 ``data\\`` und ``rechnung.env`` liegen ausserhalb des Klons und werden nie
 angefasst. Jeder Versuch steht in ``<data>/update.log``.
+
+Absicherung (05.11.2026, Updates kamen 23.10.-02.11. unbemerkt nicht an):
+``fetch`` wird bei einem Fehlschlag nach ``FETCH_WARTEN`` Sekunden erneut
+versucht (kurze WLAN-/VPN-Aussetzer). Das Ergebnis jedes Versuchs steht
+zusaetzlich in ``<data>/update-status.json``; ``status()`` macht daraus die
+gelbe Warnung im Programm (gescheitert, zurueckgerollt, neuer Stand geholt
+aber nicht aktiv, oder seit ``OFFLINE_WARNUNG_TAGE`` kein Kontakt).
 """
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -51,6 +59,12 @@ TESTSATZ_TIMEOUT_S = 1800
 TESTSATZ_MIN_FAELLE = 5
 # erlaubter Rueckgang der Gesamt-Trefferquote in Prozentpunkten
 TESTSATZ_MAX_RUECKGANG = 2.0
+# Wartezeiten (Sekunden) vor dem 2. und 3. fetch-Versuch
+FETCH_WARTEN = (5, 20)
+# "offline" erst warnen, wenn so lange kein erfolgreicher Kontakt war --
+# ein einzelner Start ohne Netz ist kein Problem
+OFFLINE_WARNUNG_TAGE = 2
+STATUS_DATEI = "update-status.json"
 
 
 @dataclass
@@ -207,24 +221,91 @@ def aktualisieren(data_root: Path | None = None, root: Path | None = None,
     python = python or sys.executable
     e = _aktualisieren(root, data_root, tests, python)
     _log(data_root, e)
+    _status_schreiben(data_root, e)
     return e
+
+
+def _fetch(root: Path) -> str:
+    """origin/release holen, bei Fehlschlag mit Pausen erneut versuchen.
+    Leerer Text = geklappt, sonst die letzte Fehlermeldung."""
+    fehler = ""
+    for warten in (0, *FETCH_WARTEN):
+        if warten:
+            time.sleep(warten)
+        try:
+            # Explizite Zielangabe: ohne ``remote.origin.fetch`` in der Klon-
+            # Konfiguration (Laptop, Befund 02.11.2026) aktualisierte ein
+            # blankes ``fetch origin release`` nur FETCH_HEAD, nie
+            # origin/release -- das Programm meldete wochenlang "aktuell".
+            f = _git(root, "fetch", "--quiet", "origin",
+                     f"+refs/heads/{BRANCH}:refs/remotes/origin/{BRANCH}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            fehler = str(exc)
+            continue
+        if f.returncode == 0:
+            return ""
+        fehler = _letzte_zeilen(f.stderr, 3)
+    return fehler
+
+
+def _status_schreiben(data_root: Path | None, e: Ergebnis) -> None:
+    if data_root is None:
+        return
+    p = Path(data_root) / STATUS_DATEI
+    try:
+        alt = json.loads(p.read_text("utf-8")) if p.exists() else {}
+    except (OSError, ValueError):
+        alt = {}
+    jetzt = time.strftime("%Y-%m-%dT%H:%M:%S")
+    neu = {"zeit": jetzt, "status": e.status, "meldung": e.meldung,
+           "alt": e.alt[:7], "neu": e.neu[:7],
+           "letzter_kontakt": jetzt if e.status not in ("offline", "kein_git") else alt.get("letzter_kontakt", "")}
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(neu, ensure_ascii=False, indent=1), "utf-8")
+    except OSError:
+        pass
+
+
+def status(data_root: Path, root: Path | None = None) -> dict:
+    """Letzter Update-Versuch + ob das Programm gewarnt werden muss.
+    Liest nur lokal (kein Netz): ``warnung`` ist ein Satz fuer die gelbe
+    Leiste oder leer."""
+    root = root or repo_root()
+    p = Path(data_root) / STATUS_DATEI
+    try:
+        s = json.loads(p.read_text("utf-8")) if p.exists() else {}
+    except (OSError, ValueError):
+        s = {}
+    warnung = ""
+    if ist_git_klon(root):
+        st = s.get("status", "")
+        head, ziel = _rev(root, "HEAD"), _rev(root, f"origin/{BRANCH}")
+        zeit = s.get("zeit", "").replace("T", " ")[:16]
+        if st in ("zurueckgerollt", "fehler"):
+            warnung = f"Letztes Update ({zeit}) nicht installiert: {s.get('meldung', '')}"
+        elif head and ziel and head != ziel and _git(root, "merge-base", "--is-ancestor", head, ziel).returncode == 0:
+            warnung = (f"Neuer Stand {ziel[:7]} ist geholt, aber noch nicht aktiv "
+                       f"(laeuft: {head[:7]}) -- 'Update holen' und neu starten.")
+        elif st == "offline":
+            kontakt = s.get("letzter_kontakt", "")
+            try:
+                alter = time.time() - time.mktime(time.strptime(kontakt, "%Y-%m-%dT%H:%M:%S"))
+            except ValueError:
+                alter = float("inf")
+            if alter > OFFLINE_WARNUNG_TAGE * 86400:
+                seit = f"seit {kontakt.replace('T', ' ')[:16]}" if kontakt else "bisher"
+                warnung = f"Update-Server {seit} nicht erreicht: {s.get('meldung', '')}"
+    return dict(s, warnung=warnung)
 
 
 def _aktualisieren(root: Path, data_root: Path | None, tests: bool, python: str) -> Ergebnis:
     if not ist_git_klon(root):
         return Ergebnis("kein_git", meldung="Programm laeuft nicht aus einem Git-Klon (z.B. als rechnung.exe).")
 
-    try:
-        # Explizite Zielangabe: ohne ``remote.origin.fetch`` in der Klon-
-        # Konfiguration (Laptop, Befund 02.11.2026) aktualisierte ein blankes
-        # ``fetch origin release`` nur FETCH_HEAD, nie origin/release -- das
-        # Programm meldete dann wochenlang "schon aktuell".
-        f = _git(root, "fetch", "--quiet", "origin",
-                 f"+refs/heads/{BRANCH}:refs/remotes/origin/{BRANCH}")
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return Ergebnis("offline", meldung=f"Update-Server nicht erreichbar: {exc}")
-    if f.returncode != 0:
-        return Ergebnis("offline", meldung="Update-Server nicht erreichbar: " + _letzte_zeilen(f.stderr, 3))
+    fehler = _fetch(root)
+    if fehler:
+        return Ergebnis("offline", meldung="Update-Server nicht erreichbar: " + fehler)
 
     alt = _rev(root, "HEAD")
     neu = _rev(root, f"origin/{BRANCH}")

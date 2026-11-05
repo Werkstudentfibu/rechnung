@@ -33,6 +33,11 @@ def commit(repo, name, inhalt, msg):
     git(repo, "push", "-q", "origin", "HEAD:release")
 
 
+@pytest.fixture(autouse=True)
+def ohne_wartepausen(monkeypatch):
+    monkeypatch.setattr(selbstupdate, "FETCH_WARTEN", (0, 0))
+
+
 @pytest.fixture
 def repos(tmp_path):
     bare = tmp_path / "server.git"
@@ -221,3 +226,81 @@ def test_neuer_stand_auch_ohne_fetch_regel_im_klon(repos):
     e = selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
     assert e.status == "aktualisiert", e.meldung
     assert git(laptop, "rev-parse", "HEAD") == git(dev, "rev-parse", "HEAD")
+
+
+# ---- Absicherung 05.11.2026: Wiederholen + gelbe Warnung --------------------
+
+def test_fetch_wird_wiederholt(repos, monkeypatch):
+    """Kurzer Netz-Aussetzer: der erste fetch scheitert, der zweite klappt."""
+    dev, laptop, data = repos
+    commit(dev, "test_b.py", PASSING, "nach Aussetzer")
+    echt = selbstupdate._git
+    versuche = []
+
+    def wackelig(root, *args):
+        if args and args[0] == "fetch":
+            versuche.append(1)
+            if len(versuche) == 1:
+                return subprocess.CompletedProcess(args, 128, "", "fatal: Could not resolve host: github.com")
+        return echt(root, *args)
+    monkeypatch.setattr(selbstupdate, "_git", wackelig)
+    e = selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    assert e.status == "aktualisiert", e.meldung
+    assert len(versuche) == 2
+
+
+def test_offline_versucht_dreimal(repos):
+    _, laptop, data = repos
+    git(laptop, "remote", "set-url", "origin", str(laptop.parent / "gibt-es-nicht.git"))
+    e = selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    assert e.status == "offline"
+
+
+def test_status_ohne_versuch_keine_warnung(repos):
+    _, laptop, data = repos
+    assert selbstupdate.status(data, root=laptop)["warnung"] == ""
+
+
+def test_status_aktuell_keine_warnung(repos):
+    _, laptop, data = repos
+    selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    s = selbstupdate.status(data, root=laptop)
+    assert s["status"] == "aktuell" and s["warnung"] == "" and s["letzter_kontakt"]
+
+
+def test_status_warnt_bei_zurueckgerollt(repos):
+    dev, laptop, data = repos
+    commit(dev, "test_c.py", FAILING, "kaputt")
+    selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    w = selbstupdate.status(data, root=laptop)["warnung"]
+    assert "nicht installiert" in w and "Tests fehlgeschlagen" in w
+
+
+def test_status_warnt_wenn_geholt_aber_nicht_aktiv(repos):
+    dev, laptop, data = repos
+    commit(dev, "test_b.py", PASSING, "neu")
+    lock.lock_path(data).write_text("{}")
+    assert selbstupdate.aktualisieren(data, root=laptop, python=sys.executable).status == "beschaeftigt"
+    assert "noch nicht aktiv" in selbstupdate.status(data, root=laptop)["warnung"]
+
+
+def test_status_offline_erst_nach_tagen(repos, monkeypatch):
+    import json
+    _, laptop, data = repos
+    selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)  # Kontakt jetzt
+    git(laptop, "remote", "set-url", "origin", str(laptop.parent / "gibt-es-nicht.git"))
+    selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    assert selbstupdate.status(data, root=laptop)["warnung"] == ""  # frisch -> ruhig
+    p = data / selbstupdate.STATUS_DATEI
+    s = json.loads(p.read_text("utf-8"))
+    s["letzter_kontakt"] = "2026-10-23T08:00:00"
+    p.write_text(json.dumps(s), "utf-8")
+    w = selbstupdate.status(data, root=laptop)["warnung"]
+    assert "seit 2026-10-23 08:00 nicht erreicht" in w
+
+
+def test_status_offline_ohne_jeden_kontakt_warnt(repos):
+    _, laptop, data = repos
+    git(laptop, "remote", "set-url", "origin", str(laptop.parent / "gibt-es-nicht.git"))
+    selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    assert "Update-Server bisher nicht erreicht" in selbstupdate.status(data, root=laptop)["warnung"]

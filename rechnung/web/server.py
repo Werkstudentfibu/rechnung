@@ -1901,6 +1901,14 @@ def create_app(store: Store, samples: Path) -> FastAPI:
 
         return JSONResponse(selbstupdate.version())
 
+    @app.get("/api/update-status")
+    def update_status_ep() -> JSONResponse:
+        """Letzter Update-Versuch + Warnsatz fuer die gelbe Leiste (nur
+        lokal, kein Netz)."""
+        from .. import selbstupdate
+
+        return JSONResponse(selbstupdate.status(store.root))
+
     @app.post("/api/update")
     def update_ep() -> JSONResponse:
         """Neuen Stand holen + Tests. Startet NICHT selbst neu -- das
