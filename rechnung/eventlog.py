@@ -39,6 +39,8 @@ HUMAN_DONE = "erledigt"
 TYPE_SUPPLIER = "lieferant"
 # Ordner "Keine Rechnung" (keine_rechnung.py, Entscheidung Aaron 14.10.2026)
 TYPE_KEINE_RECHNUNG = "keine_rechnung"
+# Feld ausdruecklich als richtig bestaetigt (Knopf "Wert stimmt" in der Bearbeitungsansicht)
+TYPE_FELD_BESTAETIGT = "feld_bestaetigt"
 KR_AUSSORTIERT = "aussortiert"
 KR_ZURUECKGEHOLT = "zurueckgeholt"       # "Doch eine Rechnung" -- Fehlsortierung
 KR_GELOESCHT = "geloescht"               # Nachtrag 14.10.2026: endgueltig geloescht
@@ -110,6 +112,27 @@ def record_correction(store, sha256: str, field: str, alt, neu, operator: str = 
         "template_id": template_id,
         "quelle_vorher": quelle_vorher,
         "programmwert": programmwert,
+        "operator": operator or "?",
+    }
+    store.event_append(rec)
+    return rec
+
+
+def record_feld_bestaetigt(store, sha256: str, field: str, wert, operator: str = "",
+                           supplier_id: str | None = None, supplier_name: str | None = None,
+                           file: str = "", template_id: str | None = None,
+                           quelle_vorher: str | None = None) -> dict:
+    """Der Mensch hat den angezeigten Wert eines Feldes ausdruecklich als
+    richtig bestaetigt -- KEINE Korrektur. ``programm_richtig``: der Wert kam
+    vom Programm (Vorlage/KI/Regel), nicht von einer frueheren Eingabe des
+    Menschen -- nur dann zaehlt es als "richtig erkannt"."""
+    rec = {
+        "type": TYPE_FELD_BESTAETIGT,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "sha256": sha256, "file": file, "field": field, "wert": wert,
+        "supplier_id": supplier_id, "supplier_name": supplier_name,
+        "template_id": template_id, "quelle_vorher": quelle_vorher,
+        "programm_richtig": quelle_vorher not in (None, "", "manual", "missing"),
         "operator": operator or "?",
     }
     store.event_append(rec)

@@ -108,6 +108,8 @@ def merken(store: Store, res, operator: str = "") -> Path | None:
         "extraktion": res.extraction,
         "felder": felder,
         "quellen": quellen,
+        # vom Menschen ausdruecklich als richtig bestaetigte Felder (ohne Aenderung)
+        "bestaetigte_felder": sorted(f for f in store.confirmed_fields(res.sha256) if f in felder),
         "positionen": _jsonable([{k: v for k, v in it.items() if not k.startswith("_")}
                                  for it in res.line_items or []]),
         "ust_aufstellung": _jsonable([{k: v for k, v in r.items() if not k.startswith("_")}

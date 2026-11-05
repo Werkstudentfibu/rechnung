@@ -123,6 +123,14 @@ class SendenPost(ConfirmPost):
     trotzdem: bool = False
 
 
+class FeldBestaetigenPost(BaseModel):
+    file: str
+    field: str
+    value: str
+    template_id: str | None = None
+    quelle_vorher: str | None = None
+
+
 class CorrectionPost(BaseModel):
     file: str
     field: str
@@ -1636,6 +1644,41 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                                    quelle_vorher=body.quelle_vorher,
                                    programmwert=body.wert_vorher)
         return JSONResponse({"ok": True})
+
+    @app.post("/api/feld-bestaetigen")
+    def feld_bestaetigen_ep(body: FeldBestaetigenPost) -> JSONResponse:
+        """Knopf "Wert stimmt": der angezeigte Wert eines Feldes ist richtig.
+        Anders als eine Korrektur aendert das nichts am Wert (Quelle bleibt
+        Vorlage/KI/Regel, ``corrections`` bleibt unberuehrt) -- es zaehlt im
+        Lernbericht/Ereignisprotokoll als "richtig erkannt" und fliesst in den
+        Testsatz (``bestaetigte_felder``). Bestaetigen eines Werts, den der
+        Mensch selbst eingetippt hat, wird festgehalten, zaehlt aber nicht als
+        Programm-Erfolg (``programm_richtig``)."""
+        from ..config import operator
+        path = _resolve(body.file)
+        sha = _sha(path)
+        op = operator()
+        if body.field in store.corrections(sha) and str(store.corrections(sha)[body.field]) != body.value:
+            raise HTTPException(409, "Wert weicht von der gespeicherten Korrektur ab -- erst korrigieren")
+        store.save_confirmed_field(sha, body.field, body.value, op)
+        sup_id = sup_name = None
+        try:
+            doc = _load(path)
+            _addr_match, address_id, has_addr = _address_scope(doc)
+            match = identify(doc, store.suppliers(), index=store.supplier_index(address_id),
+                             address_id=address_id, has_addresses=has_addr)
+            if match:
+                sup_id, sup_name = match[0].id, match[0].name
+        except HTTPException:
+            pass
+        quelle = body.quelle_vorher
+        if body.field in store.corrections(sha):
+            quelle = "manual"
+        ev = eventlog.record_feld_bestaetigt(store, sha, body.field, body.value, op,
+                                             supplier_id=sup_id, supplier_name=sup_name,
+                                             file=path.name, template_id=body.template_id,
+                                             quelle_vorher=quelle)
+        return JSONResponse({"ok": True, "programm_richtig": ev["programm_richtig"]})
 
     @app.post("/api/tabelle")
     def save_tabelle_ep(body: TabellePost) -> JSONResponse:

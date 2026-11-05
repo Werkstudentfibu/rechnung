@@ -124,9 +124,17 @@
             background: transparent; border: none; color: #777; cursor: pointer; }
   .af .cp:hover { color: #1c7550; }
   .af .cp.ok { color: #1c7550; font-weight: bold; }
-  .af .ab-in { padding-right: 24px; }
+  .af .ab-in { padding-right: 46px; }
   .af .mk-btn { position: absolute; right: 24px; top: 17px; padding: 0 5px; font-size: 14px; line-height: 20px;
                 background: transparent; border: none; color: #2f6fd0; cursor: pointer; }
+  /* Bestaetigen-Knopf je Feld (Aaron 05.11.2026: je Feld nur zwei Knoepfe) */
+  .af .ok-btn { position: absolute; right: 3px; top: 17px; padding: 0 5px; font-size: 14px; line-height: 20px;
+                background: transparent; border: none; color: #777; cursor: pointer; }
+  .af .ok-btn:hover { color: #1c7550; }
+  .af .ok-btn.ok { color: #1c7550; font-weight: bold; }
+  .actionbar details { margin-top: 6px; }
+  .actionbar details > summary { cursor: pointer; font-size: 12px; color: #555; }
+  .actionbar details > div { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
   .af .ab-in.val-input { padding-right: 46px; }
   button.senden { background: #1c7550; color: #fff; font-weight: 600; padding: 6px 18px; }
   .af label { display: block; font-size: 12px; color: #444; margin-bottom: 1px; }
@@ -574,6 +582,7 @@ function applyInvoiceData(d) {
     langerBelegHinweis: (d.hinweise || []).find(h => h.startsWith('Langer Beleg')) || null,
     llmRejected: d.llm_rejected || {},
     kiPositionen: d.ki_positionen,
+    bestaetigt: {},   // Felder, die der Mensch per ✓ bestätigt hat (nur diese Ansicht)
     positionenGrund: d.positionen_grund || '',
     lineItems: (d.line_items || []).map(it => ({ ...it })),
     // Herkunft je Zeile aus der vollstaendig ergaenzten Aufstellung
@@ -735,23 +744,38 @@ function gruppe(titel, html, zu = false) {
 // Klick kopiert den angezeigten Wert (deutsches Format, wie in Abbyy
 // einzutragen) -- bis JobRouter angebunden ist, werden die Werte parallel
 // von Hand uebertragen (Aaron 11.10.2026, ca. 60 Rechnungen/Tag).
-const CP_KNOPF = `<button class="cp" tabindex="-1" title="Wert kopieren" onclick="kopiere(event, this)">⧉</button>`;
-async function kopiere(ev, btn) {
+const FELD_KNOEPFE = (name, markieren) => `<button class="mk-btn" tabindex="-1"
+      title="Anderen Wert markieren: danach in der Rechnung das Wort anklicken oder einen Rahmen darum ziehen"
+      onclick="${markieren}">⌖</button><button class="ok-btn${(STATE.bestaetigt || {})[name] ? ' ok' : ''}" tabindex="-1"
+      title="Wert bestätigen: der Wert im Feld ist richtig (zählt fürs Anlernen als „richtig erkannt“)"
+      onclick="bestaetigeFeld(event, '${esc(name)}', this)">✓</button>`;
+/* ✓ am Feld: Wert stimmt. Unveraendert = "richtig erkannt" (keine Korrektur);
+   hat der Mensch den Text geaendert, ist es eine Korrektur wie bisher. */
+async function bestaetigeFeld(ev, name, btn) {
   ev.stopPropagation(); ev.preventDefault();
-  const inp = btn.parentElement.querySelector('input, textarea');
-  const v = inp ? inp.value : '';
-  try { await navigator.clipboard.writeText(v); }
-  catch (e) {
-    const t = document.createElement('textarea'); t.value = v; document.body.appendChild(t);
-    t.select(); document.execCommand('copy'); t.remove();
+  const af = btn.closest('.af'); const inp = af && af.querySelector('input.ab-in');
+  if (!inp) return;
+  const msg = $('#msg');
+  if (!inp.value.trim()) { msg.textContent = `„${name}“ ist leer – erst den Wert in der Rechnung markieren oder eintippen.`; return; }
+  const fbox = !!af.dataset.field;
+  const cur = STATE.current[name] || {};
+  if (fbox) {
+    const def = STATE.defs[name] || { value_type: 'text' };
+    if (fmtWert(cur.value, def.value_type) !== inp.value) { await saveCorrection(name, inp.value); return; }
   }
-  btn.textContent = '✓'; btn.classList.add('ok');
-  setTimeout(() => { btn.textContent = '⧉'; btn.classList.remove('ok'); }, 900);
+  const r = await api('/api/feld-bestaetigen', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, field: name, value: inp.value,
+                           template_id: STATE.tid || null, quelle_vorher: fbox ? (cur.source || null) : null }) });
+  if (!r || !r.ok) { msg.textContent = `✗ Bestätigen fehlgeschlagen (${name})`; return; }
+  (STATE.bestaetigt = STATE.bestaetigt || {})[name] = true;
+  btn.classList.add('ok');
+  if (fbox) entwarne(inp);
+  msg.textContent = `✓ „${name}“ bestätigt: ${inp.value}`;
 }
-
 function abFeld(label, id, val, cls = '', ro = '', extra = '') {
   return `<div class="af ${extra}" data-input="${id}" onclick="zielInput('${id}', this)"><label>${esc(label)}</label>
-    <input class="ab-in ${val ? cls : ''}" id="${id}" value="${esc(val || '')}" ${ro}>${CP_KNOPF}</div>`;
+    <input class="ab-in ${val ? cls : ''}" id="${id}" value="${esc(val || '')}" ${ro}>${FELD_KNOEPFE(id, `event.stopPropagation(); zielInput('${id}', this.closest('.af')); $('#msg').textContent = 'Jetzt in der Rechnung den richtigen Wert anklicken oder einen Rahmen darum ziehen.'`)}</div>`;
 }
 
 /* Rechnungsfeld: wie Abbyy grün = sicher erkannt, rot = unsicher; darunter der
@@ -779,15 +803,14 @@ function fBox(name, label, cls = '') {
   // leeres Pflichtfeld. Tab springt nur zwischen diesen (siehe Tab-Handler).
   const ki = da && cur.source === 'llm' && st !== 'unsicher';
   const fehlt = !da && def.required;
-  const uns = st === 'unsicher' || ki || fehlt;
+  const geprueft = !!(STATE.bestaetigt || {})[name];
+  const uns = !geprueft && (st === 'unsicher' || ki || fehlt);
   const unsCls = uns ? ' uns' + (st === 'unsicher' ? '' : ' kuenstlich') : (da ? ' sicher' : '');
   return `<div class="af ${cls}${unsCls}" data-field="${esc(name)}" onclick="selectField('${esc(name)}', this)">
     <label>${esc(label)}${def.required ? ' *' : ''}${ki ? ' <span class="hint">(KI-Vorschlag)</span>' : ''}${fehlt ? ' <span class="hint">(fehlt)</span>' : ''}</label>
     <input class="ab-in val-input ${st}" data-field="${esc(name)}" ${uns ? 'data-unsicher="1"' : ''} value="${esc(val)}"
            title="${esc(name)}${cur.source ? ' · ' + esc(cur.source) : ''}${cur.confidence ? ' · ' + cur.confidence : ''}"
-           onchange="saveCorrection('${esc(name)}', this.value); entwarne(this)">${CP_KNOPF}<button class="mk-btn" tabindex="-1"
-      title="Korrigieren: danach in der Rechnung den richtigen Wert markieren (Rahmen ziehen)"
-      onclick="korrigieren(event, '${esc(name)}', this)">⌖</button>
+           onchange="saveCorrection('${esc(name)}', this.value); entwarne(this)">${FELD_KNOEPFE(name, `korrigieren(event, '${esc(name)}', this)`)}
     ${raw}${rot.map(g => `<div class="chk bad">✗ ${esc(g)}</div>`).join('')}<div class="ass"></div></div>`;
 }
 
@@ -1075,11 +1098,8 @@ function renderInvoice(d) {
     `<div class="ab-row2">${sonst.map(([n, l]) => fBox(n, l)).join('')}</div>`));
 
   // Beträge
-  const rc = ((STATE.current.reverse_charge || {}).value || '') === 'ja';
   const be = document.createElement('div'); be.className = 'ab-sect';
   be.innerHTML = `<div class="ab-h">Beträge</div>
-    <label class="ab-chk"><input type="checkbox" ${rc ? 'checked' : ''}
-      onchange="saveCorrection('reverse_charge', this.checked ? 'ja' : 'nein')"> Reversed Charge</label>
     <div class="ab-row2">${fBox('brutto', 'Bruttogesamtbetrag')}${fBox('waehrung', 'Währung', 'w-kurz')}</div>`;
   fbox.appendChild(be);
   const wb = gruppe('Weitere Beträge', '');
@@ -1119,7 +1139,8 @@ function renderInvoice(d) {
 
   // übrige Felder (z.B. Kostenstelle, MwSt-Satz aus dem Kopf, eigene/gelernte Felder)
   const ABBYY_FELDER = new Set(['rechnungsnummer', 'rechnungsdatum', 'faelligkeit', 'einkaeufer',
-    'brutto', 'waehrung', 'netto', 'ust_betrag', 'zahlungsreferenz', 'ust_aufstellung', 'belegart']);
+    'brutto', 'waehrung', 'netto', 'ust_betrag', 'zahlungsreferenz', 'ust_aufstellung', 'belegart',
+    'reverse_charge']);   // Reverse Charge: nicht mehr in der Oberfläche (Aaron 05.11.2026), Datenmodell/Export unverändert
   const rest = Object.keys(STATE.defs).filter(n => !ABBYY_FELDER.has(n) && STATE.defs[n].value_type !== 'taxblock');
   if (rest.length) fbox.appendChild(gruppe('Weitere Felder',
     `<div class="ab-row2 wrap">${rest.map(n => fBox(n, FELD_LABEL[n] || n)).join('')}</div>`, true));
@@ -1132,14 +1153,16 @@ function renderInvoice(d) {
 
   const bar = document.createElement('div'); bar.className = 'actionbar';
   bar.innerHTML = `
-    <button onclick="saveTemplate()">Template speichern</button>
-    <button class="ghost" onclick="jobrouterVorschau()" title="Was beim Senden an JobRouter geht">JobRouter-Vorschau</button>
+    <button onclick="saveTemplate()" title="Aktuelle Zuordnung als Vorlage dieses Lieferanten speichern">Template speichern</button>
     <button class="senden" onclick="sendeRechnung()" title="Prüfen, lernen, an JobRouter freigeben, nächste Rechnung (Taste b)">✓ Senden</button>
-    <button class="ghost" onclick="addCustomField()">+ eigenes Feld</button>
     <button class="ghost" onclick="toggleLi()">Positionstabelle ${STATE.li.active ? 'ausblenden' : 'anlernen'}</button>
-    <button class="ghost danger" onclick="ausEingangEntfernen()" title="Z.B. Testmail oder Spam – wird nicht gelöscht, sondern nach data\\entfernt verschoben">Aus Eingang entfernen</button>
-    <button class="ghost danger" onclick="keineRechnungVonHand()" title="Diese Rechnung ist gar keine Rechnung (z.B. Lieferschein/Angebot) – von Hand in den Ordner 'Keine Rechnung' verschieben">Keine Rechnung</button>
-    <div class="hint">Feld anklicken, dann in der Rechnung Wort anklicken (weitere dazu/weg) oder Rahmen um mehrere Wörter ziehen = Wert ins Feld (wird gelernt) · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = senden + nächste' : ''}</div>
+    <details><summary>Weitere Aktionen</summary><div>
+      <button class="ghost" onclick="jobrouterVorschau()" title="Was beim Senden an JobRouter geht">JobRouter-Vorschau</button>
+      <button class="ghost" onclick="addCustomField()">+ eigenes Feld</button>
+      <button class="ghost danger" onclick="ausEingangEntfernen()" title="Z.B. Testmail oder Spam – wird nicht gelöscht, sondern nach data\\entfernt verschoben">Aus Eingang entfernen</button>
+      <button class="ghost danger" onclick="keineRechnungVonHand()" title="Diese Rechnung ist gar keine Rechnung (z.B. Lieferschein/Angebot) – von Hand in den Ordner 'Keine Rechnung' verschieben">Keine Rechnung</button>
+    </div></details>
+    <div class="hint">Je Feld: ⌖ = anderen Wert in der Rechnung markieren (Wort anklicken oder Rahmen ziehen, wird gelernt) · ✓ = Wert stimmt (zählt als „richtig erkannt“) · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = senden + nächste' : ''}</div>
     <div id="msg" class="hint"></div>`;
   fbox.appendChild(bar);
   w.appendChild(fbox);

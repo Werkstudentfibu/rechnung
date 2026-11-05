@@ -362,11 +362,30 @@ class Store:
         p = self._corrections / f"{sha}.json"
         return _read_json_safe(p, {}).get("fields", {})
 
+    def confirmed_fields(self, sha: str) -> dict:
+        """Felder, deren angezeigter Wert der Mensch ausdruecklich als
+        richtig bestaetigt hat (ohne ihn zu aendern): Feld -> Wert. Liegt
+        neben den Korrekturen, ist aber KEINE Korrektur -- ``corrections``
+        und damit Quelle ``manual``/Fehlerzaehlung bleiben unberuehrt."""
+        p = self._corrections / f"{sha}.json"
+        return dict(_read_json_safe(p, {}).get("confirmed", {}))
+
+    def save_confirmed_field(self, sha: str, field: str, value, operator: str = "") -> None:
+        self._corrections.mkdir(parents=True, exist_ok=True)
+        p = self._corrections / f"{sha}.json"
+        cur = _read_json_safe(p, {"sha256": sha, "fields": {}})
+        cur.setdefault("confirmed", {})[field] = value
+        cur["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        _atomic_write(p, json.dumps(cur, indent=2, ensure_ascii=False))
+        self.audit("confirm_field", {"sha256": sha, "field": field, "value": value}, operator)
+
     def save_correction(self, sha: str, field: str, value, operator: str = "") -> None:
         self._corrections.mkdir(parents=True, exist_ok=True)
         p = self._corrections / f"{sha}.json"
         cur = _read_json_safe(p, {"sha256": sha, "fields": {}})
         cur["fields"][field] = value
+        # eine spaetere Korrektur hebt die ausdrueckliche Bestaetigung auf
+        cur.get("confirmed", {}).pop(field, None)
         cur["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         _atomic_write(p, json.dumps(cur, indent=2, ensure_ascii=False))
         self.audit("correct", {"sha256": sha, "field": field, "value": value}, operator)
