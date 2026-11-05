@@ -297,10 +297,16 @@ def postfaecher(store) -> list[tuple[str, ImapConfig, str | None]]:
     from . import secrets as secrets_mod
 
     out: list[tuple[str, ImapConfig, str | None]] = []
+    ordner = postfach_ordner()
     env_cfg = ImapConfig()
     if env_cfg.configured:
+        # gilt auch fuers alte Einzelpostfach, solange es auf INBOX steht
+        # (Laptop 05.11.2026: AP-015-KHB ist das ENV-Postfach und blieb auf INBOX)
+        if ordner and (env_cfg.source_folder or "INBOX").upper() == "INBOX":
+            import dataclasses
+
+            env_cfg = dataclasses.replace(env_cfg, source_folder=ordner, done_folder="", nur_lesen=True)
         out.append(("Postfach 1 (ENV)", env_cfg, None))
-    ordner = postfach_ordner()
     for p in store.postfaecher():
         if not p.aktiv or not p.user:
             continue

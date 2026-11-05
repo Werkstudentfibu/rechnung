@@ -109,3 +109,18 @@ def test_ordnername_varianten():
     assert ingest._ordnername(b'(\\HasNoChildren) "/" Done') == "Done"
     assert ingest._ordnername(b'(\\HasChildren) "/" "INBOX"') == "INBOX"
     assert ingest._ordnername(b'(\\Noselect) NIL "Gesendete Objekte"') == "Gesendete Objekte"
+
+
+def test_env_postfach_folgt_dem_ordner(env, monkeypatch):
+    """Laptop 05.11.2026: das oberste Postfach (AP-015-KHB) ist das alte
+    Einzelpostfach aus rechnung.env und blieb trotz Einstellung auf INBOX."""
+    orig = config.ImapConfig
+    monkeypatch.setattr(config, "ImapConfig",
+                        lambda **k: orig(**(k or {"host": "h", "user": "env@x", "password": "p"})))
+    cfg, store, inbox = env
+    monkeypatch.setenv("RECHNUNG_POSTFACH_ORDNER", "Done,Error")
+    label, c, _m = config.postfaecher(store)[0]
+    assert label == "Postfach 1 (ENV)" and c.source_folder == "Done,Error" and c.nur_lesen
+    monkeypatch.delenv("RECHNUNG_POSTFACH_ORDNER")
+    _l, c, _m = config.postfaecher(store)[0]
+    assert c.source_folder == "INBOX" and not c.nur_lesen

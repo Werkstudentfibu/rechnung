@@ -2479,7 +2479,7 @@ async function postfachBericht(nr = 0) {
   const nFehler = pf.filter(p => !p.hinweis && p.letzte_abholung && !p.letzte_abholung.ok).length;
   const nNicht = pf.filter(p => p.hinweis).length;
   const pfZeilen = pf.map(p => `<tr${p.nr === r.nr && !p.hinweis ? ' style="background:#eef6f1"' : ''}>
-      <td>${esc(p.name || '')}</td><td>${esc(p.adresse || '–')}</td><td>${pfStatus(p)}</td>
+      <td>${esc(p.name || '')}</td><td>${esc(p.adresse || '–')}</td><td>${esc(p.ordner || '')}</td><td>${pfStatus(p)}</td>
       <td>${p.nr !== null && p.nr !== undefined ? `<button class="ghost" onclick="postfachBericht(${p.nr})">Mails ansehen</button>` : ''}</td></tr>`).join('');
   const zeilen = (r.mails || []).map(m => `<tr>
       <td>${esc(m.datum || '')}</td><td>${esc(m.von || '')}</td><td>${esc(m.betreff || '')}</td>
@@ -2502,7 +2502,7 @@ async function postfachBericht(nr = 0) {
       <tr><td>Eingang</td><td>${esc(r.eingang || '')}: ${(r.im_eingang || []).length} Datei(en)</td></tr>
     </table>
     <h4>Alle Postfächer (${pf.length}): ${nOk} OK · ${nFehler} mit Fehler · ${nNicht} werden nicht abgeholt</h4>
-    <table><tr><th>Name</th><th>Adresse</th><th>Letzte Abholung</th><th></th></tr>${pfZeilen}</table>
+    <table><tr><th>Name</th><th>Adresse</th><th>Ordner</th><th>Letzte Abholung</th><th></th></tr>${pfZeilen}</table>
     <h4>Programm</h4>
     <table>${Object.entries(r.system || {}).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(String(v))}</td></tr>`).join('')}</table>
     <h4>Letzte Mails im Ordner „${esc(r.ordner || '')}“</h4>

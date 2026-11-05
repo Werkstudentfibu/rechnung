@@ -746,6 +746,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         for e in liste:
             a = (e["adresse"] or "").lower()
             e["nr"] = abholbar.get(a) if e["aktiv"] else None
+            if e["nr"] is not None:
+                c = konten[e["nr"]][1]
+                e["ordner"] = c.source_folder + (" (nur lesen)" if c.nur_lesen else "")
             e["letzte_abholung"] = letzte.get(a)
             if not e["adresse"]:
                 e["hinweis"] = "keine E-Mail-Adresse – wird nicht abgeholt"
