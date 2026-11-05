@@ -659,6 +659,17 @@ def _ordnername(zeile: bytes) -> str:
     return name[1:-1] if len(name) >= 2 and name[0] == name[-1] == '"' else name
 
 
+def _internaldate(M, num) -> str:
+    """Eingangsdatum einer Mail (IMAP INTERNALDATE) als TT.MM.JJJJ, "" wenn
+    nicht lesbar -- fuer den Zeitraum je Ordner in der Uebersicht."""
+    try:
+        typ, data = M.fetch(num, "(INTERNALDATE)")
+        t = imaplib.Internaldate2tuple(data[0]) if typ == "OK" and data and isinstance(data[0], bytes) else None
+        return time.strftime("%d.%m.%Y", t) if t else ""
+    except Exception:  # noqa: BLE001 -- nur Anzeige
+        return ""
+
+
 def _ids(M, crit: str) -> list[bytes]:
     typ, data = M.search(None, crit)
     return data[0].split() if typ == "OK" and data and data[0] else []
@@ -691,6 +702,12 @@ def _fetch_ordner(M, ordner: str, cfg: ImapConfig, dest: Path, store, dry_run: b
     ungelesen = [] if cfg.nur_lesen else _ids(M, "UNSEEN")
     seit = time.strftime("%d-%b-%Y", time.gmtime(time.time() - _lesefenster_tage() * 86400))
     ids = list(ungelesen) + [n for n in _ids(M, f"SINCE {seit}") if n not in ungelesen]
+    from .config import imap_neueste
+
+    neueste = imap_neueste()
+    if neueste:
+        # neueste N je Ordner (hoechste Sequenznummern), egal wie alt
+        ids += [n for n in _ids(M, "ALL")[-neueste:] if n not in ids]
     if limit:
         ids = ids[:limit]
     for num in ids:
@@ -839,6 +856,9 @@ def bericht(cfg: ImapConfig | None = None, dest: Path | None = None, anzahl: int
                 continue
             alle = _ids(M, "ALL")
             out["je_ordner"][ordner] = len(alle)
+            if alle:
+                out.setdefault("zeitraum", {})[ordner] = [_internaldate(M, alle[0]),
+                                                         _internaldate(M, alle[-1])]
             liste += [(ordner, n) for n in reversed(alle[-anzahl:])]
         if not out["je_ordner"]:
             out["fehler"] = "Ordner nicht vorhanden: " + ", ".join(out.get("fehlende_ordner", []))

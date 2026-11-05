@@ -2492,7 +2492,7 @@ async function postfachBericht(nr = 0) {
     <h3>Postfach-Übersicht</h3>
     <div class="hint">Mach bei Problemen ein Foto von dieser Seite.</div>
     <table>
-      <tr><td>Postfach</td><td>${esc(r.postfach || '')} · Ordner „${esc(r.ordner || '')}“ · ${r.anzahl_im_ordner ?? '?'} Mail(s) darin${Object.keys(r.je_ordner || {}).length > 1 ? ' (' + Object.entries(r.je_ordner).map(([o, n]) => `${esc(o)}: ${n}`).join(', ') + ')' : ''}${r.nur_lesen ? ' · <b>nur lesen</b> (markiert/verschiebt nichts)' : ''}</td></tr>
+      <tr><td>Postfach</td><td>${esc(r.postfach || '')} · Ordner „${esc(r.ordner || '')}“ · ${r.anzahl_im_ordner ?? '?'} Mail(s) darin${Object.keys(r.je_ordner || {}).length > 1 ? ' (' + Object.entries(r.je_ordner).map(([o, n]) => `${esc(o)}: ${n}` + ((r.zeitraum || {})[o] ? ` [${esc(r.zeitraum[o][0])} – ${esc(r.zeitraum[o][1])}]` : '')).join(', ') + ')' : ''}${r.nur_lesen ? ' · <b>nur lesen</b> (markiert/verschiebt nichts)' : ''}</td></tr>
       <tr><td>Verbindung</td><td>${r.ok ? 'OK' : 'FEHLER: ' + esc(r.fehler || '')}</td></tr>
       <tr><td>Automatische Abholung</td><td>${ab.minuten ? `alle ${ab.minuten} Min.` : 'aus'} · zuletzt ${esc(ab.letzte_pruefung || '–')}
         · ${ab.mails_zuletzt ?? 0} Mail(s), ${ab.zuletzt_neu ?? 0} neu ${ab.laeuft ? '· <b>läuft gerade</b>' + (ab.fortschritt ? ` (Postfach ${esc(ab.fortschritt)}: ${esc(ab.aktuelles_postfach || '')})` : '') : ''}

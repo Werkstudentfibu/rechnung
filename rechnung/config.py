@@ -118,6 +118,17 @@ def imap_poll_minutes() -> float:
         return 5.0
 
 
+def imap_neueste() -> int:
+    """``RECHNUNG_IMAP_NEUESTE`` (Standard 0 = aus): zusaetzlich zum
+    Lesefenster die N neuesten Mails JE ORDNER abholen, egal wie alt (Aaron
+    05.11.2026: Trainingsphase, FlexiCapture-Ordner enthalten nur aeltere
+    Mails, z.B. 1721 in Error). Jede Mail weiterhin nur einmal."""
+    try:
+        return max(0, int(os.environ.get("RECHNUNG_IMAP_NEUESTE", "0")))
+    except ValueError:
+        return 0
+
+
 def imap_lesefenster_tage() -> int:
     """Wie viele Tage zurueck auch schon GELESENE Mails abgeholt werden
     (``RECHNUNG_IMAP_TAGE``, Standard 7). Groesser stellen, wenn Rechnungen

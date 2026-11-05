@@ -144,3 +144,26 @@ def test_env_postfach_folgt_dem_ordner(env, monkeypatch):
     monkeypatch.delenv("RECHNUNG_POSTFACH_ORDNER")
     _l, c, _m = config.postfaecher(store)[0]
     assert c.source_folder == "INBOX" and not c.nur_lesen
+
+
+def test_neueste_je_ordner_egal_wie_alt(env, monkeypatch):
+    """Aaron 05.11.2026: Error hat 1721 alte Mails, im Lesefenster nichts --
+    RECHNUNG_IMAP_NEUESTE=2 holt die zwei neuesten je Ordner."""
+    cfg, store, inbox = env
+    cfg = dataclasses.replace(cfg, source_folder="Done,Error", nur_lesen=True)
+
+    class Alt(FakeOrdner):
+        def search(self, _charset, crit):
+            if crit.startswith("SINCE"):
+                return "OK", [b""]            # nichts im Lesefenster
+            return super().search(_charset, crit)
+
+    def neu():
+        return Alt({"Error": {b"1": _pdf("RE-1.pdf"), b"2": _pdf("RE-2.pdf"), b"3": _pdf("RE-3.pdf")}})
+    assert _run(neu(), cfg, store, inbox, monkeypatch).mails == 0
+    monkeypatch.setenv("RECHNUNG_IMAP_NEUESTE", "2")
+    res = _run(neu(), cfg, store, inbox, monkeypatch)
+    assert res.mails == 2
+    assert (inbox / "RE-2.pdf").exists() and (inbox / "RE-3.pdf").exists()
+    assert not (inbox / "RE-1.pdf").exists()
+    assert _run(neu(), cfg, store, inbox, monkeypatch).mails == 0   # nur einmal

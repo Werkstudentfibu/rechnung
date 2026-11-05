@@ -37,7 +37,8 @@ def test_bericht_zeigt_jede_mail_und_aendert_nichts(env, monkeypatch):
     assert "abgeholt" in m["Rechnung neu"]["aktion"]
     assert m["Nur Text"]["gelesen"] is True
     assert fake.flags[b"1"] == set()            # nichts als gelesen markiert
-    assert all("PEEK" in c for c in fake.fetch_cmds)
+    # Mailinhalt nur per PEEK; INTERNALDATE (Zeitraum je Ordner) setzt kein \Seen
+    assert all("PEEK" in c or c == "(INTERNALDATE)" for c in fake.fetch_cmds)
     assert not inbox.exists()
 
 
