@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .pdf import Document, Word
-from .textnorm import coerce, norm
+from .textnorm import coerce, ist_seitenwechsel_wort, norm
 
 # Vorschlagsliste fuer die UI (keine Obergrenze!): name -> value_type, required
 #
@@ -120,6 +120,14 @@ class LineItemSpec:
     columns: list[Column] = field(default_factory=list)
     stop_texts: list[str] = field(default_factory=list)  # norm() Woerter -> Tabellenende
     row_gap: float = 1.8              # Faktor Kopfzeilen-Hoehe fuer Zeilen-Cluster
+    # Mehrseitige Tabelle (Aaron 05.11.2026, "je Seite ein Kasten, eine
+    # Rechnung"): die Positionen laufen auf den Folgeseiten weiter, bis ein
+    # Stopp-Wort kommt oder eine Seite keine Position mehr hat -- egal wie
+    # viele Seiten die naechste Rechnung hat. ``folge_top``: Seitenanteil
+    # (0..1), ab dem die Tabelle auf Folgeseiten ohne wiederholte Kopfzeile
+    # beginnt (unterhalb von Briefkopf/"Seite k von n").
+    folgeseiten: bool = False
+    folge_top: Optional[float] = None
 
     def to_dict(self) -> dict:
         return {
@@ -130,6 +138,8 @@ class LineItemSpec:
                          "x0": c.x0, "x1": c.x1} for c in self.columns],
             "stop_texts": self.stop_texts,
             "row_gap": self.row_gap,
+            "folgeseiten": self.folgeseiten,
+            "folge_top": self.folge_top,
         }
 
     @classmethod
@@ -142,6 +152,8 @@ class LineItemSpec:
                      for c in d.get("columns", [])],
             stop_texts=d.get("stop_texts", []),
             row_gap=d.get("row_gap", 1.8),
+            folgeseiten=bool(d.get("folgeseiten", False)),
+            folge_top=d.get("folge_top"),
         )
 
 
@@ -307,34 +319,13 @@ def apply_template(doc: Document, tpl: Template) -> dict[str, FieldResult]:
     return out
 
 
-def apply_line_items(doc: Document, spec: LineItemSpec) -> list[dict]:
-    """Positionstabelle auslesen: Kopf-Anker finden, Zeilen bis zum Stopp-Wort in
-    y-Baender clustern, je Spalte die Woerter im x-Bereich zusammenfassen."""
-    if spec is None or not spec.columns:
-        return []
-    words = doc.all_words()
-    hdr, _n = _find_anchor(words, spec.header_anchor)
-    if hdr is None:
-        return []
-    page = hdr.page
-    pw = doc.pages[page].width
-    ph = doc.pages[page].height
-    line_h = max(hdr.bottom - hdr.top, 6.0)
-    top = hdr.bottom + line_h * 0.3
-
-    stop_y = ph
-    for w in words:
-        if (w.page == page and w.cy > hdr.bottom
-                and norm(w.text) in spec.stop_texts):
-            stop_y = min(stop_y, w.top)
-
-    band = [w for w in words if w.page == page and top <= w.cy < stop_y]
-    band.sort(key=lambda w: (w.cy, w.x0))
+def _cluster_zeilen(band: list[Word], line_h: float, row_gap: float) -> list[list[Word]]:
+    band = sorted(band, key=lambda w: (w.cy, w.x0))
     rows: list[list[Word]] = []
     cur: list[Word] = []
     anchor_y: Optional[float] = None
     for w in band:
-        if anchor_y is None or abs(w.cy - anchor_y) <= line_h * spec.row_gap * 0.5:
+        if anchor_y is None or abs(w.cy - anchor_y) <= line_h * row_gap * 0.5:
             cur.append(w)
             anchor_y = w.cy if anchor_y is None else (anchor_y + w.cy) / 2
         else:
@@ -343,17 +334,85 @@ def apply_line_items(doc: Document, spec: LineItemSpec) -> list[dict]:
             anchor_y = w.cy
     if cur:
         rows.append(cur)
+    return rows
+
+
+def _passt_zum_muster(rec: dict, typisch: set[str]) -> bool:
+    """Zeile der Folgeseite mit dem Muster der Kopfseite abgleichen: mindestens
+    drei Viertel der dort ueblichen Zahlenspalten gefuellt ("Seite 2 von 3"
+    hat zufaellig zwei Zahlen, aber nicht alle)."""
+    if not typisch:
+        return True
+    gefuellt = {k for k in typisch if rec.get(k) not in (None, "", [])}
+    return len(gefuellt) >= max(1, -(-3 * len(typisch) // 4))
+
+
+def apply_line_items(doc: Document, spec: LineItemSpec) -> list[dict]:
+    """Positionstabelle auslesen: Kopf-Anker finden, Zeilen bis zum Stopp-Wort in
+    y-Baender clustern, je Spalte die Woerter im x-Bereich zusammenfassen.
+    Mit ``spec.folgeseiten`` laeuft die Tabelle auf den Folgeseiten weiter
+    (Uebertrag/Zwischensumme/"Seite k von n" sind keine Positionen)."""
+    if spec is None or not spec.columns:
+        return []
+    words = doc.all_words()
+    hdr, _n = _find_anchor(words, spec.header_anchor)
+    if hdr is None:
+        return []
+    first_page = hdr.page
+    line_h = max(hdr.bottom - hdr.top, 6.0)
+    seiten = list(range(first_page, len(doc.pages))) if spec.folgeseiten else [first_page]
 
     out: list[dict] = []
-    for r in rows:
-        rec: dict = {}
-        for col in spec.columns:
-            cx0, cx1 = col.x0 * pw, col.x1 * pw
-            cell = sorted((w for w in r if cx0 <= w.cx < cx1), key=lambda w: w.x0)
-            val, _ = coerce(" ".join(w.text for w in cell), col.value_type)
-            rec[col.name] = val
-        if any(v not in (None, "", []) for v in rec.values()):
-            out.append(rec)
+    typisch: set[str] = set()
+    for page in seiten:
+        pw = doc.pages[page].width
+        ph = doc.pages[page].height
+        if page == first_page:
+            top = hdr.bottom + line_h * 0.3
+        else:
+            wiederholt, _k = _find_anchor(words, Anchor(spec.header_anchor.text, page))
+            if wiederholt is not None:
+                top = wiederholt.bottom + line_h * 0.3
+            else:
+                top = (spec.folge_top or 0.0) * ph
+
+        stop_y = ph
+        for w in words:
+            if (w.page == page and w.cy > top
+                    and norm(w.text) in spec.stop_texts):
+                stop_y = min(stop_y, w.top)
+
+        band = [w for w in words if w.page == page and top <= w.cy < stop_y]
+        seite_recs: list[dict] = []
+        for r in _cluster_zeilen(band, line_h, spec.row_gap):
+            if ist_seitenwechsel_wort(min(r, key=lambda w: w.x0).text):
+                continue
+            rec: dict = {}
+            for col in spec.columns:
+                cx0, cx1 = col.x0 * pw, col.x1 * pw
+                cell = sorted((w for w in r if cx0 <= w.cx < cx1), key=lambda w: w.x0)
+                val, _ = coerce(" ".join(w.text for w in cell), col.value_type)
+                rec[col.name] = val
+            if any(v not in (None, "", []) for v in rec.values()):
+                seite_recs.append(rec)
+
+        if page == first_page:
+            if spec.folgeseiten and seite_recs:
+                zaehler: dict[str, int] = {}
+                for rec in seite_recs:
+                    for col in spec.columns:
+                        if col.value_type != "text" and rec.get(col.name) not in (None, "", []):
+                            zaehler[col.name] = zaehler.get(col.name, 0) + 1
+                typisch = {k for k, n in zaehler.items() if n >= 0.6 * len(seite_recs)}
+        else:
+            # Briefkopf/Seitenzubehoer vor der ersten echten Position weglassen
+            while seite_recs and not _passt_zum_muster(seite_recs[0], typisch):
+                seite_recs.pop(0)
+            if not seite_recs:
+                break          # Folgeseite ohne Position: Tabelle ist zu Ende
+        out.extend(seite_recs)
+        if stop_y < ph:
+            break              # Stopp-Wort erreicht
     return out
 
 

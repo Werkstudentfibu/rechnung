@@ -18,7 +18,7 @@ from __future__ import annotations
 from .pdf import Document, Page, Word
 from .spaltenwoerter import hinweis as _woerterbuch_hinweis
 from .template import FieldResult
-from .textnorm import coerce, norm
+from .textnorm import coerce, ist_seitenwechsel_wort, norm
 from .validate import check_line_items_total, line_item_row
 
 # Kopfzeilen-Schluesselwoerter je Spalte (de/en/fr/it), normalisiert ueber
@@ -53,14 +53,19 @@ _STOP_WOERTER = (
     "rechnungsbetrag", "endbetrag", "zahlbetrag", "bruttobetrag",
     "gesamtsumme", "umsatzsteuer", "mehrwertsteuer", "steuerbetrag",
     "iban", "bic", "bankverbindung", "zahlbar", "zahlungsbedingungen",
-    "skonto", "seite", "total", "mwst", "ust", "vat", "tva",
+    "skonto", "total", "mwst", "ust", "vat", "tva",
     # englisch (Testsatz "englische Rechnung", Aaron 12.10.2026)
-    "net", "amount", "due", "balance", "grandtotal", "page",
+    "net", "amount", "due", "balance", "grandtotal",
 )
+# Kurze Stoppwoerter ("net", "due", "ust", "bic" ...) gelten nur als GANZES
+# erstes Wort -- sonst beendet eine Position "Netzwerkkabel" oder "Duesenset"
+# die Tabelle (Aaron 05.11.2026: gruendlich statt schnell). Erst ab dieser
+# Laenge darf das erste Wort nur mit dem Stoppwort BEGINNEN ("Nettobetrag:",
+# "Skontobetrag").
+_STOP_PRAEFIX_MIN = 6
 # Zwischensummen/Ueberträge VOR einem Seitenwechsel beenden die Tabelle
 # NICHT -- die Zeile wird nur ignoriert, die Tabelle geht danach weiter
 # (SPEC: "Zwischensummen/Ueberträge über Seitenwechsel ignorieren").
-_SEITENWECHSEL_WOERTER = ("zwischensumme", "uebertrag", "ubertrag")
 
 # Spalten, deren Zellinhalt Text bleibt (kein Betrag/Zahl-Parsing)
 _TEXT_SPALTEN = ("beschreibung", "waehrung")
@@ -170,13 +175,12 @@ def _zeile_aus_woertern(line: list[Word], cols: dict[str, tuple[float, float]],
 def _ist_stop(line: list[Word]) -> bool:
     first = min(line, key=lambda w: w.x0)
     fw = norm(first.text)
-    return any(fw == s or fw.startswith(s) for s in _STOP_WOERTER)
+    return any(fw == s or (len(s) >= _STOP_PRAEFIX_MIN and fw.startswith(s))
+               for s in _STOP_WOERTER)
 
 
 def _ist_seitenwechsel_zeile(line: list[Word]) -> bool:
-    first = min(line, key=lambda w: w.x0)
-    fw = norm(first.text)
-    return any(fw == s or fw.startswith(s) for s in _SEITENWECHSEL_WOERTER)
+    return ist_seitenwechsel_wort(min(line, key=lambda w: w.x0).text)
 
 
 def _ist_header_zeile(line: list[Word]) -> bool:
@@ -185,6 +189,52 @@ def _ist_header_zeile(line: list[Word]) -> bool:
     per Rahmen markierten Bereichs (Baustein 2)."""
     matches = {c for w in line if (c := _match_header_word(w.text))}
     return len(matches) >= _MIN_SPALTEN and all(c in matches for c in _PFLICHT_SPALTEN)
+
+
+def _ist_positionszeile(rec: dict | None, typisch: set[str]) -> bool:
+    """Gleicht eine Zeile der Folgeseite mit dem Muster der Kopfseite ab: sie
+    muss die Hauptspalte (Gesamt, sonst Einzelpreis) UND mindestens drei
+    Viertel der dort ueblichen Zahlenspalten tragen. "Muster GmbH Seite 2
+    von 3" liefert zufaellig zwei Zahlen, aber keinen Gesamtbetrag."""
+    if not rec:
+        return False
+    zahlen = {k for k in rec if k not in _TEXT_SPALTEN}
+    if not typisch:
+        return bool(zahlen)
+    haupt = "gesamt_netto" if "gesamt_netto" in typisch else (
+        "einzelpreis_netto" if "einzelpreis_netto" in typisch else None)
+    if haupt and haupt not in zahlen:
+        return False
+    return len(zahlen & typisch) >= max(1, -(-3 * len(typisch) // 4))
+
+
+def _ohne_briefkopf(gelesen: list[tuple[Page, dict | None]], kopfseite: Page) -> list[dict]:
+    """Zeilen je Seite -> Positionszeilen. Auf Folgeseiten ohne wiederholte
+    Kopfzeile stehen oberhalb der Positionen Briefkopf/"Seite 2 von 3" --
+    erst ab der ersten zum Muster der Kopfseite passenden Zeile zaehlt die
+    Seite (SPEC: Kopf nur auf Seite 1)."""
+    typisch: set[str] = set()
+    kopf_recs = [r for p, r in gelesen if p is kopfseite and r]
+    if kopf_recs:
+        zaehler: dict[str, int] = {}
+        for r in kopf_recs:
+            for k in r:
+                if k not in _TEXT_SPALTEN:
+                    zaehler[k] = zaehler.get(k, 0) + 1
+        typisch = {k for k, n in zaehler.items() if n >= 0.6 * len(kopf_recs)}
+    out: list[dict] = []
+    seite: Page | None = None
+    vorspann = False
+    for page, rec in gelesen:
+        if page is not seite:
+            seite, vorspann = page, page is not kopfseite
+        if vorspann:
+            if not _ist_positionszeile(rec, typisch):
+                continue
+            vorspann = False
+        if rec:
+            out.append(rec)
+    return out
 
 
 def _merge_fortsetzungen(rows: list[dict]) -> list[dict]:
@@ -303,13 +353,12 @@ def extract(doc: Document, netto: float | None = None, brutto: float | None = No
     header_page, header_line, matches = kopf
     cols = _spalten(matches, doc.pages[header_page].width)
 
-    rows_raw: list[dict] = []
+    gelesen: list[tuple[Page, dict | None]] = []
     for page, line in _zeilen_unter_kopf(doc, page_idxs, header_page, header_line):
         if _ist_seitenwechsel_zeile(line):
             continue
-        rec = _zeile_aus_woertern(line, cols, page.width)
-        if rec:
-            rows_raw.append(rec)
+        gelesen.append((page, _zeile_aus_woertern(line, cols, page.width)))
+    rows_raw = _ohne_briefkopf(gelesen, doc.pages[header_page])
 
     items = _merge_fortsetzungen(rows_raw)
     if not items:
@@ -370,6 +419,9 @@ def markiere_tabelle(doc: Document, boxes: list[dict], woerterbuch: dict | None 
     waehlt per Dropdown)."""
     if not boxes:
         return {"columns": [], "rows": []}
+    # Seitenreihenfolge, nicht Zieh-Reihenfolge: Spalten aus dem Rahmen der
+    # ERSTEN Seite, Positionen in Seitenreihenfolge (Aaron 05.11.2026).
+    boxes = sorted(boxes, key=lambda b: (b["page"], b["top"]))
     b0 = boxes[0]
     page0 = doc.pages[b0["page"]]
     words0 = sorted(_words_in_box(doc, b0), key=lambda w: (w.cy, w.x0))
@@ -397,8 +449,14 @@ def markiere_tabelle(doc: Document, boxes: list[dict], woerterbuch: dict | None 
         guess = next((g for w in hwords if (g := _match_header_word(w.text, woerterbuch))), None)
         cols.append({"index": i, "x0": round(cx0 / page0.width, 4), "x1": round(cx1 / page0.width, 4),
                     "header_text": " ".join(w.text for w in hwords), "guess": guess})
+    # Inhaltsmitte je Spalte (nur Datenzeilen) -- Anker, um Folgeseiten mit
+    # leicht verschobenem Raster derselben Spalte zuzuordnen.
+    mitten: list[float | None] = []
+    for c in cols:
+        xs = [w.cx for line in daten0 for w in line if c["x0"] * page0.width <= w.cx < c["x1"] * page0.width]
+        mitten.append(sum(xs) / len(xs) / page0.width if xs else None)
 
-    def _zeilen_lesen(zeilen: list[list[Word]], page_width: float,
+    def _zeilen_lesen(zeilen: list[list[Word]], bereiche: list[list[tuple[float, float]]],
                      skip_header: bool = False) -> list[list[str]]:
         out = []
         for line in zeilen:
@@ -409,21 +467,47 @@ def markiere_tabelle(doc: Document, boxes: list[dict], woerterbuch: dict | None 
             if skip_header and _ist_header_zeile(line):
                 continue
             cells = []
-            for c in cols:
-                x0, x1 = c["x0"] * page_width, c["x1"] * page_width
-                cell = sorted((w for w in line if x0 <= w.cx < x1), key=lambda w: w.x0)
+            for rs in bereiche:
+                cell = sorted((w for w in line if any(x0 <= w.cx < x1 for x0, x1 in rs)),
+                              key=lambda w: w.x0)
                 cells.append(" ".join(w.text for w in cell).strip())
             if any(cells):
                 out.append(cells)
         return out
 
-    rows: list[list[str]] = _zeilen_lesen(daten0, page0.width)
+    def _bereiche_seite1(page_width: float) -> list[list[tuple[float, float]]]:
+        return [[(c["x0"] * page_width, c["x1"] * page_width)] for c in cols]
+
+    def _bereiche_folgeseite(zeilen: list[list[Word]], box: dict, page_width: float
+                             ) -> list[list[tuple[float, float]]]:
+        """Spaltenraster der Folgeseite aus DEREN Wortluecken, jedes Segment
+        der Spalte von Seite 1 mit gleicher Reihenfolge (gleiche Segmentzahl)
+        bzw. naechster Inhaltsmitte zugeordnet -- ein um ein paar Millimeter
+        verschobenes Raster trifft sonst die falsche Spalte."""
+        woerter = [w for line in zeilen if not _ist_stop(line)
+                   and not _ist_seitenwechsel_zeile(line) for w in line]
+        if not woerter or any(m is None for m in mitten):
+            return _bereiche_seite1(page_width)
+        segs = _spaltenluecken(woerter, box["x0"], box["x1"])
+        if len(segs) == len(cols):
+            return [[s] for s in segs]
+        bereiche: list[list[tuple[float, float]]] = [[] for _ in cols]
+        for sx0, sx1 in segs:
+            mitte = (sx0 + sx1) / 2 / page_width
+            ziel = min(range(len(cols)), key=lambda i: abs(mitten[i] - mitte))
+            bereiche[ziel].append((sx0, sx1))
+        return [b or [(c["x0"] * page_width, c["x1"] * page_width)]
+                for b, c in zip(bereiche, cols)]
+
+    rows: list[list[str]] = _zeilen_lesen(daten0, _bereiche_seite1(page0.width))
     for box in boxes[1:]:
         words = sorted(_words_in_box(doc, box), key=lambda w: (w.cy, w.x0))
         if not words:
             continue
         page = doc.pages[box["page"]]
-        rows.extend(_zeilen_lesen(_cluster_rows(words, _line_h(words)), page.width,
+        zeilen = _cluster_rows(words, _line_h(words))
+        zeilen_ohne_kopf = [ln for ln in zeilen if not _ist_header_zeile(ln)]
+        rows.extend(_zeilen_lesen(zeilen, _bereiche_folgeseite(zeilen_ohne_kopf, box, page.width),
                                   skip_header=True))
     return {"columns": cols, "rows": rows}
 

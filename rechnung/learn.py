@@ -32,7 +32,7 @@ from .pdf import Document, Word
 from .template import (STANDARD_FIELDS, ausgeblendet, FieldResult, FieldSpec, LineItemSpec, Template,
                        apply_line_items, apply_template, build_field_spec,
                        build_line_item_spec)
-from .textnorm import MAX_SPAN, norm, parse_amount, parse_date, parse_tax_summary, same_value
+from .textnorm import MAX_SPAN, ist_seitenwechsel_wort, norm, parse_amount, parse_date, parse_tax_summary, same_value
 
 # Felder, die als Anker+Region gelernt werden koennen. taxblock (USt-
 # Aufstellung) ist ein Mehrzeilen-Block, dafuer reicht "Wert wiederfinden"
@@ -232,6 +232,12 @@ def _value_types(value) -> list[str]:
         return ["number", "amount"]
     if isinstance(value, str):
         s = value.strip()
+        # Beschreibung mit Ziffern ("Artikel 0001", "Schulung 2 Tage") ist Text,
+        # kein Betrag -- sonst lernt die Beschreibungsspalte als "number"/
+        # "amount", liest nur das erste Wort und der Probelauf scheitert
+        # (Aaron 05.11.2026: gruendlich).
+        if re.search(r"[^\W\d_]{2,}", re.sub(r"\b(?:EUR|CHF|USD|GBP)\b", "", s, flags=re.I)):
+            return ["text"]
         if re.fullmatch(r"-?\d+", s):
             return ["number", "amount"]
         if parse_amount(s) is not None:
@@ -375,6 +381,7 @@ def learn_line_items(doc: Document, items: list[dict], store=None) -> LineItemSp
     first_words = [w for span, _t in rows[0].values() for w in span]
     last_words = [w for span, _t in rows[-1].values() for w in span]
     page = first_words[0].page
+    last_page = last_words[0].page
     h = max(w.bottom - w.top for w in first_words)
     header_line = _nearest_line(lines, page, min(w.top for w in first_words), 0, h, above=True)
     if not header_line:
@@ -382,10 +389,10 @@ def learn_line_items(doc: Document, items: list[dict], store=None) -> LineItemSp
     header_map = _match_header_words(header_line, {k: span for k, (span, _t) in rows[0].items()})
     if header_map is None:
         return None
-    # Stoppwort: erste Zeile unterhalb der letzten Position -- auch wenn
-    # der Summenblock etwas abgesetzt steht (Trennlinie, Leerraum); ob das
-    # passt, entscheidet ohnehin der Probelauf unten.
-    stop_line = _nearest_line(lines, page, 0, max(w.bottom for w in last_words), h,
+    # Stoppwort: erste Zeile unterhalb der letzten Position (auf deren Seite)
+    # -- auch wenn der Summenblock etwas abgesetzt steht (Trennlinie,
+    # Leerraum); ob das passt, entscheidet ohnehin der Probelauf unten.
+    stop_line = _nearest_line(lines, last_page, 0, max(w.bottom for w in last_words), h,
                               above=False, max_gap_lines=12.0)
 
     page_w = doc.pages[page].width
@@ -394,7 +401,21 @@ def learn_line_items(doc: Document, items: list[dict], store=None) -> LineItemSp
     # Waehrung -- "EUR" steht womoeglich auch in jeder Positionszeile und
     # wuerde die Tabelle schon nach der ersten Zeile beenden.
     stop_words = [w for w in (stop_line or []) if _is_label(w)]
+    mehrseitig = last_page != page
+    if mehrseitig:
+        # "Uebertrag"/"Zwischensumme" steht auf JEDER Seite -- als Stopp-Wort
+        # wuerde es die Tabelle schon auf Seite 1 beenden.
+        stop_words = [w for w in stop_words if not ist_seitenwechsel_wort(w.text)]
     spec = build_line_item_spec(header_cols, stop_words, page_w)
+    if mehrseitig:
+        spec.folgeseiten = True
+        # Beginn der Tabelle auf der zweiten Seite: oberster Positionswert dort
+        alle_woerter = [w for row in rows for span, _t in row.values() for w in span]
+        zweite_seite = min(w.page for w in alle_woerter if w.page > page)
+        zweite = [w for w in alle_woerter if w.page == zweite_seite]
+        if zweite:
+            ph = doc.pages[zweite[0].page].height
+            spec.folge_top = round(max(0.0, (min(w.top for w in zweite) - h * 0.4) / ph), 4)
     if not _items_equiv(apply_line_items(doc, spec), items):
         return None
     if store is not None:

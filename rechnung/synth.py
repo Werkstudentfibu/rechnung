@@ -87,21 +87,27 @@ _LI_HEADERS_EN = [
 
 
 def _draw_items_table(c: canvas.Canvas, h: float, y_top: float, items: list[dict],
-                      headers: list[tuple[str, str | None]] = _LI_HEADERS) -> float:
+                      headers: list[tuple[str, str | None]] = _LI_HEADERS,
+                      kopf: bool = True, versatz_mm: float = 0.0) -> float:
     """Zeichnet die Positionstabelle ab ``y_top`` (Punkte von unten) und gibt
-    die y-Position unterhalb der letzten Zeile zurueck."""
+    die y-Position unterhalb der letzten Zeile zurueck. ``kopf=False``: ohne
+    Kopfzeile (Folgeseite). ``versatz_mm``: alle Zahlenspalten um so viel
+    nach rechts (negativ: links) verschoben -- Folgeseite mit leicht anderem
+    Spaltenraster."""
     x0 = 20 * mm
-    right_edge = 20 + _LI_RIGHT_EDGES["waehrung"]
+    edges = {k: v + versatz_mm for k, v in _LI_RIGHT_EDGES.items()}
+    right_edge = 20 + edges["waehrung"]
     y = y_top
-    c.setFont("Helvetica-Bold", 9)
-    for label, key in headers:
-        if key is None:
-            c.drawString(x0, y, label)
-        else:
-            c.drawRightString((20 + _LI_RIGHT_EDGES[key]) * mm, y, label)
-    y -= 2 * mm
-    c.line(x0, y, right_edge * mm, y)
-    y -= 5 * mm
+    if kopf:
+        c.setFont("Helvetica-Bold", 9)
+        for label, key in headers:
+            if key is None:
+                c.drawString(x0, y, label)
+            else:
+                c.drawRightString((20 + edges[key]) * mm, y, label)
+        y -= 2 * mm
+        c.line(x0, y, right_edge * mm, y)
+        y -= 5 * mm
 
     c.setFont("Helvetica", 9)
     for it in items:
@@ -109,10 +115,10 @@ def _draw_items_table(c: canvas.Canvas, h: float, y_top: float, items: list[dict
         einzelpreis = it["einzelpreis"]
         gesamtpreis = it.get("gesamtpreis", round(menge * einzelpreis, 2))
         c.drawString(x0, y, str(it["beschreibung"]))
-        c.drawRightString((20 + _LI_RIGHT_EDGES["menge"]) * mm, y, f"{menge:g}")
-        c.drawRightString((20 + _LI_RIGHT_EDGES["einzelpreis"]) * mm, y, _de_amount(einzelpreis))
-        c.drawRightString((20 + _LI_RIGHT_EDGES["gesamtpreis"]) * mm, y, _de_amount(gesamtpreis))
-        c.drawRightString((20 + _LI_RIGHT_EDGES["mwst"]) * mm, y, f"{it['mwst']:g}%")
+        c.drawRightString((20 + edges["menge"]) * mm, y, f"{menge:g}")
+        c.drawRightString((20 + edges["einzelpreis"]) * mm, y, _de_amount(einzelpreis))
+        c.drawRightString((20 + edges["gesamtpreis"]) * mm, y, _de_amount(gesamtpreis))
+        c.drawRightString((20 + edges["mwst"]) * mm, y, f"{it['mwst']:g}%")
         c.drawRightString(right_edge * mm, y, str(it.get("waehrung", "EUR")))
         y -= 6 * mm
     y -= 1 * mm
@@ -334,22 +340,40 @@ def make_multipage_invoice(path: str | Path, *, seiten: int = 12,
 def make_multipage_table_invoice(path: str | Path, *, lieferant="Muster Handels GmbH",
                                  ustid="DE123456789", iban="DE89370400440532013000",
                                  rechnungsnr="RE-2026-00200", datum="14.02.2026",
-                                 seiten: int = 3, positionen_je_seite: int = 4,
-                                 satz: float = 19, waehrung="EUR") -> dict:
+                                 seiten: int = 3, positionen_je_seite: int | list[int] = 4,
+                                 satz: float = 19, waehrung="EUR",
+                                 kopf_folgeseiten: bool = True, seitenkopf: bool = False,
+                                 versatz_folgeseiten_mm: float = 0.0,
+                                 uebertrag_oben: bool = False,
+                                 zwischensumme: bool = False,
+                                 beschreibung_praefix: str = "Artikel") -> dict:
     """Mehrseitige Rechnung MIT echter Tabellen-Kopfzeile (wie
-    ``_draw_items_table``, auf jeder Seite wiederholt) und "Uebertrag" am
-    Ende jeder Seite ausser der letzten -- fuer den Testsatz von Baustein 2
-    (``tabelle.py``) ueber Seitenwechsel hinweg (Aaron 12.10.2026)."""
+    ``_draw_items_table``) und "Uebertrag" am Ende jeder Seite ausser der
+    letzten -- fuer den Testsatz von Baustein 2 (``tabelle.py``) ueber
+    Seitenwechsel hinweg (Aaron 12.10.2026).
+
+    Varianten (Aaron 05.11.2026, "je Seite ein Kasten, eine Rechnung"):
+    ``kopf_folgeseiten=False`` -> Kopfzeile nur auf Seite 1; ``seitenkopf``
+    -> "Seite k von n" auf jeder Seite; ``versatz_folgeseiten_mm`` ->
+    Zahlenspalten der Folgeseiten leicht verschoben; ``uebertrag_oben`` ->
+    "Uebertrag" auch als erste Zeile der Folgeseiten; ``zwischensumme`` ->
+    "Zwischensumme" statt "Uebertrag" am Seitenende;
+    ``positionen_je_seite`` darf eine Liste je Seite sein."""
     path = Path(path)
     c = canvas.Canvas(str(path), pagesize=A4)
     w, h = A4
+    je_seite = (positionen_je_seite if isinstance(positionen_je_seite, list)
+                else [positionen_je_seite] * seiten)
     netto = 0.0
     pos = 0
+    alle: list[dict] = []
     for k in range(1, seiten + 1):
         c.setFont("Helvetica-Bold", 14)
         c.drawString(20 * mm, h - 20 * mm, lieferant)
         c.setFont("Helvetica", 9)
         c.drawString(20 * mm, h - 26 * mm, f"USt-IdNr.: {ustid}")
+        if seitenkopf:
+            c.drawRightString(190 * mm, h - 20 * mm, f"Seite {k} von {seiten}")
         if k == 1:
             c.setFont("Helvetica", 10)
             c.drawString(120 * mm, h - 40 * mm, "Rechnungsnummer:")
@@ -357,18 +381,27 @@ def make_multipage_table_invoice(path: str | Path, *, lieferant="Muster Handels 
             c.drawString(120 * mm, h - 47 * mm, "Rechnungsdatum:")
             c.drawString(160 * mm, h - 47 * mm, datum)
         items = []
-        for _ in range(positionen_je_seite):
+        netto_vor = netto
+        for _ in range(je_seite[k - 1]):
             pos += 1
             preis = round(10 + pos * 1.25, 2)
-            items.append({"beschreibung": f"Artikel {pos:04d}", "menge": 1,
+            items.append({"beschreibung": f"{beschreibung_praefix} {pos:04d}", "menge": 1,
                          "einzelpreis": preis, "gesamtpreis": preis, "mwst": satz,
                          "waehrung": waehrung})
             netto = round(netto + preis, 2)
-        table_bottom = _draw_items_table(c, h, h - 70 * mm, items)
+        alle.extend(items)
+        y_top = h - 70 * mm
+        if k > 1 and uebertrag_oben:
+            c.setFont("Helvetica", 9)
+            c.drawString(20 * mm, y_top, f"Uebertrag {_de_amount(netto_vor)} {waehrung}")
+            y_top -= 8 * mm
+        table_bottom = _draw_items_table(c, h, y_top, items,
+                                         kopf=(k == 1 or kopf_folgeseiten),
+                                         versatz_mm=versatz_folgeseiten_mm if k > 1 else 0.0)
         if k < seiten:
             c.setFont("Helvetica", 9)
-            c.drawString(20 * mm, table_bottom - 4 * mm,
-                        f"Uebertrag {_de_amount(netto)} {waehrung}")
+            wort = "Zwischensumme" if zwischensumme else "Uebertrag"
+            c.drawString(20 * mm, table_bottom - 4 * mm, f"{wort} {_de_amount(netto)} {waehrung}")
         else:
             ust = round(netto * satz / 100, 2)
             brutto = round(netto + ust, 2)
@@ -385,7 +418,8 @@ def make_multipage_table_invoice(path: str | Path, *, lieferant="Muster Handels 
     c.save()
     ust_ges = round(netto * satz / 100, 2)
     return {"rechnungsnummer": rechnungsnr, "netto": netto, "ust": ust_ges,
-           "brutto": round(netto + ust_ges, 2), "seiten": seiten, "path": path}
+           "brutto": round(netto + ust_ges, 2), "seiten": seiten, "path": path,
+           "positionen": alle}
 
 
 def make_sammel_pdf(path: str | Path, rechnungen: list[dict], **common) -> list[dict]:

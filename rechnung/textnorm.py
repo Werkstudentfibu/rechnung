@@ -23,6 +23,20 @@ def norm(s: str) -> str:
     return s
 
 
+# Zeilen am Seitenwechsel einer Positionstabelle, die KEINE Position sind
+# (Aaron 05.11.2026): "Uebertrag"/"Zwischensumme" (Praefix) und
+# "Seite 2 von 3"/"Page 2" (nur als ganzes Wort, sonst waere "Seitenteil"
+# eine Seitenzeile). Gemeinsam fuer tabelle.py und template.py.
+SEITENWECHSEL_WOERTER = ("zwischensumme", "uebertrag", "ubertrag")
+SEITENZUBEHOER_WOERTER = ("seite", "page", "blatt", "pagina")
+
+
+def ist_seitenwechsel_wort(text: str) -> bool:
+    """Erstes Wort einer Tabellenzeile -> Seitenwechsel-/Seitenzubehoer-Zeile?"""
+    fw = norm(text)
+    return fw.startswith(SEITENWECHSEL_WOERTER) or fw in SEITENZUBEHOER_WOERTER
+
+
 _AMOUNT_RE = re.compile(r"-?\d[\d.\s ]*,\d{1,2}|-?\d[\d,\s ]*\.\d{1,2}|-?\d+")
 
 # Schweizer Zahlenformat: Hochkomma als Tausendertrenner (1'234.50, 1’234.50)
