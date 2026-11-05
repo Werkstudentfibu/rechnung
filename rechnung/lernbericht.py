@@ -143,6 +143,7 @@ def erstellen(store, seit: str = "") -> dict:
             "bestaetigt_felder": sorted(k for k in fall.get("bestaetigte_felder") or []
                                         if quellen.get(k) not in (None, "manual")),
             "positionen": len(fall.get("positionen") or []),
+            "bestaetigte_zeilen": int(fall.get("bestaetigte_zeilen") or 0),
         })
     nr = {r["_sha"]: r["nr"] for r in rechnungen}
     roh = [e for e in store.events()
@@ -176,6 +177,7 @@ def erstellen(store, seit: str = "") -> dict:
         "zusammenfassung": {"rechnungen": len(rechnungen), "felder": felder,
                             "korrigiert": korr,
                             "ausdruecklich_richtig": sum(len(r["bestaetigt_felder"]) for r in rechnungen),
+                            "zeilen_bestaetigt": sum(r["bestaetigte_zeilen"] for r in rechnungen),
                             "richtig_anteil": round(1 - korr / felder, 3) if felder else None},
         "fehlerstatistik": statistik,
     }
@@ -188,7 +190,9 @@ def _text(b: dict) -> str:
               f"davon {z['korrigiert']} vom Menschen korrigiert"
               + (f" -> {100 * z['richtig_anteil']:.0f} % richtig gelesen" if z["richtig_anteil"] is not None else "")
               + (f"; {z['ausdruecklich_richtig']} Felder ausdruecklich als richtig bestaetigt"
-                 if z.get("ausdruecklich_richtig") else ""),
+                 if z.get("ausdruecklich_richtig") else "")
+              + (f"; {z['zeilen_bestaetigt']} Positionszeilen einzeln bestaetigt"
+                 if z.get("zeilen_bestaetigt") else ""),
               ""]
     for r in b["rechnungen"]:
         zeilen.append(f"- Rechnung {r['nr']} | {r['lieferant'] or '?'} | {r['extraktion']} | "

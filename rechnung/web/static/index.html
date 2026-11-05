@@ -48,6 +48,12 @@
      sichtbar; einzelne Tabellenzelle als Rahmen-Ziel ausgewaehlt. */
   .tabrahmen-box { position: absolute; border: 2px solid #9b59b6; background: rgba(155,89,182,.08);
                    pointer-events: none; }
+  .tabrahmen-box .tr-label { position: absolute; top: -1px; right: -1px; background: #9b59b6; color: #fff;
+                             font-size: 11px; padding: 0 6px; border-radius: 0 0 0 6px; }
+  .tr-seiten { margin: 4px 0; display: flex; flex-wrap: wrap; gap: 4px; }
+  .tr-seite { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border-radius: 8px;
+              background: #eee; font-size: 12px; cursor: pointer; }
+  .tr-seite.ok { background: #e6d9f0; border: 1px solid #9b59b6; }
   .li-cell-ziel { outline: 2px solid #2f6fd0; }
   /* Baustein 3 (Aaron 12.10.2026): Vorschlag fuer die uebrigen Spalten
      derselben Zeile -- gelb, ein Klick uebernimmt ihn. */
@@ -198,6 +204,12 @@
   .mk.row.ok { border-color: #389e0d; background: rgba(56,158,13,.08); }
   .mk.row.bad { border-color: #cf1322; background: rgba(207,19,34,.12); }
   .mk.row span { display: none; }
+  /* Zeilenstatus der Positionen (Aaron 05.11.2026): bestaetigt = gruen, vom Menschen geaendert = blau */
+  tr.zs-bestaetigt td { background: #f0faf0; } tr.zs-korrigiert td { background: #eef5ff; }
+  td.zs { white-space: nowrap; font-size: 12px; } td.zs .zs-ok { background: #d9f2d9; border: 1px solid #7bbf7b; border-radius: 4px; cursor: pointer; padding: 0 5px; }
+  td.zs .zs-ok.done { cursor: default; background: #52c41a; color: #fff; border-color: #389e0d; }
+  tr.li-summe td { font-weight: 600; border-top: 2px solid #bbb; } tr.li-summe.bad td { background: #fff1f0; color: #cf1322; }
+  tr.li-summe.ok td { color: #389e0d; }
   tr.ok td.st { color: #389e0d; } tr.bad td { background: #fff1f0; } tr.bad td.st { color: #cf1322; }
   td.st { white-space: nowrap; font-size: 12px; }
   .edit td input { width: 100%; border: 1px solid transparent; background: transparent; font: inherit; padding: 1px 3px; }
@@ -594,6 +606,8 @@ function applyInvoiceData(d) {
     bestaetigt: {},   // Felder, die der Mensch per ✓ bestätigt hat (nur diese Ansicht)
     positionenGrund: d.positionen_grund || '',
     lineItems: (d.line_items || []).map(it => ({ ...it })),
+    // je Position: 'offen' | 'bestaetigt' | 'korrigiert' (Aaron 05.11.2026)
+    zeilenStatus: (d.zeilen_status || []).slice(),
     // Herkunft je Zeile aus der vollstaendig ergaenzten Aufstellung
     // (``tax_breakdown``, SPEC Baustein 2/3) in die editierbaren Zeilen
     // einmischen -- nach Satz zugeordnet, da beide Listen dieselben Zeilen
@@ -1574,6 +1588,19 @@ function tabRahmenZuruecksetzen() {
   Object.assign(STATE.tabRahmen, { boxes: [], columns: [], mapping: null });
   renderCurrent();
 }
+function tabRahmenSeiteZeigen(i) {
+  const w = document.querySelectorAll('.pdfwrap')[i]; if (w) w.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function tabRahmenSeiteLoeschen(i) {
+  STATE.tabRahmen.boxes = STATE.tabRahmen.boxes.filter(b => b.page !== i);
+  if (!STATE.tabRahmen.boxes.length) {
+    Object.assign(STATE.tabRahmen, { columns: [], mapping: null });
+    renderCurrent();
+  } else {
+    renderCurrent();
+    tabRahmenAktualisieren();
+  }
+}
 function tabRahmenMappingGeaendert(i, value) {
   STATE.tabRahmen.mapping[i] = value;
   tabRahmenAktualisieren();
@@ -1587,8 +1614,14 @@ function renderTabRahmenPanel() {
     <div class="hint">In der Rechnung links einen Rahmen um die Tabelle ziehen (Kopfzeile bis letzte
       Position). Bei mehrseitigen Tabellen auf jeder weiteren Seite ebenfalls einen Rahmen ziehen –
       ein Rahmen ersetzt den vorigen auf derselben Seite. Esc bricht ab.</div>
-    ${seiten.length ? `<div class="hint">Markierte Seite(n): ${seiten.join(', ')}
-      <button class="ghost mini" onclick="tabRahmenZuruecksetzen()">Rahmen zurücksetzen</button></div>` : ''}
+    <div class="hint">Eine Rechnung, je Seite ein Rahmen – die Spalten gelten für alle Seiten.
+      Seiten mit Rahmen sind lila; × löscht den Rahmen dieser Seite, ein neuer Rahmen ersetzt ihn.</div>
+    <div class="tr-seiten">${STATE.pages.map((_pg, i) => seiten.includes(i + 1)
+      ? `<span class="tr-seite ok" onclick="tabRahmenSeiteZeigen(${i})" title="Zur Seite springen">Seite ${i + 1} ✓
+           <button class="danger" style="padding:0 4px" title="Rahmen dieser Seite löschen"
+             onclick="event.stopPropagation();tabRahmenSeiteLoeschen(${i})">×</button></span>`
+      : `<span class="tr-seite" onclick="tabRahmenSeiteZeigen(${i})" title="Zur Seite springen – dort Rahmen ziehen">Seite ${i + 1} – kein Rahmen</span>`).join('')}
+      ${seiten.length ? `<button class="ghost mini" onclick="tabRahmenZuruecksetzen()">Alle Rahmen zurücksetzen</button>` : ''}</div>
     ${cols.length ? `<div style="margin:6px 0">${cols.map((c, i) => `
       <span class="li-col">${esc(c.header_text || ('Spalte ' + (i + 1)))}:
         <select onchange="tabRahmenMappingGeaendert(${i}, this.value)">
@@ -1603,7 +1636,7 @@ function tabRahmenBoxGezogen(wrap, page, r) {
                x1: (r.right - w.left) * fx, bottom: (r.bottom - w.top) * fy };
   STATE.tabRahmen.boxes = STATE.tabRahmen.boxes.filter(b => b.page !== page);
   STATE.tabRahmen.boxes.push(box);
-  paintTabRahmen();
+  renderCurrent();     // Seitenliste im Panel aktualisieren (zeichnet Rahmen mit)
   tabRahmenAktualisieren();
 }
 async function tabRahmenAktualisieren() {
@@ -1618,6 +1651,7 @@ async function tabRahmenAktualisieren() {
   if (!STATE.tabRahmen.mapping || STATE.tabRahmen.mapping.length !== r.columns.length)
     STATE.tabRahmen.mapping = r.columns.map(c => c.guess || 'ignorieren');
   STATE.lineItems = r.items || [];
+  STATE.zeilenStatus = STATE.lineItems.map(() => 'offen');
   STATE.tabDirty.positionen = true;
   renderCurrent();
   $('#msg').textContent = `Tabelle gelesen: ${r.items.length} Position(en) – Spalten-Zuordnung prüfen, ` +
@@ -1632,6 +1666,7 @@ function paintTabRahmen() {
     const el = document.createElement('div'); el.className = 'tabrahmen-box';
     el.style.left = (b.x0 * pg.scale) + 'px'; el.style.top = (b.top * pg.scale) + 'px';
     el.style.width = ((b.x1 - b.x0) * pg.scale) + 'px'; el.style.height = ((b.bottom - b.top) * pg.scale) + 'px';
+    el.innerHTML = `<span class="tr-label">Tabelle · Seite ${b.page + 1}</span>`;
     wrap.appendChild(el);
   }
 }
@@ -1801,8 +1836,8 @@ function renderLiPreviewBox(items) {
   const pr = (STATE.pruefung || {}).positionen || [];
   const fest = STATE.positionenFest;
   box.innerHTML = `
-    <div class="li-scroll"><table class="edit ab-li"><tr>${cols.map(c => `<th title="${esc(c)}">${esc(label(c))}</th>`).join('')}<th>Prüfung</th><th></th></tr>
-    ${items.map((it, ri) => `<tr class="${rowCls(pr[ri])}">${cols.map(c => {
+    <div class="li-scroll"><table class="edit ab-li"><tr><th title="Zeile bestätigen / Status">Zeile</th>${cols.map(c => `<th title="${esc(c)}">${esc(label(c))}</th>`).join('')}<th>Prüfung</th><th></th></tr>
+    ${items.map((it, ri) => `<tr class="${rowCls(pr[ri])} zs-${liStatus(ri)}">${zeilenStatusZelle(ri, fest)}${cols.map(c => {
         if (c === 'kategorie') {
           const conf = it.kategorie_konfidenz;
           return `<td><input value="${esc(nz(it.kategorie))}" size="14" placeholder="Kategorie …"
@@ -1830,8 +1865,11 @@ function renderLiPreviewBox(items) {
                   onclick="${fest ? '' : `selLiZelle(${ri}, '${c}')`}"
                   onchange="liSetCell(${ri}, '${esc(c)}', this.value)">${vorschlagHtml}</td>`;
       }).join('')}${stCell(pr[ri])}
-      <td>${fest ? '' : `<button class="danger" style="padding:0 4px" title="Zeile löschen" onclick="liDelRow(${ri})">×</button>`}</td></tr>`).join('')}
+      <td style="white-space:nowrap">${fest ? '' : `<button class="ghost mini" style="padding:0 4px" title="Zeile darüber einfügen" onclick="liInsertRow(${ri})">＋</button>
+        <button class="danger" style="padding:0 4px" title="Zeile löschen" onclick="liDelRow(${ri})">×</button>`}</td></tr>`).join('')}
+    ${items.length ? liSummenZeile(items, cols.length + 3) : ''}
     </table></div>
+    ${items.length && !fest ? liStatusLeiste(items) : ''}
     ${items.length ? '' : STATE.positionenGrund
       ? `<div class="hint">Noch keine Position erkannt – Grund: ${esc(STATE.positionenGrund)}. Die Positionstabelle lässt sich über „Tabelle im PDF markieren“ anlernen.</div>`
       : STATE.kiPositionen === false
@@ -1844,24 +1882,100 @@ function renderLiPreviewBox(items) {
     </div>`}`;
   return box;
 }
+/* -------- Zeilenstatus je Position (Aaron 05.11.2026) --------
+   ✓ = Zeile stimmt (zaehlt als Treffer, aendert nichts, macht die Rechnung NICHT
+   fertig); Zelle aendern / Zeile einfuegen = "korrigiert" (zaehlt als Korrektur,
+   nach "Positionen uebernehmen"). Der Server haelt den Status am Zeileninhalt. */
+function liStatus(ri) { return (STATE.zeilenStatus || [])[ri] || 'offen'; }
+function liStatusAbgleichen() {
+  const n = STATE.lineItems.length; const z = STATE.zeilenStatus || [];
+  while (z.length < n) z.push('offen');
+  z.length = n; STATE.zeilenStatus = z;
+}
+function zeilenStatusZelle(ri, fest) {
+  const st = liStatus(ri);
+  if (fest) return '<td class="zs"></td>';
+  if (st === 'bestaetigt') return `<td class="zs"><span class="zs-ok done" title="Zeile bestätigt">✓</span></td>`;
+  if (st === 'korrigiert') return `<td class="zs" title="vom Menschen geändert – mit „Positionen übernehmen“ speichern">✎ geändert</td>`;
+  return `<td class="zs"><button class="zs-ok" title="Zeile bestätigen: stimmt so" onclick="liZeileBestaetigen(${ri})">✓</button></td>`;
+}
+function liSaubereZeile(it) {
+  return Object.fromEntries(Object.entries(it).filter(([k]) => !k.startsWith('_') && !LI_NICHT_SPEICHERN.includes(k)));
+}
+async function liZeilenBestaetigen(indizes) {
+  liStatusAbgleichen();
+  const rows = indizes.map(ri => liSaubereZeile(STATE.lineItems[ri]));
+  if (!rows.length) return;
+  const r = await api('/api/zeilen-bestaetigen', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, rows, template_id: STATE.tid || null }),
+  });
+  if (!r.ok) { $('#msg').textContent = '✗ Zeile(n) konnten nicht bestätigt werden'; return; }
+  indizes.forEach(ri => { STATE.zeilenStatus[ri] = 'bestaetigt'; });
+  liRedraw();
+  $('#msg').textContent = rows.length === 1 ? 'Zeile bestätigt.' : `${rows.length} Zeilen bestätigt.`;
+}
+function liZeileBestaetigen(ri) { liZeilenBestaetigen([ri]); }
+function liAlleBestaetigen() {
+  liStatusAbgleichen();
+  liZeilenBestaetigen(STATE.lineItems.map((_, i) => i).filter(i => liStatus(i) === 'offen'));
+}
+function liStatusLeiste(items) {
+  liStatusAbgleichen();
+  const z = STATE.zeilenStatus;
+  const n = (s) => z.filter(x => x === s).length;
+  const offen = n('offen');
+  return `<div class="hint" style="margin-top:4px">${n('bestaetigt')} von ${items.length} Zeilen bestätigt,
+    ${n('korrigiert')} geändert, ${offen} offen
+    ${offen ? `<button class="ghost mini" onclick="liAlleBestaetigen()" title="Bestätigt alle noch offenen Zeilen – die Rechnung selbst wird dadurch nicht fertig">Alle offenen Zeilen bestätigen</button>` : ''}</div>`;
+}
+/* Summe der Positionen gegen Netto der Rechnung (Pruefung "positionen-summe",
+   validate.check_line_items_total) -- Abweichung deutlich markiert. */
+function liSummenZeile(items, spalten) {
+  const chk = (((STATE.pruefung || {}).checks) || []).find(c => c.name === 'positionen-summe');
+  const num = v => { const x = parseFloat(String(v ?? '').replace(/\./g, '').replace(',', '.')); return isNaN(x) ? parseFloat(v) : x; };
+  let sum = 0, n = 0;
+  for (const it of items) { const v = typeof it.gesamt_netto === 'number' ? it.gesamt_netto : num(it.gesamt_netto); if (!isNaN(v)) { sum += v; n++; } }
+  if (!n) return '';
+  const netto = ((STATE.current || {}).netto || {}).value;
+  const cls = chk && chk.ok === false ? 'bad' : chk && chk.ok ? 'ok' : '';
+  const diff = netto != null && !isNaN(Number(netto)) ? sum - Number(netto) : null;
+  return `<tr class="li-summe ${cls}"><td colspan="${spalten}">Σ Positionen ${fmtWert(sum, 'amount')}
+    ${netto != null ? `· Netto der Rechnung ${fmtWert(Number(netto), 'amount')}` : ''}
+    ${diff != null ? (Math.abs(diff) > 0.02 + 0.01 * n ? `· ✗ Abweichung ${fmtWert(diff, 'amount')}` : '· ✓ passt') : ''}
+    ${chk && chk.ok === false ? `<span class="hint"> (${esc(chk.detail)})</span>` : ''}</td></tr>`;
+}
 function liRedraw() {
   const old = $('#li-preview-box');
   if (old) old.replaceWith(renderLiPreviewBox(STATE.lineItems));
 }
 function liTouched() { STATE.tabDirty.positionen = true; liRedraw(); refreshPruefung(); }
 function liSetCell(ri, col, value) {
+  if (String(STATE.lineItems[ri][col] ?? '') === String(value ?? '')) return;
   STATE.lineItems[ri][col] = value;
+  liStatusAbgleichen(); STATE.zeilenStatus[ri] = 'korrigiert';
   // Mensch korrigiert die Zelle -> Herkunft "korrigiert" (SPEC Baustein 3),
   // auch schon vor dem Speichern sichtbar.
   const it = STATE.lineItems[ri];
   if (it._herkunft && col in it._herkunft) delete it._herkunft[col];
   liTouched();
 }
-function liDelRow(ri) { STATE.liVorschlag = null; STATE.lineItems.splice(ri, 1); liTouched(); }
-function liAddRow() {
+function liDelRow(ri) {
+  STATE.liVorschlag = null; liStatusAbgleichen();
+  STATE.lineItems.splice(ri, 1); STATE.zeilenStatus.splice(ri, 1); liTouched();
+}
+function liLeereZeile() {
   const cols = liCols(STATE.lineItems).filter(c => !LI_NICHT_SPEICHERN.includes(c));
   const row = {}; (cols.length ? cols : LI_STD.map(([k]) => k)).forEach(c => row[c] = '');
-  STATE.lineItems.push(row); liTouched();
+  return row;
+}
+function liAddRow() {
+  liStatusAbgleichen();
+  STATE.lineItems.push(liLeereZeile()); STATE.zeilenStatus.push('korrigiert'); liTouched();
+}
+function liInsertRow(ri) {
+  STATE.liVorschlag = null; liStatusAbgleichen();
+  STATE.lineItems.splice(ri, 0, liLeereZeile()); STATE.zeilenStatus.splice(ri, 0, 'korrigiert'); liTouched();
 }
 function liAddCol() {
   const name = (prompt('Name der neuen Spalte (z.B. menge, einzelpreis, gesamt, mwst, rabatt):') || '')
@@ -1899,6 +2013,7 @@ async function refreshLiPreview() {
     items = r.items || [];
   }
   STATE.lineItems = items;
+  STATE.zeilenStatus = items.map(() => 'offen');
   liRedraw();
   refreshPruefung();
 }
@@ -2023,7 +2138,8 @@ async function saveTabelle(art) {
   const r = await api('/api/tabelle', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ file: STATE.file, art, rows, template_id: STATE.tid || null,
-                          quelle_vorher: quelleVorher, spalten_zuordnung: spaltenZuordnung }),
+                          quelle_vorher: quelleVorher, spalten_zuordnung: spaltenZuordnung,
+                          zeilen_status: art === 'positionen' ? (liStatusAbgleichen(), STATE.zeilenStatus) : undefined }),
   });
   if (!r.ok) { $('#msg').textContent = 'Fehler beim Speichern der Tabelle'; return; }
   // Neu laden: Markierungen/Pruefungen/Status kommen frisch vom Server
@@ -3063,7 +3179,16 @@ async function loadQualitaet() {
   const anteil = v => v == null ? '–' : Math.round(100 * v) + ' %';
   const trendHtml = t => t === 'besser' ? '<span class="chk ok">↓ besser</span>'
     : t === 'schlechter' ? '<span class="chk bad">↑ schlechter</span>' : esc(t || '');
-  $('#q-fehler').innerHTML = !fs.zeilen.length ? '<p class="hint">Noch keine Korrekturen.</p>' :
+  // Positionszeilen einzeln: bestätigt = Treffer, geändert/eingefügt = Korrektur (Aaron 05.11.2026)
+  const zs = d.zeilenstatistik || { gesamt: {}, lieferanten: [] };
+  const zg = zs.gesamt || {};
+  const zeilenHtml = (zg.treffer || zg.korrigiert || zg.bestaetigt_vom_menschen)
+    ? `<p><b>Positionszeilen:</b> ${zg.treffer || 0} richtig erkannt (bestätigt), ${zg.korrigiert || 0} geändert/eingefügt${zg.quote != null ? ` → <b>${Math.round(100 * zg.quote)} %</b> Treffer` : ''}.</p>` +
+      '<table><tr><th>Lieferant</th><th class="num">Treffer</th><th class="num">geändert</th><th class="num">Quote</th></tr>' +
+      zs.lieferanten.map(r => `<tr><td>${esc(r.lieferant_name || r.lieferant)}</td><td class="num">${r.treffer}</td>
+        <td class="num">${r.korrigiert}</td><td class="num">${r.quote == null ? '–' : Math.round(100 * r.quote) + ' %'}</td></tr>`).join('') + '</table>'
+    : '';
+  $('#q-fehler').innerHTML = zeilenHtml + (!fs.zeilen.length ? '<p class="hint">Noch keine Korrekturen.</p>' :
     (fs.lohnend.length ? '<p><b>Lohnendste Verbesserungen</b></p><ul>' +
       fs.lohnend.map(r => `<li>${esc(r.text)}</li>`).join('') + '</ul>' : '') +
     '<table><tr><th>Lieferant</th><th>Feld</th><th class="num">korrigiert</th><th class="num">Anteil</th>' +
@@ -3071,7 +3196,7 @@ async function loadQualitaet() {
     fs.zeilen.map(r => `<tr><td>${esc(r.lieferant_name || r.lieferant)}</td><td>${esc(r.feld_label)}</td>
       <td class="num">${r.korrigiert} von ${r.rechnungen}</td><td class="num">${anteil(r.anteil)}</td>
       <td class="num">${anteil(r.anteil_4_wochen)}</td><td class="num">${anteil(r.anteil_davor)}</td>
-      <td>${trendHtml(r.trend)}</td></tr>`).join('') + '</table>';
+      <td>${trendHtml(r.trend)}</td></tr>`).join('') + '</table>');
 }
 
 async function loadLernbericht() {

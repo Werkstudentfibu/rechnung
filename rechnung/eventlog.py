@@ -41,6 +41,10 @@ TYPE_SUPPLIER = "lieferant"
 TYPE_KEINE_RECHNUNG = "keine_rechnung"
 # Feld ausdruecklich als richtig bestaetigt (Knopf "Wert stimmt" in der Bearbeitungsansicht)
 TYPE_FELD_BESTAETIGT = "feld_bestaetigt"
+# Positionszeile ausdruecklich bestaetigt bzw. vom Menschen geaendert (Aaron
+# 05.11.2026): bestaetigt = Treffer, geaendert = Korrektur, wie bei den Feldern
+TYPE_ZEILE_BESTAETIGT = "zeile_bestaetigt"
+TYPE_ZEILE_KORRIGIERT = "zeile_korrigiert"
 KR_AUSSORTIERT = "aussortiert"
 KR_ZURUECKGEHOLT = "zurueckgeholt"       # "Doch eine Rechnung" -- Fehlsortierung
 KR_GELOESCHT = "geloescht"               # Nachtrag 14.10.2026: endgueltig geloescht
@@ -137,6 +141,54 @@ def record_feld_bestaetigt(store, sha256: str, field: str, wert, operator: str =
     }
     store.event_append(rec)
     return rec
+
+
+def record_zeile(store, typ: str, sha256: str, fingerabdruck: str, operator: str = "",
+                 supplier_id: str | None = None, supplier_name: str | None = None,
+                 file: str = "", template_id: str | None = None,
+                 programm_richtig: bool = False) -> dict:
+    """Eine Positionszeile wurde bestaetigt (``TYPE_ZEILE_BESTAETIGT``) oder vom
+    Menschen geaendert/eingefuegt (``TYPE_ZEILE_KORRIGIERT``). Ohne Zellwerte:
+    nur Fingerabdruck -- Betraege gehoeren nicht ins Ereignisprotokoll.
+    ``programm_richtig``: die bestaetigte Zeile stammt unveraendert vom Programm."""
+    rec = {
+        "type": typ, "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "sha256": sha256, "file": file, "zeile": fingerabdruck,
+        "supplier_id": supplier_id, "supplier_name": supplier_name,
+        "template_id": template_id, "programm_richtig": bool(programm_richtig),
+        "operator": operator or "?",
+    }
+    store.event_append(rec)
+    return rec
+
+
+def zeilenstatistik(store) -> dict:
+    """Trefferquote je Position: ``treffer`` (bestaetigte Zeilen, die das
+    Programm richtig hatte) gegen ``korrigiert`` (vom Menschen geaenderte oder
+    eingefuegte Zeilen), gesamt und je Lieferant."""
+    gesamt = {"treffer": 0, "bestaetigt_vom_menschen": 0, "korrigiert": 0}
+    je: dict[str, dict] = {}
+    for e in store.events():
+        typ = e.get("type")
+        if typ not in (TYPE_ZEILE_BESTAETIGT, TYPE_ZEILE_KORRIGIERT):
+            continue
+        sid = e.get("supplier_id") or ""
+        row = je.setdefault(sid, {"lieferant": sid or "(unbekannt)",
+                                  "lieferant_name": e.get("supplier_name") or "",
+                                  "treffer": 0, "bestaetigt_vom_menschen": 0, "korrigiert": 0})
+        if typ == TYPE_ZEILE_KORRIGIERT:
+            key = "korrigiert"
+        elif e.get("programm_richtig"):
+            key = "treffer"
+        else:
+            key = "bestaetigt_vom_menschen"
+        row[key] += 1
+        gesamt[key] += 1
+    for r in [gesamt, *je.values()]:
+        n = r["treffer"] + r["korrigiert"]
+        r["quote"] = round(r["treffer"] / n, 2) if n else None
+    return {"gesamt": gesamt,
+            "lieferanten": sorted(je.values(), key=lambda r: (-r["korrigiert"], r["lieferant"]))}
 
 
 def record_human(store, rec: dict, aktion: str, operator: str = "") -> dict:

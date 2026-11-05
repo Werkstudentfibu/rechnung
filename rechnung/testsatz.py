@@ -40,6 +40,7 @@ import re
 import time
 from pathlib import Path
 
+from . import positionen as positionen_mod
 from .store import Store, _atomic_write, _read_json_safe
 from .template import STANDARD_FIELDS
 from .textnorm import norm_ustid, parse_amount, parse_date
@@ -110,6 +111,9 @@ def merken(store: Store, res, operator: str = "") -> Path | None:
         "quellen": quellen,
         # vom Menschen ausdruecklich als richtig bestaetigte Felder (ohne Aenderung)
         "bestaetigte_felder": sorted(f for f in store.confirmed_fields(res.sha256) if f in felder),
+        # Positionszeilen, die der Mensch einzeln bestaetigt hat (Aaron 05.11.2026)
+        "bestaetigte_zeilen": sum(1 for z in positionen_mod.zeilen_status(
+            res.line_items, store.zeilen(res.sha256)) if z == positionen_mod.ZEILE_BESTAETIGT),
         "positionen": _jsonable([{k: v for k, v in it.items() if not k.startswith("_")}
                                  for it in res.line_items or []]),
         "ust_aufstellung": _jsonable([{k: v for k, v in r.items() if not k.startswith("_")}

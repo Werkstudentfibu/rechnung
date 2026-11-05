@@ -379,6 +379,35 @@ class Store:
         _atomic_write(p, json.dumps(cur, indent=2, ensure_ascii=False))
         self.audit("confirm_field", {"sha256": sha, "field": field, "value": value}, operator)
 
+    def zeilen(self, sha: str) -> dict:
+        """Zeilenstatus der Positionstabelle: ``{"bestaetigt": [fp...],
+        "korrigiert": [fp...]}`` (Fingerabdruecke, siehe
+        ``positionen.zeilen_fingerabdruck``)."""
+        z = _read_json_safe(self._corrections / f"{sha}.json", {}).get("zeilen", {})
+        return {"bestaetigt": list(z.get("bestaetigt", [])), "korrigiert": list(z.get("korrigiert", []))}
+
+    def save_zeilen(self, sha: str, bestaetigt: list[str], korrigiert: list[str],
+                    operator: str = "") -> tuple[list[str], list[str]]:
+        """Zeilen als bestaetigt/korrigiert vormerken -> (neu bestaetigte,
+        neu korrigierte) Fingerabdruecke (nur die, die vorher nicht schon so
+        vermerkt waren -- Grundlage, jedes Ereignis nur EINMAL zu zaehlen).
+        Eine Zeile ist nie beides: Korrigieren nimmt die Bestaetigung weg und
+        umgekehrt."""
+        self._corrections.mkdir(parents=True, exist_ok=True)
+        p = self._corrections / f"{sha}.json"
+        cur = _read_json_safe(p, {"sha256": sha, "fields": {}})
+        z = cur.setdefault("zeilen", {"bestaetigt": [], "korrigiert": []})
+        best, korr = list(z.get("bestaetigt", [])), list(z.get("korrigiert", []))
+        neu_b = [f for f in dict.fromkeys(bestaetigt) if f not in best]
+        neu_k = [f for f in dict.fromkeys(korrigiert) if f not in korr]
+        best = [f for f in best if f not in korrigiert] + neu_b
+        korr = [f for f in korr if f not in bestaetigt] + neu_k
+        z["bestaetigt"], z["korrigiert"] = best, korr
+        cur["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        _atomic_write(p, json.dumps(cur, indent=2, ensure_ascii=False))
+        self.audit("zeilen", {"sha256": sha, "bestaetigt": len(neu_b), "korrigiert": len(neu_k)}, operator)
+        return neu_b, neu_k
+
     def save_correction(self, sha: str, field: str, value, operator: str = "") -> None:
         self._corrections.mkdir(parents=True, exist_ok=True)
         p = self._corrections / f"{sha}.json"

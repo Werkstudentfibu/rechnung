@@ -18,7 +18,9 @@ bleiben unveraendert stehen -- nur die bekannten Aliase werden umbenannt."""
 
 from __future__ import annotations
 
-from .textnorm import norm
+import hashlib
+
+from .textnorm import norm, parse_amount
 
 # Feste Reihenfolge der Positionstabelle (SPEC Baustein 1). "einheit" ist
 # optional und erscheint nur, wenn eine Position sie tatsaechlich hat.
@@ -142,3 +144,46 @@ def ordered_columns(items: list[dict]) -> list[str]:
     cols = [c for c in STANDARD_COLUMNS if c in present]
     extra = sorted(present - set(cols))
     return cols + extra
+
+
+# ---- Zeilenstatus der Positionstabelle (Aaron 05.11.2026) -------------------
+# "Jede Zeile soll individuell verbessert oder bestaetigt werden." Der Status
+# haengt am INHALT der Zeile (Fingerabdruck), nicht an ihrer Nummer: so bleibt
+# er richtig, wenn davor eine Zeile eingefuegt/geloescht wird, und eine
+# nachtraeglich geaenderte Zeile gilt von selbst nicht mehr als bestaetigt.
+ZEILE_OFFEN, ZEILE_BESTAETIGT, ZEILE_KORRIGIERT = "offen", "bestaetigt", "korrigiert"
+_FINGERABDRUCK_SPALTEN = ("beschreibung", "menge", "einzelpreis_netto", "gesamt_netto", "mwst_satz")
+
+
+def _zahl(v) -> str:
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return f"{float(v):.4f}"
+    if isinstance(v, str) and v.strip():
+        p = parse_amount(v)
+        return f"{p:.4f}" if p is not None else norm(v)
+    return ""
+
+
+def zeilen_fingerabdruck(row: dict) -> str:
+    """Stabiler Kurz-Hash der inhaltlichen Spalten einer Position (ohne
+    ``pos``/interne ``_``-Felder, Zahlen als Zahl, Text normalisiert)."""
+    r = canonical_row(row)
+    teile = [norm(str(r.get("beschreibung") or ""))] + [_zahl(r.get(c)) for c in _FINGERABDRUCK_SPALTEN[1:]]
+    return hashlib.sha1("|".join(teile).encode("utf-8")).hexdigest()[:12]
+
+
+def canonical_row(row: dict) -> dict:
+    return (normalize_columns([row]) or [{}])[0]
+
+
+def zeilen_status(items: list[dict] | None, gespeichert: dict | None) -> list[str]:
+    """Status je Position: ``bestaetigt`` (Fingerabdruck steht in der
+    Bestaetigt-Liste), ``korrigiert`` (vom Menschen geaendert/eingefuegt) oder
+    ``offen``."""
+    g = gespeichert or {}
+    best, korr = set(g.get("bestaetigt") or []), set(g.get("korrigiert") or [])
+    out = []
+    for it in items or []:
+        fp = zeilen_fingerabdruck(it)
+        out.append(ZEILE_BESTAETIGT if fp in best else ZEILE_KORRIGIERT if fp in korr else ZEILE_OFFEN)
+    return out

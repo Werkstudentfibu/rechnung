@@ -161,6 +161,18 @@ class TabellePost(BaseModel):
     # -- wandert ins globale, lieferantenuebergreifende Spaltenwoerterbuch
     # (nur bei ``art == "positionen"``, siehe ``spaltenwoerter.py``).
     spalten_zuordnung: list[dict] | None = None
+    # Zeilenstatus je Zeile von ``rows`` ("offen"/"bestaetigt"/"korrigiert",
+    # Aaron 05.11.2026) -- fliesst als Treffer/Korrektur je Position ins
+    # Ereignisprotokoll (nur bei ``art == "positionen"``).
+    zeilen_status: list[str] | None = None
+
+
+class ZeilenBestaetigenPost(BaseModel):
+    """Positionszeile(n) ausdruecklich als richtig bestaetigen (Aaron
+    05.11.2026) -- ``rows``: die Zeilen genau so, wie sie angezeigt werden."""
+    file: str
+    rows: list[dict]
+    template_id: str | None = None
 
 
 class TabelleMarkierenPost(BaseModel):
@@ -1153,6 +1165,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "template_fields": tpl_fields,
             "template_line_items": tpl_line_items,
             "line_items": line_items,
+            # Einzelbestaetigung je Position (offen/bestaetigt/korrigiert)
+            "zeilen_status": positionen.zeilen_status(line_items, store.zeilen(doc.sha256)),
             "positionen_grund": _positionen_grund(doc, line_items, supplier_obj, llm_rejected, store),
             # Vollstaendig aggregierte/ergaenzte USt-Aufstellung (SPEC
             # Baustein 2/3) -- je Zeile mit Herkunft (``_herkunft``), unabhaengig
@@ -1704,6 +1718,50 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                                              quelle_vorher=quelle)
         return JSONResponse({"ok": True, "programm_richtig": ev["programm_richtig"]})
 
+    def _zeilen_vermerken(sha: str, datei: str, rows: list[dict], status: list[str], op: str,
+                          sup_id, sup_name, template_id) -> None:
+        """Zeilenstatus speichern und je NEU bestaetigter/korrigierter Zeile
+        genau ein Ereignis schreiben (Treffer bzw. Korrektur je Position)."""
+        vorher = store.zeilen(sha)
+        fps = [positionen.zeilen_fingerabdruck(r) for r in rows]
+        best = [f for f, s in zip(fps, status) if s == positionen.ZEILE_BESTAETIGT]
+        korr = [f for f, s in zip(fps, status) if s == positionen.ZEILE_KORRIGIERT]
+        neu_b, neu_k = store.save_zeilen(sha, best, korr, op)
+        for typ, liste in ((eventlog.TYPE_ZEILE_BESTAETIGT, neu_b), (eventlog.TYPE_ZEILE_KORRIGIERT, neu_k)):
+            for fp in liste:
+                eventlog.record_zeile(
+                    store, typ, sha, fp, op, supplier_id=sup_id, supplier_name=sup_name,
+                    file=datei, template_id=template_id,
+                    programm_richtig=(typ == eventlog.TYPE_ZEILE_BESTAETIGT
+                                      and fp not in vorher["korrigiert"]))
+
+    @app.post("/api/zeilen-bestaetigen")
+    def zeilen_bestaetigen_ep(body: ZeilenBestaetigenPost) -> JSONResponse:
+        """Knopf "Zeile stimmt" (je Position) bzw. "Alle Zeilen bestaetigen":
+        die angezeigte Zeile ist richtig. Aendert nichts an den Positionen und
+        macht die Rechnung NICHT fertig -- zaehlt nur als Treffer (Ereignis +
+        Testsatz). Eine Zeile, die der Mensch selbst eingefuegt/geaendert hat,
+        wird festgehalten, zaehlt aber nicht als Programm-Treffer."""
+        from ..config import operator
+        path = _resolve(body.file)
+        sha = _sha(path)
+        rows = [{str(k): _zelle(v) for k, v in r.items() if not str(k).startswith("_")}
+                for r in body.rows]
+        rows = positionen.normalize_columns(rows)
+        sup_id = sup_name = None
+        try:
+            doc = _load(path)
+            _addr_match, address_id, has_addr = _address_scope(doc)
+            match = identify(doc, store.suppliers(), index=store.supplier_index(address_id),
+                             address_id=address_id, has_addresses=has_addr)
+            if match:
+                sup_id, sup_name = match[0].id, match[0].name
+        except HTTPException:
+            pass
+        _zeilen_vermerken(sha, path.name, rows, [positionen.ZEILE_BESTAETIGT] * len(rows),
+                          operator(), sup_id, sup_name, body.template_id)
+        return JSONResponse({"ok": True, "zeilen_status": positionen.zeilen_status(rows, store.zeilen(sha))})
+
     @app.post("/api/tabelle")
     def save_tabelle_ep(body: TabellePost) -> JSONResponse:
         """Positionstabelle bzw. USt-Aufstellung als Ganzes korrigieren (11b).
@@ -1718,11 +1776,14 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if body.art == "positionen":
             key = POSITIONEN_KEY
             rows = []
-            for r in body.rows:
+            status: list[str] = []
+            for i, r in enumerate(body.rows):
                 row = {str(k).strip(): _zelle(v) for k, v in r.items()
                        if str(k).strip() and not str(k).startswith("_")}
                 if any(v is not None for v in row.values()):
                     rows.append(row)
+                    s = (body.zeilen_status or [])[i:i + 1]
+                    status.append(s[0] if s else positionen.ZEILE_OFFEN)
             # Spaltenname (ggf. frei vom Menschen vergeben) sofort auf den
             # Standardnamen abbilden (SPEC Baustein 1) -- validate.py und
             # das Lernen (learn_line_items) kennen nur noch Standardnamen.
@@ -1750,6 +1811,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                 sup_id, sup_name = match[0].id, match[0].name
         except HTTPException:
             pass
+        if body.art == "positionen":
+            _zeilen_vermerken(sha, path.name, rows, status, op, sup_id, sup_name, body.template_id)
         eventlog.record_correction(store, sha, key, alt, rows, op,
                                    supplier_id=sup_id, supplier_name=sup_name,
                                    file=path.name, template_id=body.template_id,
@@ -2149,6 +2212,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         return JSONResponse({"profile": plausi.profile(store),
                              "min_rechnungen": plausi.MIN_RECHNUNGEN,
                              "fehlerstatistik": eventlog.fehlerstatistik(store),
+                             "zeilenstatistik": eventlog.zeilenstatistik(store),
                              "lernfortschritt": vorbereitung.lernfortschritt(store, wartend),
                              "gesichert_anteil": vorbereitung.gesichert_anteil(liste_stand["eintraege"])})
 
