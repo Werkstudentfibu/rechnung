@@ -596,7 +596,7 @@ function applyInvoiceData(d) {
     hinweise: d.hinweise || [],
     pflichtangaben: d.pflichtangaben || null,
     // rote Pruefungen (Plausibilitaet, Datum, Lieferanten-Gedaechtnis, ...)
-    checks: d.checks || [], roteFelder: d.rote_felder || {},
+    checks: d.checks || [], roteFelder: d.rote_felder || {}, kiAbweichungen: d.ki_abweichungen || {},
     // Dezenter Positionsmodus-Vorschlag bei langem Beleg (Teil B) -- eigens
     // herausgefiltert, damit er gezielt bei "Positionsdaten" erscheint statt
     // nur in der allgemeinen Hinweis-Liste.
@@ -818,7 +818,9 @@ function fBox(name, label, cls = '') {
   const val = fmtWert(cur.value, def.value_type);
   const da = cur.source && cur.source !== 'missing' && val !== '';
   const rot = (STATE.roteFelder || {})[name] || [];
-  const st = rot.length ? 'unsicher'
+  // Gegencheck (gruendlicher Modus): KI liest etwas anderes als die Vorlage -> unsicher
+  const kiAbw = (STATE.kiAbweichungen || {})[name];
+  const st = (rot.length || kiAbw) ? 'unsicher'
     : !da ? '' : (cur.source === 'manual' || cur.confidence == null || cur.confidence >= 0.7) ? 'gut' : 'unsicher';
   const raw = da && cur.raw && String(cur.raw).trim() !== val && cur.source !== 'manual'
     ? `<div class="raw" title="gelesen (${esc(cur.source)})">${esc(String(cur.raw).slice(0, 60))}</div>` : '';
@@ -834,7 +836,7 @@ function fBox(name, label, cls = '') {
     <input class="ab-in val-input ${st}" data-field="${esc(name)}" ${uns ? 'data-unsicher="1"' : ''} value="${esc(val)}"
            title="${esc(name)}${cur.source ? ' · ' + esc(cur.source) : ''}${cur.confidence ? ' · ' + cur.confidence : ''}"
            onchange="saveCorrection('${esc(name)}', this.value); entwarne(this)">${FELD_KNOEPFE(name, `korrigieren(event, '${esc(name)}', this)`)}
-    ${raw}${rot.map(g => `<div class="chk bad">✗ ${esc(g)}</div>`).join('')}<div class="ass"></div></div>`;
+    ${raw}${rot.map(g => `<div class="chk bad">✗ ${esc(g)}</div>`).join('')}${kiAbw ? `<div class="chk bad" title="Unabhängige KI-Lesung weicht von der Vorlage ab – bitte prüfen">⚠ KI liest: ${esc(fmtWert(kiAbw.ki, def.value_type))}</div>` : ''}<div class="ass"></div></div>`;
 }
 
 /* Anschrift-Zeilen <-> Straße/PLZ/Ort/Land */

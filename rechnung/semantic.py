@@ -137,19 +137,31 @@ _LINE_KEYWORDS = ("pos", "menge", "beschreibung", "bezeichnung", "artikel", "ein
 
 _GAP_BUDGET = 1500     # Stufe-1-Luecken-Fuellung: wenige, meist klar benannte Felder
 _FULL_EXCERPT_BUDGET = 3000  # Stufe 2: ganze Rechnung, aber Kopf+Summen+Bank+Positionen
+
+
+def _budget(standard: int) -> int:
+    """Im gruendlichen Modus bekommt die KI statt eines knappen Ausschnitts den
+    vollen Textbudget (``_TEXT_BUDGET``) -- ein Schluesselwort-Ausschnitt kann
+    ein Feld verpassen, das keinem bekannten Schluesselwort nahe steht."""
+    from .config import gruendlich
+
+    return max(standard, _TEXT_BUDGET) if gruendlich() else standard
 _HEAD_TOKENS = 60      # Kopfbereich (Rechnungsnummer/-datum, Lieferant) in Wort-Token
 _TAIL_TOKENS = 60      # Fuss-/Summenbereich
 _WINDOW = 8            # Woerter vor/nach einem Schluesselwort-Treffer
 
 
 def _targeted_excerpt(text: str, field_names: list[str], extra_keywords: tuple[str, ...] = (),
-                      budget: int = _GAP_BUDGET) -> str:
+                      budget: int | None = None) -> str:
     """Nur Kopf, Fuss (Summenblock) und die Umgebung von Schluesselwoertern
     der angefragten Felder -- statt der ganzen Rechnung. Bleibt der Ausschnitt
     trotzdem laenger als ``budget`` (z.B. sehr dichte Treffer) oder gibt es
     gar keine Schluesselwoerter zum Suchen, faellt die Funktion auf den
     bewaehrten Kopf+Fuss-Zeichenschnitt (``_head_and_tail``) zurueck -- nie
     auf mehr Text als vorher, aber auch nie weniger robust."""
+    budget = _budget(_GAP_BUDGET) if budget is None else budget
+    if budget >= _TEXT_BUDGET and len(text) <= _TEXT_BUDGET:
+        return text            # gruendlich: Rechnung passt komplett -> nichts weglassen
     toks = text.split()
     n = len(toks)
     if n <= _HEAD_TOKENS + _TAIL_TOKENS:
@@ -924,7 +936,7 @@ def extract_full(text: str, want_line_items: bool | None = None) -> FullExtracti
     schema = _schema(line_items)
     extra = _BANK_KEYWORDS + (_LINE_KEYWORDS if line_items else ())
     excerpt = _targeted_excerpt(text, list(ki_felder()), extra_keywords=extra,
-                               budget=_FULL_EXCERPT_BUDGET)
+                               budget=_budget(_FULL_EXCERPT_BUDGET))
     res = _extract_full_once(excerpt, text, cfg, schema, line_items)
 
     missing_required = [n for n, (vtype, req) in ki_felder().items()

@@ -128,6 +128,9 @@ class Result:
     # KI-Vorschlaege, die NICHT im PDF-Text belegt waren (Feld -> Grund) --
     # verworfen, aber sichtbar, damit der Mensch weiss, was das Modell meinte.
     llm_rejected: dict[str, str] = field(default_factory=dict)
+    # Gegencheck (Postfach-Baustein 10): Feld -> {"vorlage", "ki"}, wo die
+    # unabhaengige KI-Lesung von der Vorlage abweicht -- im UI "unsicher".
+    gegencheck_abweichungen: dict[str, dict] = field(default_factory=dict)
     # Von der KI auf der Rechnung belegte Lieferantenangaben (semantic
     # _SUPPLIER_KEYS) -- nur Hinweis, nie Identitaet; dient dazu, den Namen
     # eines Lieferanten-Entwurfs zu fuellen (09.10.2026).
@@ -1011,9 +1014,14 @@ def _gegencheck_active(tpl: Template, store: Store) -> bool:
     from . import modus
     from .config import gegencheck_autonom, gegencheck_min
 
-    if tpl.confirmations >= gegencheck_min():
-        return False
-    return gegencheck_autonom() if modus.is_autonomous(store) else True
+    from .config import gruendlich
+
+    if modus.is_autonomous(store):
+        return gegencheck_autonom() and (gruendlich() or tpl.confirmations < gegencheck_min())
+    # Lernphase: im gruendlichen Modus (Aaron 05.11.2026) wird die Vorlage
+    # IMMER gegen eine unabhaengige KI-Lesung gehalten, nicht nur bis zur
+    # fuenften Bestaetigung -- Abweichungen sind je Feld "unsicher".
+    return gruendlich() or tpl.confirmations < gegencheck_min()
 
 
 def _gegencheck_felder(tpl: Template, fields: dict) -> list[str]:
@@ -1081,6 +1089,9 @@ def _gegencheck(res: "Result", doc, tpl: Template, store: Store, timer: StageTim
             continue
         if _gegencheck_mismatch(name, fr_vorlage.value, fr_ki.value):
             abweichungen.append(f"{name} (Vorlage: {fr_vorlage.value!r}, KI: {fr_ki.value!r})")
+            res.gegencheck_abweichungen[name] = {"vorlage": fr_vorlage.value, "ki": fr_ki.value}
+            # je Feld "unsicher": unter die Auto-Schwelle (rot im UI, Mensch entscheidet)
+            fr_vorlage.confidence = min(fr_vorlage.confidence, 0.5)
     if hat_positionen:
         vorlage_summe = round(sum(_item_total(it) or 0.0 for it in res.line_items), 2)
         fr_ki_netto = ki_fields.get("netto")

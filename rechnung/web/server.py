@@ -56,6 +56,11 @@ from ..template import (STANDARD_FIELDS, ausgeblendet, sichtbare_felder, Anchor,
 from ..textnorm import parse_amount
 from ..validate import rechen_pruefungen
 
+def _jsonable_wert(v):
+    """Feldwert (ggf. date/Decimal) fuer die JSON-Antwort."""
+    return v if v is None or isinstance(v, (str, int, float, bool)) else str(v)
+
+
 RENDER_SCALE = 2.0
 VORVERARBEITUNG_TIMEOUT_S = 600
 _STATIC = Path(__file__).parent / "static"
@@ -459,7 +464,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
     # Vorverarbeitung im Hintergrund (vorverarbeitung.py): Rechnungen schon
     # auslesen, bevor sie angeklickt werden. Eigene, grosszuegigere Zeitgrenze --
     # es wird nur vorgewaermt, die verbindliche Grenze gilt beim Anklicken.
-    from ..config import vorverarbeitung_an
+    from ..config import gruendlich, gruendlich_seiten, process_timeout, vorverarbeitung_an
     from ..vorverarbeitung import Vorverarbeiter
 
     from .. import vorbereitung
@@ -558,9 +563,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
 
         from .. import ocr as ocrmod
         from .. import selbstupdate
-        from ..config import LlmConfig
+        from ..config import llm as llm_cfg
 
-        llm = LlmConfig()
+        llm = llm_cfg()
         return {
             "prozess": f"PID {os.getpid()}, gestartet {_gestartet}",
             "stand": selbstupdate.version().get("commit", ""),
@@ -571,6 +576,13 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "ocr_verfuegbar": bool(ocrmod.tesseract_cmd()) and ocrmod.available(),
             "tessdata": os.environ.get("TESSDATA_PREFIX", ""),
             "ki_an": llm.enabled, "ki_modell": llm.model,
+            # Modus "gruendlich" (Aaron 05.11.2026): was gilt WIRKSAM in diesem Prozess
+            "gruendlich": ("AN" if gruendlich() else "aus") + f" (RECHNUNG_GRUENDLICH={os.environ.get('RECHNUNG_GRUENDLICH')!r})",
+            "gruendlich_ki": (f"Zeitgrenze {llm.timeout} s, Kontext {llm.num_ctx}, "
+                              f"Positionen per KI {'an' if llm.line_items else 'aus'}"),
+            "gruendlich_verarbeitung": (f"Zeitgrenze je Rechnung {process_timeout():g} s, "
+                                        f"Scans voll bis {gruendlich_seiten()} Seiten, "
+                                        f"Texterkennung {ocrmod.sprache()}"),
             "daten": str(store.root),
             # Fehlersuche 05.11.2026: Einstellung stand in C:\Rechnung\rechnung.env,
             # wirkte aber nicht -- welche Werte sieht DIESER Prozess?
@@ -1090,8 +1102,11 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             ki_empfaenger = res.ki_empfaenger
         else:
             # Status/Rueckstellgruende/Pruefungen fuer die Anzeige; die KI
-            # aendert daran nichts (Konfidenz gedeckelt), also ohne Modell.
-            res = _process(path, use_llm=False)
+            # aendert daran nichts (Konfidenz gedeckelt), also ohne Modell --
+            # ausser im gruendlichen Modus: dort liefert der Gegencheck
+            # (KI gegen Vorlage) je Feld "unsicher" (die KI-Antwort kommt aus
+            # dem Plattenzwischenspeicher, wenn der Vorverarbeiter sie schon hat).
+            res = _process(path, use_llm=gruendlich())
             # Dieselbe Rechenstufe wie in der Pipeline (SPEC Baustein 2) auch
             # hier anwenden -- sonst sieht der Mensch beim Pruefen/Bestaetigen
             # nie, was errechnet/vom Kopf uebernommen wuerde. Spaltennamen
@@ -1112,6 +1127,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             _positionsmodus_abschliessen(res, supplier_obj)
             line_items = res.line_items
             tax_breakdown_view = res.tax_breakdown
+            for fname, abw in res.gegencheck_abweichungen.items():
+                if fname in current and current[fname].get("source") != "manual":
+                    current[fname]["confidence"] = min(current[fname]["confidence"], 0.5)
         _positionsmodus_hinweis(res, supplier_obj)
         for v in current.values():
             v["origin"] = origin(v["source"])
@@ -1165,6 +1183,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "template_fields": tpl_fields,
             "template_line_items": tpl_line_items,
             "line_items": line_items,
+            # Gegencheck: Feld -> {"vorlage", "ki"} wo die KI abweicht (gruendlich)
+            "ki_abweichungen": {k: {"vorlage": _jsonable_wert(v["vorlage"]), "ki": _jsonable_wert(v["ki"])}
+                                for k, v in res.gegencheck_abweichungen.items()},
             # Einzelbestaetigung je Position (offen/bestaetigt/korrigiert)
             "zeilen_status": positionen.zeilen_status(line_items, store.zeilen(doc.sha256)),
             "positionen_grund": _positionen_grund(doc, line_items, supplier_obj, llm_rejected, store),

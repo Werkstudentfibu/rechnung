@@ -169,13 +169,39 @@ def category_fuzzy_min() -> float:
         return 0.72
 
 
+def gruendlich() -> bool:
+    """Modus "gruendlich" (``RECHNUNG_GRUENDLICH``, Standard AN; Aaron
+    05.11.2026: "aktuell kommt es nicht darauf an, wie schnell das Programm
+    ist, weil es noch lernt -- Rechnungen so richtig wie moeglich"). Solange
+    das Programm lernt, geht Genauigkeit vor Tempo: KI-Gegencheck gegen die
+    Vorlage immer, volle Seiten/laengere Zeitgrenzen/mehr KI-Text, deutsch+
+    englische Texterkennung, KI liest Positionen als Rueckfall. Laeuft nur im
+    Hintergrund (Vorverarbeiter, nacheinander) -- die Liste erscheint
+    trotzdem sofort. ``RECHNUNG_GRUENDLICH=0`` = altes, schnelles Verhalten.
+    Ausdrueckliche Einzelwerte (``RECHNUNG_TIMEOUT``, ``RECHNUNG_LLM_*`` ...)
+    gehen immer vor. Nie eine Rechnung ohne Bestaetigung fertig."""
+    return _b("RECHNUNG_GRUENDLICH", True)
+
+
+def gruendlich_seiten() -> int:
+    """Bis zu dieser Seitenzahl wird im gruendlichen Modus ein Scan VOLLSTAENDIG
+    erkannt und die KI liest den ganzen Text (``RECHNUNG_GRUENDLICH_SEITEN``,
+    Standard 12); darueber bleibt es bei Kopf-/Fussseiten (Rest im Nachtlauf)."""
+    try:
+        return max(1, int(os.environ.get("RECHNUNG_GRUENDLICH_SEITEN", "12")))
+    except ValueError:
+        return 12
+
+
 def process_timeout() -> float:
     """Zeitgrenze je Rechnung in Sekunden fuer die komplette Verarbeitung
-    inkl. OCR und KI (guard.py). 0 = ohne Zeitgrenze im selben Prozess."""
+    inkl. OCR und KI (guard.py). 0 = ohne Zeitgrenze im selben Prozess.
+    Standard 120 s, im gruendlichen Modus 360 s."""
+    standard = 360.0 if gruendlich() else 120.0
     try:
-        return max(0.0, float(os.environ.get("RECHNUNG_TIMEOUT", "120")))
+        return max(0.0, float(os.environ.get("RECHNUNG_TIMEOUT", standard)))
     except ValueError:
-        return 120.0
+        return standard
 
 
 def gegencheck_min() -> int:
@@ -340,7 +366,25 @@ def jobrouter() -> JobRouterConfig:
 
 
 def llm() -> LlmConfig:
-    return LlmConfig()
+    """Wirksame KI-Einstellungen. Im gruendlichen Modus (``gruendlich()``) gelten
+    -- nur wo nichts ausdruecklich in rechnung.env steht -- laengere Zeitgrenze
+    (120 s statt 30 s: ein 3B-Modell auf dem Firmenlaptop braucht bei vollem
+    Text laenger, ein Abbruch heisst "KI hat nichts geliefert"), mehr Kontext
+    (6144 statt 4096) und KI-Positionen als Rueckfall, wenn die Tabellen-
+    erkennung nichts findet."""
+    import dataclasses
+
+    cfg = LlmConfig()
+    if not gruendlich():
+        return cfg
+    over: dict = {}
+    if "RECHNUNG_LLM_TIMEOUT" not in os.environ:
+        over["timeout"] = max(cfg.timeout, 120)
+    if "RECHNUNG_LLM_CTX" not in os.environ:
+        over["num_ctx"] = max(cfg.num_ctx, 6144)
+    if "RECHNUNG_LLM_LINE_ITEMS" not in os.environ:
+        over["line_items"] = True
+    return dataclasses.replace(cfg, **over)
 
 
 def vorverarbeitung_an() -> bool:

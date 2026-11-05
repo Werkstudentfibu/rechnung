@@ -91,7 +91,17 @@ def kopf_fuss_seiten() -> tuple[int, int]:
 
 
 def partial_pages(n: int) -> list[int] | None:
-    """Seitenindizes fuer die schnelle Teil-Erkennung, ``None`` = alle."""
+    """Seitenindizes fuer die schnelle Teil-Erkennung, ``None`` = alle. Im
+    gruendlichen Modus (config.gruendlich) werden Scans bis
+    ``gruendlich_seiten()`` Seiten immer vollstaendig erkannt."""
+    from .config import gruendlich, gruendlich_seiten, process_timeout
+
+    # Nur mit genug Zeit: bei einer fest auf 120 s gestellten Zeitgrenze
+    # (Laptop-Profil, RECHNUNG_TIMEOUT=120) wuerde eine volle Erkennung von
+    # 8+ Seiten die Grenze reissen und die ganze Rechnung zurueckstellen --
+    # dann lieber wie bisher Kopf-/Fussseiten.
+    if gruendlich() and n <= gruendlich_seiten() and process_timeout() >= 300:
+        return None
     kopf, fuss = kopf_fuss_seiten()
     if n <= kopf + fuss + 1:
         return None
@@ -267,9 +277,37 @@ def _page_images(path: Path, indices: list[int] | None = None):
         doc.close()
 
 
+_langs_cache: dict[str, frozenset[str]] = {}
+
+
+def _installierte_sprachen(cmd: str) -> frozenset[str]:
+    if cmd not in _langs_cache:
+        try:
+            r = _run([cmd, "--list-langs"], 20)
+            zeilen = (r.stdout or b"").decode("utf-8", "replace").splitlines()
+            _langs_cache[cmd] = frozenset(z.strip() for z in zeilen[1:] if z.strip())
+        except (OSError, subprocess.SubprocessError):
+            _langs_cache[cmd] = frozenset()
+    return _langs_cache[cmd]
+
+
+def sprache() -> str:
+    """Erkennungssprache. Standard ``deu``; im gruendlichen Modus ``deu+eng``,
+    sofern das englische Sprachpaket installiert ist (englische Rechnungen
+    werden mit nur ``deu`` zu "Quantity"->"Quantlty"/"Unit Price"-Salat). Nie
+    eine nicht installierte Sprache anfordern -- Tesseract bricht sonst ganz
+    ab."""
+    from .config import gruendlich
+
+    cmd = tesseract_cmd()
+    if gruendlich() and cmd and {"deu", "eng"} <= _installierte_sprachen(cmd):
+        return "deu+eng"
+    return LANG
+
+
 def _run_tesseract(image: Path, out_base: Path, timeout: float | None) -> None:
     """Eine Seite erkennen -> ``out_base.pdf`` + ``out_base.tsv``."""
-    _run([tesseract_cmd(), str(image), str(out_base), "-l", LANG,
+    _run([tesseract_cmd(), str(image), str(out_base), "-l", sprache(),
           "--dpi", str(DPI), "pdf", "tsv"], timeout, check=True)
 
 

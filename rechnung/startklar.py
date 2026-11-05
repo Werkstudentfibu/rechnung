@@ -17,7 +17,7 @@ def _p(name: str, status: str, detail: str = "", hilfe: str = "") -> dict:
 
 def pruefen(store, samples: Path) -> list[dict]:
     from . import ingest, jobrouter, lernbericht, ocr, selbstupdate, semantic, sicherung
-    from .config import LlmConfig, jobrouter as jr_cfg
+    from .config import gruendlich, jobrouter as jr_cfg, llm as llm_cfg
     from .config import postfaecher as postfaecher_cfg
 
     out = []
@@ -72,7 +72,13 @@ def pruefen(store, samples: Path) -> list[dict]:
                       ocr.tesseract_cmd() or "Tesseract nicht gefunden",
                       "" if ocr.available() else "windows\\texterkennung-einrichten.ps1"))
 
-    llm = LlmConfig()
+    from .config import gruendlich_seiten, process_timeout
+
+    out.append(_p("Modus gründlich", OK if gruendlich() else WARN,
+                  (f"an – Zeitgrenze {process_timeout():g} s, Scans voll bis {gruendlich_seiten()} Seiten"
+                   if gruendlich() else "aus (schnell)"),
+                  "" if gruendlich() else "RECHNUNG_GRUENDLICH=1 (Lernphase: Genauigkeit vor Tempo)"))
+    llm = llm_cfg()
     if not llm.enabled:
         out.append(_p("KI", WARN, "ausgeschaltet", "RECHNUNG_LLM_ENABLED=1"))
     else:

@@ -270,7 +270,11 @@ def neu_auswerten(guard, store, path) -> bool:
         if not frei:
             return False
         try:
-            res = guard.process(path, use_llm=False)
+            # gruendlich (Aaron 05.11.2026): auch die Neuauswertung im Hintergrund
+            # mit KI-Gegencheck -- sie laeuft nacheinander, nie vor der Liste
+            from .config import gruendlich
+
+            res = guard.process(path, use_llm=gruendlich())
         except Exception:  # noqa: BLE001
             return False
         if res.aborted:
