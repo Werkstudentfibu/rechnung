@@ -114,30 +114,35 @@ def embedded_xml(path: str | Path) -> tuple[str, bytes] | None:
     """Rechnungs-XML aus einem PDF-Anhang holen -> (anhangname, bytes)."""
     import pypdfium2 as pdfium
 
-    try:
-        pdf = pdfium.PdfDocument(str(path))
-    except Exception:
-        return None
-    try:
-        candidates: list[tuple[int, str, bytes]] = []
-        for i in range(pdf.count_attachments()):
-            att = pdf.get_attachment(i)
-            name = att.get_name() or ""
-            if not name.lower().endswith(".xml"):
-                continue
-            try:
-                data = bytes(att.get_data())
-            except Exception:
-                continue
-            prio = 0 if name.lower() in _EMBEDDED_NAMES else 1
-            candidates.append((prio, name, data))
-        for _, name, data in sorted(candidates, key=lambda c: c[0]):
-            root = _safe_parse(data)
-            if root is not None and _syntax(root):
-                return name, data
-        return None
-    finally:
-        pdf.close()
+    from .pdfium_sperre import sperre
+
+    # Anhaenge binnen der Sperre einsammeln (reine PDFium-Aufrufe); das
+    # XML-Parsen unten laeuft bewusst ausserhalb.
+    with sperre():
+        try:
+            pdf = pdfium.PdfDocument(str(path))
+        except Exception:
+            return None
+        try:
+            candidates: list[tuple[int, str, bytes]] = []
+            for i in range(pdf.count_attachments()):
+                att = pdf.get_attachment(i)
+                name = att.get_name() or ""
+                if not name.lower().endswith(".xml"):
+                    continue
+                try:
+                    data = bytes(att.get_data())
+                except Exception:
+                    continue
+                prio = 0 if name.lower() in _EMBEDDED_NAMES else 1
+                candidates.append((prio, name, data))
+        finally:
+            pdf.close()
+    for _, name, data in sorted(candidates, key=lambda c: c[0]):
+        root = _safe_parse(data)
+        if root is not None and _syntax(root):
+            return name, data
+    return None
 
 
 def load(path: str | Path) -> EInvoice | None:

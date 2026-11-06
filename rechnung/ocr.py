@@ -250,11 +250,14 @@ def page_count(path: Path) -> int:
             return sum(1 for _ in ImageSequence.Iterator(im))
     import pypdfium2 as pdfium
 
-    doc = pdfium.PdfDocument(str(path))
-    try:
-        return len(doc)
-    finally:
-        doc.close()
+    from .pdfium_sperre import sperre
+
+    with sperre():
+        doc = pdfium.PdfDocument(str(path))
+        try:
+            return len(doc)
+        finally:
+            doc.close()
 
 
 def _page_images(path: Path, indices: list[int] | None = None):
@@ -268,13 +271,37 @@ def _page_images(path: Path, indices: list[int] | None = None):
             return [frame.convert("RGB") for frame in ImageSequence.Iterator(im)]
     import pypdfium2 as pdfium
 
-    doc = pdfium.PdfDocument(str(path))
+    from .pdfium_sperre import sperre
+
+    # Je Seite eine eigene, kurze Sperrzeit (nicht den ganzen Dokumentzyklus
+    # in einem Block) -- so blockiert eine OCR-Vorbereitung mit vielen
+    # Seiten das Seitenbild der gerade im Browser geoeffneten Rechnung
+    # hoechstens fuer die Dauer EINES Renderns, nicht fuer das ganze Dokument.
+    with sperre():
+        doc = pdfium.PdfDocument(str(path))
     try:
-        want = set(range(len(doc)) if indices is None else indices)
-        return [doc[i].render(scale=DPI / 72).to_pil().convert("RGB") if i in want else None
-                for i in range(len(doc))]
+        with sperre():
+            n = len(doc)
+        want = set(range(n) if indices is None else indices)
+        out = []
+        for i in range(n):
+            if i not in want:
+                out.append(None)
+                continue
+            with sperre():
+                page = doc[i]
+                try:
+                    bitmap = page.render(scale=DPI / 72)
+                    try:
+                        out.append(bitmap.to_pil().convert("RGB"))  # convert() kopiert
+                    finally:
+                        bitmap.close()
+                finally:
+                    page.close()
+        return out
     finally:
-        doc.close()
+        with sperre():
+            doc.close()
 
 
 _langs_cache: dict[str, frozenset[str]] = {}
@@ -345,21 +372,24 @@ def _merge_mixed(original: Path, page_pdfs: list[Path | None], skip: list[bool],
     der jeweils per Tesseract erkannten Seiten-PDF."""
     import pypdfium2 as pdfium
 
-    out = pdfium.PdfDocument.new()
-    src_orig = pdfium.PdfDocument(str(original)) if any(skip) else None
-    try:
-        for i, is_skip in enumerate(skip):
-            if is_skip:
-                out.import_pages(src_orig, pages=[i])
-            else:
-                src = pdfium.PdfDocument(str(page_pdfs[i]))
-                out.import_pages(src)
-                src.close()
-        out.save(str(target))
-    finally:
-        out.close()
-        if src_orig is not None:
-            src_orig.close()
+    from .pdfium_sperre import sperre
+
+    with sperre():
+        out = pdfium.PdfDocument.new()
+        src_orig = pdfium.PdfDocument(str(original)) if any(skip) else None
+        try:
+            for i, is_skip in enumerate(skip):
+                if is_skip:
+                    out.import_pages(src_orig, pages=[i])
+                else:
+                    src = pdfium.PdfDocument(str(page_pdfs[i]))
+                    out.import_pages(src)
+                    src.close()
+            out.save(str(target))
+        finally:
+            out.close()
+            if src_orig is not None:
+                src_orig.close()
 
 
 def _cached(target: Path, meta: Path, sha: str) -> OcrResult | None:

@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pypdfium2 as pdfium
 
+from .pdfium_sperre import sperre
+
 
 @dataclass
 class Rendered:
@@ -31,22 +33,32 @@ class Rendered:
 
 def render_page(path: str | Path, page: int = 0, dpi: int = 150) -> Rendered:
     scale = dpi / 72.0
-    pdf = pdfium.PdfDocument(str(path))
-    try:
-        pg = pdf[page]
-        w_pt, h_pt = pg.get_size()
-        bitmap = pg.render(scale=scale)
-        pil = bitmap.to_pil()
-        buf = io.BytesIO()
-        pil.save(buf, format="PNG")
-        return Rendered(page, buf.getvalue(), float(w_pt), float(h_pt), scale)
-    finally:
-        pdf.close()
+    # Nur Rendern innerhalb der Sperre -- PNG-Kodierung (pil.save) bewusst
+    # danach, siehe pdfium_sperre.py.
+    with sperre():
+        pdf = pdfium.PdfDocument(str(path))
+        try:
+            pg = pdf[page]
+            try:
+                w_pt, h_pt = pg.get_size()
+                bitmap = pg.render(scale=scale)
+                try:
+                    pil = bitmap.to_pil().copy()  # Kopie: vom PDFium-Puffer loesen
+                finally:
+                    bitmap.close()
+            finally:
+                pg.close()
+        finally:
+            pdf.close()
+    buf = io.BytesIO()
+    pil.save(buf, format="PNG")
+    return Rendered(page, buf.getvalue(), float(w_pt), float(h_pt), scale)
 
 
 def page_count(path: str | Path) -> int:
-    pdf = pdfium.PdfDocument(str(path))
-    try:
-        return len(pdf)
-    finally:
-        pdf.close()
+    with sperre():
+        pdf = pdfium.PdfDocument(str(path))
+        try:
+            return len(pdf)
+        finally:
+            pdf.close()

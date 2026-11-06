@@ -108,9 +108,12 @@ def password_protected(src: str | Path | bytes) -> bool:
     nicht -- die faellt die normale Verarbeitung auf."""
     import pypdfium2 as pdfium
 
-    try:
-        doc = pdfium.PdfDocument(src if not isinstance(src, Path) else str(src))
-    except pdfium.PdfiumError as e:
-        return "password" in str(e).lower()
-    doc.close()
-    return False
+    from .pdfium_sperre import sperre
+
+    with sperre():
+        try:
+            doc = pdfium.PdfDocument(src if not isinstance(src, Path) else str(src))
+        except pdfium.PdfiumError as e:
+            return "password" in str(e).lower()
+        doc.close()
+        return False
