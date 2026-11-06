@@ -379,16 +379,29 @@ def _positionen_grund(doc, line_items, supplier_obj, llm_rejected, store) -> str
 def _render_png(path: Path, page_index: int) -> bytes:
     import pypdfium2 as pdfium
 
-    doc = pdfium.PdfDocument(str(path))
-    try:
-        page = doc[page_index]
-        bitmap = page.render(scale=RENDER_SCALE)
-        pil = bitmap.to_pil()
-        buf = io.BytesIO()
-        pil.save(buf, format="PNG")
-        return buf.getvalue()
-    finally:
-        doc.close()
+    from ..pdfium_sperre import sperre
+
+    # Nur das Rendern (PDFium-C-Aufrufe) liegt hinter der Sperre; die PNG-
+    # Kodierung unten laeuft bewusst ausserhalb, damit ein Seitenbild der
+    # geoeffneten Rechnung nicht hinter einer laufenden Hintergrund-OCR
+    # haengt (die die Sperre nur je Seite kurz haelt, siehe pdfium_sperre.py).
+    with sperre():
+        doc = pdfium.PdfDocument(str(path))
+        try:
+            page = doc[page_index]
+            try:
+                bitmap = page.render(scale=RENDER_SCALE)
+                try:
+                    pil = bitmap.to_pil().copy()  # Kopie: vom PDFium-Puffer loesen
+                finally:
+                    bitmap.close()
+            finally:
+                page.close()
+        finally:
+            doc.close()
+    buf = io.BytesIO()
+    pil.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def create_app(store: Store, samples: Path) -> FastAPI:
@@ -1557,6 +1570,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         import pypdfium2 as pdfium
 
         from .. import ocr as ocrmod
+        from ..pdfium_sperre import sperre
 
         if not (ocrmod.enabled() and ocrmod.available()):
             raise HTTPException(409, "Texterkennung nicht verfügbar – Wert bitte von Hand eintragen")
@@ -1569,11 +1583,20 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if path.suffix.lower() != ".pdf":
             raise HTTPException(400, "nur PDF")
         scale = 400 / 72
-        doc = pdfium.PdfDocument(str(path))
-        try:
-            img = doc[page_i].render(scale=scale).to_pil().convert("L")
-        finally:
-            doc.close()
+        with sperre():
+            doc = pdfium.PdfDocument(str(path))
+            try:
+                page = doc[page_i]
+                try:
+                    bitmap = page.render(scale=scale)
+                    try:
+                        img = bitmap.to_pil().convert("L")  # convert() kopiert bereits
+                    finally:
+                        bitmap.close()
+                finally:
+                    page.close()
+            finally:
+                doc.close()
         rand = 4
         box = (max(0, int(min(x0, x1) * scale) - rand), max(0, int(min(y0, y1) * scale) - rand),
                min(img.width, int(max(x0, x1) * scale) + rand), min(img.height, int(max(y0, y1) * scale) + rand))

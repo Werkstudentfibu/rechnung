@@ -440,6 +440,11 @@ function show(v) {
 const esc = s => (s == null ? '' : String(s)).replace(/[&<>"]/g, c =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const nz = v => (v === null || v === undefined || v === '') ? '' : v;
+// Die Liste (/api/scan) liefert "file" mal als vollen Pfad, die Rechnungsansicht
+// (/api/invoice, STATE.file) immer nur den Dateinamen -- fuer Vergleiche
+// (aktive Zeile, Bildlauf merken) deshalb immer ueber den Dateinamen gleichen,
+// sonst scheitert z.B. "dieselbe Rechnung erneut geoeffnet" am Pfad-Unterschied.
+const basename = s => (s || '').split(/[\\/]/).pop();
 
 /* ================= Rechnungen / Training ================= */
 // Sortierung der Liste (merkt sich der Browser): bereite zuerst / nach Lernwert
@@ -513,7 +518,7 @@ async function loadList() {
       ${r.overall_confidence ? ` · conf ${r.overall_confidence}` : ''}
       ${grund ? `<div class="vb-grund">${esc(grund)}</div>` : ''}`;
     div.onclick = () => openInvoice(r.file, div);
-    if (STATE && STATE.file === r.file) div.classList.add('active');
+    if (STATE && STATE.file === basename(r.file)) div.classList.add('active');
     list.appendChild(div);
   }
 }
@@ -572,7 +577,7 @@ async function openInvoice(file, row) {
   const w = $('#work'); const t0 = Date.now();
   // Dieselbe Rechnung neu laden (z.B. Positionsmodus geaendert): Bildlauf merken,
   // renderInvoice stellt ihn wieder her (Aaron 06.11.2026).
-  SCROLL_MERKEN = (STATE && file === STATE.file && w.classList.contains('split')) ? {
+  SCROLL_MERKEN = (STATE && basename(file) === STATE.file && w.classList.contains('split')) ? {
     pages: w.querySelector(':scope > .pages')?.scrollTop || 0,
     panels: w.querySelector(':scope > .panels')?.scrollTop || 0, work: w.scrollTop } : null;
   w.className = '';

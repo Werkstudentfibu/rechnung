@@ -165,25 +165,38 @@ def read(path: str | Path, pages: int = 2) -> SwissQR | None:
         import pypdfium2 as pdfium
     except ImportError:
         return None
+    from .pdfium_sperre import sperre
+
     path = Path(path)
     if path.suffix.lower() != ".pdf":
         return None
+    # Rendern (PDFium) innerhalb der Sperre, Barcode-Decodierung (zxingcpp)
+    # bewusst ausserhalb -- kann pro Seite spuerbar dauern.
     try:
-        doc = pdfium.PdfDocument(str(path))
+        with sperre():
+            doc = pdfium.PdfDocument(str(path))
+            try:
+                n = len(doc)
+                images = []
+                for i in range(max(0, n - pages), n):
+                    page = doc[i]
+                    try:
+                        bitmap = page.render(scale=300 / 72)
+                        try:
+                            images.append(bitmap.to_pil().convert("L"))  # convert() kopiert
+                        finally:
+                            bitmap.close()
+                    finally:
+                        page.close()
+            finally:
+                doc.close()
     except Exception:
         return None
-    try:
-        n = len(doc)
-        for i in range(max(0, n - pages), n):
-            img = doc[i].render(scale=300 / 72).to_pil().convert("L")
-            for barcode in zxingcpp.read_barcodes(img, formats=zxingcpp.QRCode):
-                spc = parse_spc(barcode.text)
-                if spc is not None:
-                    return spc
-    except Exception:
-        return None
-    finally:
-        doc.close()
+    for img in images:
+        for barcode in zxingcpp.read_barcodes(img, formats=zxingcpp.QRCode):
+            spc = parse_spc(barcode.text)
+            if spc is not None:
+                return spc
     return None
 
 
