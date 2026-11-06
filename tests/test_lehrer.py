@@ -153,3 +153,88 @@ def test_kommandozeile_bilanz(tmp_path, capsys):
     lehrer.anlernen_datei(store, src, post=_claude(RICHTIG))
     assert lehrer.main(["--data", str(store.root), "--bilanz"]) == 0
     assert "von Claude bestaetigt: 1" in capsys.readouterr().out
+
+
+def test_dauerbetrieb_menschfall_blockiert_nicht_das_limit(tmp_path):
+    store, ordner, src = _store(tmp_path)
+    make_invoice(ordner / "b.pdf", rechnungsnr="RE-2026-00050", netto=420.0)
+    calls = []
+    unsicher = _claude(RICHTIG, sicher=False, calls=calls)
+    r1 = lehrer.anlernen(store, ordner, limit=1, post=unsicher)
+    assert [r["ergebnis"] for r in r1] == [lehrer.ERG_MENSCH]
+    # naechste Runde: a.pdf liegt beim Menschen -> uebersprungen, b.pdf kommt dran
+    r2 = lehrer.anlernen(store, ordner, limit=1, post=unsicher)
+    assert [r["ergebnis"] for r in r2] == [lehrer.ERG_UEBERSPRUNGEN, lehrer.ERG_MENSCH]
+    assert r2[1]["datei"] == "b.pdf"
+
+
+def test_wiederholt_unlesbare_antwort_ruht(tmp_path):
+    store, ordner, src = _store(tmp_path)
+
+    def unsinn(body):
+        return {"content": [{"type": "text", "text": "kein JSON"}]}
+    for _ in range(lehrer.MAX_FEHLVERSUCHE):
+        assert lehrer.anlernen_datei(store, src, post=unsinn)["ergebnis"] == lehrer.ERG_FEHLER
+    assert lehrer.anlernen_datei(store, src, post=unsinn)["ergebnis"] == lehrer.ERG_UEBERSPRUNGEN
+
+
+def test_limit_oder_netz_zaehlt_nicht_und_beendet_runde(tmp_path):
+    store, ordner, src = _store(tmp_path)
+    make_invoice(ordner / "b.pdf", rechnungsnr="RE-2026-00050", netto=420.0)
+    calls = []
+
+    def limit(body):
+        calls.append(1)
+        raise OSError("429 rate limit")
+    for _ in range(lehrer.MAX_FEHLVERSUCHE + 2):
+        r = lehrer.anlernen(store, ordner, post=limit)
+        assert [x["ergebnis"] for x in r] == [lehrer.ERG_FEHLER]  # Runde bricht ab
+    # a.pdf ruht NICHT, sobald Claude wieder da ist, geht es weiter
+    r = lehrer.anlernen(store, ordner, post=_claude(RICHTIG))
+    assert [x["ergebnis"] for x in r] == [lehrer.ERG_BESTAETIGT, lehrer.ERG_MENSCH]
+
+
+def _cli_antwort(werte: dict, calls: list, is_error: bool = False):
+    def aufruf(befehl, eingabe, cwd, env, timeout):
+        calls.append({"befehl": befehl, "eingabe": eingabe, "cwd": cwd, "env": env})
+        felder = {k: {"wert": v, "sicher": True} for k, v in werte.items()}
+        out = json.dumps({"type": "result", "is_error": is_error,
+                          "result": "```json\n" + json.dumps({"felder": felder}) + "\n```"})
+        return (1 if is_error else 0), "Hinweiszeile\n" + out + "\n", ""
+    return aufruf
+
+
+def test_cli_weg_ueber_claude_code(tmp_path, monkeypatch):
+    monkeypatch.setenv("RECHNUNG_CLAUDE_BACKEND", "cli")
+    monkeypatch.setenv("RECHNUNG_CLAUDE_CLI", "claude-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-darf-nicht-mit")
+    monkeypatch.setattr(lehrer, "cli_befehl", lambda: "/usr/bin/claude")
+    calls = []
+    monkeypatch.setattr(lehrer, "_cli_aufruf", _cli_antwort(RICHTIG, calls))
+    store, ordner, src = _store(tmp_path)
+    assert lehrer.bereit() == ""
+    r = lehrer.anlernen_datei(store, src)
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT, r
+    assert r["weg"] == "cli"
+    c = calls[0]
+    assert c["befehl"][:2] == ["/usr/bin/claude", "-p"]
+    assert "--allowedTools" in c["befehl"] and "Read" in c["befehl"]
+    assert "--model" not in c["befehl"]          # Modell des Logins
+    assert "a.pdf" in c["eingabe"] and "Antwortformat" in c["eingabe"]
+    assert c["cwd"] == src.parent
+    assert "ANTHROPIC_API_KEY" not in c["env"]   # sonst rechnet Claude Code per API ab
+
+
+def test_cli_fehler_wird_gemeldet(tmp_path, monkeypatch):
+    monkeypatch.setenv("RECHNUNG_CLAUDE_BACKEND", "cli")
+    monkeypatch.setattr(lehrer, "cli_befehl", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(lehrer, "_cli_aufruf", _cli_antwort(RICHTIG, [], is_error=True))
+    store, ordner, src = _store(tmp_path)
+    r = lehrer.anlernen_datei(store, src)
+    assert r["ergebnis"] == lehrer.ERG_FEHLER and "Claude Code" in r["gruende"][0]
+
+
+def test_cli_ohne_claude_code(monkeypatch):
+    monkeypatch.setenv("RECHNUNG_CLAUDE_BACKEND", "cli")
+    monkeypatch.setattr(lehrer, "cli_befehl", lambda: None)
+    assert "nicht gefunden" in lehrer.bereit()

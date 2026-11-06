@@ -16,6 +16,33 @@ RECHNUNG_CLAUDE_API_KEY=sk-ant-...        # aus der Claude Console (Firmenkonto)
 # RECHNUNG_CLAUDE_TIMEOUT=120
 ```
 
+### Alternativ: über Claude Code statt API-Schlüssel
+
+Statt eines API-Schlüssels kann der Lehrer Claude Code (`claude -p`) benutzen.
+Dann wird über das Claude-Abo des Logins abgerechnet, nicht nach Verbrauch.
+
+```
+RECHNUNG_CLAUDE_LEHRER=1
+RECHNUNG_CLAUDE_BACKEND=cli
+# optional, falls "claude" nicht im PATH liegt:
+# RECHNUNG_CLAUDE_CLI=C:\Users\<name>\.local\bin\claude.exe
+```
+
+Voraussetzungen und Hinweise:
+
+- Claude Code muss auf dem Laptop installiert und **mit dem Firmen-Login**
+  angemeldet sein (einmal `claude` im Terminal starten und anmelden). Mit
+  einem privaten Login landen die Firmenrechnungen im Privatkonto.
+- Claude Code darf dabei nur Dateien lesen (`--allowedTools Read`), sonst nichts.
+- Ein gesetzter `ANTHROPIC_API_KEY` wird bewusst nicht weitergegeben, damit
+  wirklich über das Abo abgerechnet wird.
+- Das Anlernen teilt sich die Nutzungslimits mit deinem eigenen Arbeiten mit
+  Claude. Anthropic bezeichnet die Abo-Limits als für „gewöhnliche,
+  individuelle Nutzung“ gedacht und empfiehlt für geteilte Produktions-
+  Automatisierung einen API-Schlüssel; die Regeln für `claude -p` mit Abo
+  können sich ändern. Ist das Limit erschöpft, bricht die Runde ab und die
+  nächste Runde macht weiter, sobald wieder Kontingent da ist.
+
 ## Benutzen
 
 ```
@@ -26,6 +53,26 @@ python -m rechnung.lehrer --data <data-Ordner> --bilanz              # Stand
 
 `--data` ist derselbe Datenordner, den das Programm sonst nutzt (Vorlagen,
 Lieferanten). Ohne Angabe: `RECHNUNG_DATA` bzw. `./data`.
+
+## Automatisch im Hintergrund (Laptop, Arbeitszeit)
+
+Einmalig in PowerShell (keine Adminrechte nötig):
+
+```
+powershell -ExecutionPolicy Bypass -File C:\Rechnung\app\windows\anlernen-einrichten.ps1
+```
+
+Das legt die Aufgabe „Rechnung Anlernen“ an: Montag bis Freitag ab 08:00,
+neun Stunden lang alle 30 Minuten eine Runde (`windows\anlernen.cmd`), ohne
+sichtbares Fenster, nur solange du angemeldet bist. Je Runde höchstens
+`RECHNUNG_CLAUDE_LIMIT` Rechnungen (Standard 10) aus `RECHNUNG_UEBUNG`
+(Standard `C:\Rechnung\uebung`). Bereits von Claude bestätigte Rechnungen
+werden übersprungen und kosten nichts. Ohne `RECHNUNG_CLAUDE_LEHRER=1` tut
+die Aufgabe nichts; läuft gerade der Nachtlauf, setzt sie eine Runde aus.
+
+Protokoll: `C:\Rechnung\data\anlernen.log`. Sofort testen:
+`Start-ScheduledTask -TaskName 'Rechnung Anlernen'`. Entfernen: dasselbe
+Skript mit `-Entfernen`.
 
 ## Was passiert
 

@@ -37,8 +37,16 @@ Sicherungen:
 - Der Wechsel in den Betriebsmodus "autonom" bleibt ein bewusster Befehl
   (modus.py) -- der Lehrer schaltet nie selbst um.
 
-Netzwerk: nur ``api.anthropic.com`` (HTTPS), nur bei eingeschaltetem
-Lehrer. Reines stdlib-``urllib`` wie semantic.py, keine neue Abhaengigkeit.
+Zwei Wege zu Claude (``RECHNUNG_CLAUDE_BACKEND``):
+
+- ``api`` (Standard): Claude API mit API-Schluessel aus der Claude Console,
+  Abrechnung nach Verbrauch. Netzwerk: nur ``api.anthropic.com`` (HTTPS),
+  reines stdlib-``urllib`` wie semantic.py, keine neue Abhaengigkeit.
+- ``cli``: ueber Claude Code (``claude -p``), angemeldet mit einem Claude-
+  Abo (Firmen-Login!). Claude Code liest die Rechnung selbst (nur das Lese-
+  Werkzeug ist erlaubt); abgerechnet wird ueber das Abo dieses Logins.
+  Ein gesetzter ``ANTHROPIC_API_KEY`` wird dabei bewusst NICHT
+  weitergegeben, sonst wuerde Claude Code doch ueber die API abrechnen.
 """
 
 from __future__ import annotations
@@ -71,8 +79,18 @@ ERG_MENSCH = "mensch"
 ERG_UEBERSPRUNGEN = "uebersprungen"
 ERG_FEHLER = "fehler"
 
+# So oft darf eine Rechnung an sich scheitern (unlesbare Antwort, Zeitgrenze
+# der Verarbeitung), dann ruht sie. Netz-/Limitprobleme zaehlen nicht.
+MAX_FEHLVERSUCHE = 3
+
 # Art des Grundes im Ordner "Menschliche Bearbeitung" (human.py)
 ART_CLAUDE = "claude"
+
+
+class ClaudeNichtErreichbar(RuntimeError):
+    """Claude gerade nicht nutzbar (Netz, Ueberlast, Nutzungslimit, Login):
+    liegt nicht an der Rechnung -- Runde beenden, spaeter erneut versuchen,
+    nicht als Fehlversuch der Rechnung zaehlen."""
 
 
 # ---- Konfiguration (zur Laufzeit gelesen, nicht beim Import) ---------------
@@ -87,8 +105,39 @@ def api_key() -> str:
             or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
 
 
+def backend() -> str:
+    """``api`` (Standard) oder ``cli`` (Claude Code, ``claude -p``)."""
+    v = os.environ.get("RECHNUNG_CLAUDE_BACKEND", "api").strip().lower()
+    return "cli" if v == "cli" else "api"
+
+
+def cli_befehl() -> str | None:
+    """Pfad zu Claude Code: ``RECHNUNG_CLAUDE_CLI`` oder ``claude`` im PATH."""
+    import shutil
+    eigen = os.environ.get("RECHNUNG_CLAUDE_CLI", "").strip()
+    if eigen:
+        return eigen if Path(eigen).exists() else shutil.which(eigen)
+    return shutil.which("claude")
+
+
+def bereit() -> str:
+    """Leer, wenn der gewaehlte Weg zu Claude benutzbar ist, sonst der Grund."""
+    if backend() == "cli":
+        if not cli_befehl():
+            return ("Claude Code nicht gefunden (Befehl 'claude'). Installieren und "
+                    "mit dem Firmen-Login anmelden, oder RECHNUNG_CLAUDE_CLI setzen.")
+        return ""
+    if not api_key():
+        return "Kein API-Schluessel: RECHNUNG_CLAUDE_API_KEY setzen."
+    return ""
+
+
 def modell() -> str:
-    return os.environ.get("RECHNUNG_CLAUDE_MODELL", "").strip() or DEFAULT_MODELL
+    eigen = os.environ.get("RECHNUNG_CLAUDE_MODELL", "").strip()
+    if eigen:
+        return eigen
+    # Claude Code nimmt ohne Angabe das Modell seines Logins
+    return "" if backend() == "cli" else DEFAULT_MODELL
 
 
 def stichprobe_prozent() -> int:
@@ -165,6 +214,56 @@ def _post(body: dict) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _cli_aufruf(befehl: list[str], eingabe: str, cwd: Path, env: dict,
+                timeout: int) -> tuple[int, str, str]:
+    """Claude Code starten -> (Rueckgabecode, stdout, stderr). Der Auftrag
+    geht ueber stdin, nicht als Argument: unter Windows reicht der npm-Starter
+    ``claude.cmd`` Argumente durch cmd.exe, das an Zeichen wie ``|``, ``<``,
+    ``>`` oder Zeilenumbruechen scheitert. Eigene Funktion fuer Tests."""
+    import subprocess
+    r = subprocess.run(befehl, input=eingabe, cwd=str(cwd), env=env, capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    return r.returncode, r.stdout, r.stderr
+
+
+def _frage_cli(path: Path, prompt: str) -> str:
+    """Claude Code (``claude -p``) liest die Rechnung selbst und antwortet
+    -> Antworttext. Nur das Lese-Werkzeug ist freigegeben."""
+    import subprocess
+    exe = cli_befehl()
+    if not exe:
+        raise ClaudeNichtErreichbar(bereit())
+    auftrag = (_SYSTEM + "\n\n"
+               f"Lies die Rechnung in der Datei \"{path.name}\" im aktuellen Ordner "
+               "(Werkzeug Read) und beantworte dann:\n\n" + prompt)
+    befehl = [exe, "-p", "--output-format", "json",
+              "--allowedTools", "Read", "--max-turns", "4"]
+    if modell():
+        befehl += ["--model", modell()]
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("ANTHROPIC_API_KEY", "RECHNUNG_CLAUDE_API_KEY")}
+    try:
+        code, out, err = _cli_aufruf(befehl, auftrag, path.parent, env, timeout_s())
+    except subprocess.TimeoutExpired as e:
+        raise ClaudeNichtErreichbar(f"Claude Code: Zeitgrenze {timeout_s()} s") from e
+    except OSError as e:
+        raise ClaudeNichtErreichbar(f"Claude Code nicht startbar: {e}") from e
+    daten = None
+    for zeile in reversed((out or "").strip().splitlines()):
+        try:
+            daten = json.loads(zeile)
+            break
+        except json.JSONDecodeError:
+            continue
+    if not isinstance(daten, dict):
+        raise ClaudeNichtErreichbar(f"Claude Code: unerwartete Ausgabe (Code {code}) "
+                                    + (err or out or "")[:300].strip())
+    if daten.get("is_error") or code != 0:
+        raise ClaudeNichtErreichbar("Claude Code: " + str(daten.get("result") or daten.get("subtype")
+                                                 or err or code)[:300])
+    return str(daten.get("result") or "")
+
+
 def _parse(raw: str) -> dict | None:
     s = re.sub(r"^```(?:json)?\s*|\s*```$", "", (raw or "").strip())
     try:
@@ -197,16 +296,24 @@ def frage_claude(store, path: Path, sha256: str, felder: dict[str, str],
     if media is None:
         raise RuntimeError(f"Dateityp {path.suffix} kann Claude nicht direkt lesen")
     prompt = _prompt(felder, programm)
-    key = hashlib.sha256((modell() + "\n" + prompt).encode("utf-8")).hexdigest()[:16]
+    key = hashlib.sha256((backend() + ":" + modell() + "\n" + prompt)
+                         .encode("utf-8")).hexdigest()[:16]
     cp = _cache_path(store, sha256, key)
     if cp.exists():
         try:
             return json.loads(cp.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             pass
+    if post is None and backend() == "cli":
+        parsed = _parse(_frage_cli(path, prompt))
+        if parsed is None:
+            raise RuntimeError("Antwort von Claude Code nicht als JSON lesbar")
+        cp.parent.mkdir(parents=True, exist_ok=True)
+        cp.write_text(json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
+        return parsed
     if post is None:
         if not api_key():
-            raise RuntimeError("kein API-Schluessel (RECHNUNG_CLAUDE_API_KEY)")
+            raise ClaudeNichtErreichbar("kein API-Schluessel (RECHNUNG_CLAUDE_API_KEY)")
         post = _post
     data_b64 = base64.standard_b64encode(path.read_bytes()).decode("ascii")
     block_type = "document" if media == "application/pdf" else "image"
@@ -228,9 +335,9 @@ def frage_claude(store, path: Path, sha256: str, felder: dict[str, str],
             detail = e.read().decode("utf-8", "replace")[:300]
         except Exception:  # noqa: BLE001
             pass
-        raise RuntimeError(f"Claude-API HTTP {e.code} {detail}".strip()) from e
+        raise ClaudeNichtErreichbar(f"Claude-API HTTP {e.code} {detail}".strip()) from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
-        raise RuntimeError(f"Claude-API nicht erreichbar: {e}") from e
+        raise ClaudeNichtErreichbar(f"Claude-API nicht erreichbar: {e}") from e
     text = "".join(b.get("text", "") for b in (resp or {}).get("content", [])
                    if isinstance(b, dict) and b.get("type") == "text")
     parsed = _parse(text)
@@ -382,7 +489,7 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
 
     path = Path(path)
     rec: dict = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "datei": path.name,
-                 "modell": modell()}
+                 "weg": backend(), "modell": modell()}
 
     doc, o = load_document(path, store)
     if doc is None:
@@ -392,10 +499,23 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
     if store.is_confirmed(doc.sha256) or angelernt(store, doc.sha256):
         rec.update(ergebnis=ERG_UEBERSPRUNGEN, gruende=["schon bestaetigt"])
         return rec
+    # Dauerbetrieb (windows/anlernen.cmd): was schon beim Menschen liegt oder
+    # wiederholt scheiterte, nicht in jeder Runde erneut anfassen -- sonst
+    # verbraucht es das Rundenlimit und neue Rechnungen kommen nie dran.
+    frueher = [r.get("ergebnis") for r in protokoll(store)
+               if r.get("sha256") == doc.sha256 and not r.get("claude_weg")]
+    if ERG_MENSCH in frueher:
+        rec.update(ergebnis=ERG_UEBERSPRUNGEN, gruende=["liegt beim Menschen"])
+        return rec
+    if frueher.count(ERG_FEHLER) >= MAX_FEHLVERSUCHE:
+        rec.update(ergebnis=ERG_UEBERSPRUNGEN,
+                   gruende=[f"{MAX_FEHLVERSUCHE}x gescheitert -- siehe lehrer.jsonl"])
+        return rec
 
     res = process(path, store)
     if res.aborted:
         rec.update(ergebnis=ERG_FEHLER, gruende=list(res.hold_reasons or ["abgebrochen"]))
+        _protokoll(store, rec)
         return rec
     rec["lieferant"] = res.supplier_name or res.supplier_id
     if res.extraction == "einvoice":
@@ -422,6 +542,11 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
                     and res.fields[n].source != "missing" else None) for n in felder}
     try:
         antwort = frage_claude(store, path, doc.sha256, felder, programm, post=post)
+    except ClaudeNichtErreichbar as e:
+        # liegt nicht an der Rechnung: nicht als Fehlversuch zaehlen
+        rec.update(ergebnis=ERG_FEHLER, gruende=[str(e)], claude_weg=True)
+        _protokoll(store, rec)
+        return rec
     except RuntimeError as e:
         rec.update(ergebnis=ERG_FEHLER, gruende=[str(e)])
         _protokoll(store, rec)
@@ -476,6 +601,8 @@ def anlernen(store, ordner: str | Path, *, limit: int = 0, post=None,
         out.append(r)
         if fortschritt:
             fortschritt(r)
+        if r.get("claude_weg"):
+            break  # Claude gerade nicht nutzbar (Limit/Netz): naechste Runde
     return out
 
 
@@ -585,10 +712,11 @@ def main(argv=None) -> int:
         p.error("Ordner angeben (oder --bilanz)")
     if not an():
         print("Lehrer ist aus. Einschalten mit RECHNUNG_CLAUDE_LEHRER=1 "
-              "(und RECHNUNG_CLAUDE_API_KEY setzen).")
+              "(und RECHNUNG_CLAUDE_API_KEY oder RECHNUNG_CLAUDE_BACKEND=cli setzen).")
         return 1
-    if not api_key():
-        print("Kein API-Schluessel: RECHNUNG_CLAUDE_API_KEY setzen.")
+    grund = bereit()
+    if grund:
+        print(grund)
         return 1
 
     def _zeige(r: dict) -> None:
