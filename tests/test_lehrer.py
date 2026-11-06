@@ -238,3 +238,23 @@ def test_cli_ohne_claude_code(monkeypatch):
     monkeypatch.setenv("RECHNUNG_CLAUDE_BACKEND", "cli")
     monkeypatch.setattr(lehrer, "cli_befehl", lambda: None)
     assert "nicht gefunden" in lehrer.bereit()
+
+
+def test_rechnung_im_menschordner_bleibt_erhalten(tmp_path):
+    """Lehrer arbeitet direkt im Ordner "Menschliche Bearbeitung": eine von
+    Claude bestaetigte Rechnung darf dort NICHT geloescht werden."""
+    store, ordner, src = _store(tmp_path)
+    res = process(src, store)
+    human.ablegen(store, res, [{"art": "test", "grund": "Test", "felder": []}])
+    kopie = human.datei_pfad(store, src.name)
+    assert kopie is not None and kopie.exists()
+    src.unlink()  # Original weg: die Arbeitskopie ist die einzige
+    r = lehrer.anlernen_datei(store, kopie, post=_claude(RICHTIG))
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT, r
+    assert kopie.exists()
+    eintrag = [e for e in human.offen(store) if e["sha256"] == r["sha256"]][0]
+    assert any("Claude" in h for h in eintrag["hinweise"]) and eintrag.get("claude_geprueft")
+    # zweite Runde ueber den Ordner: schon bestaetigt, kein neuer Aufruf
+    calls = []
+    lehrer.anlernen(store, kopie.parent, post=_claude(RICHTIG, calls=calls))
+    assert not calls

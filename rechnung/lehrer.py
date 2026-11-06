@@ -463,7 +463,7 @@ def _bestaetigen(store, path: Path, res, doc):
     (web/server.py ``confirm``), aber als Operator ``claude``, OHNE
     Journal-Eintrag und OHNE Eintrag im Bestaetigungs-Protokoll des
     Menschen: Uebungsrechnungen landen nie in den Buechern."""
-    from . import eventlog, human, learn, shadow
+    from . import eventlog, learn, shadow
     from .pipeline import process
 
     if res.template_id:
@@ -477,8 +477,27 @@ def _bestaetigen(store, path: Path, res, doc):
     shadow.record(store, res, OPERATOR)
     eventlog.record(store, res, OPERATOR)
     gelernt = learn.learn_from_confirmed(_LernStore(store, res.sha256), res, doc, OPERATOR)
-    human.erledigt(store, res, OPERATOR, freigabe=OPERATOR)
+    _vermerk_im_ordner(store, res.sha256)
     return res, gelernt
+
+
+def _vermerk_im_ordner(store, sha256: str) -> None:
+    """Liegt die Rechnung im Ordner "Menschliche Bearbeitung", bleibt sie dort
+    (NICHT ``human.erledigt``: das loescht die Arbeitskopie, und die kann die
+    einzige Kopie sein). Sie bekommt nur einen Hinweis, dass Claude sie
+    geprueft hat -- die Bestaetigung fuer die Buecher bleibt beim Menschen."""
+    from . import human
+
+    gefunden = human.finde(store, sha256)
+    if gefunden is None:
+        return
+    side, daten = gefunden
+    vermerk = "Von Claude geprueft und bestaetigt (Anlernphase) -- Vorlage daraus gelernt"
+    hinweise = list(daten.get("hinweise") or [])
+    if vermerk not in hinweise:
+        hinweise.append(vermerk)
+    human._write(side, dict(daten, hinweise=hinweise,
+                            claude_geprueft=time.strftime("%Y-%m-%dT%H:%M:%S%z")))
 
 
 def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
