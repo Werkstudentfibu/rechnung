@@ -4,7 +4,10 @@ Ersetzt in der Anlernphase den Menschen beim Pruefen/Korrigieren/Bestaetigen
 von UEBUNGS-Rechnungen, damit die Vorlagen (Stufe 1, learn.py) schneller
 reifen. Ablauf je Rechnung:
 
-1. Das Programm liest die Rechnung wie immer aus (``pipeline.process``).
+1. Das Programm liest die Rechnung wie immer aus (``pipeline.process``),
+   aber ohne die lokale KI (Ollama): Claude ist hier der Pruefer, und die
+   lokale KI kostet auf dem Laptop je Rechnung bis zu zwei Minuten
+   (``RECHNUNG_CLAUDE_LOKALE_KI=1`` schaltet sie wieder dazu).
 2. Claude bekommt das Original (PDF/Bild) und die Werte des Programms und
    gibt je Feld den richtigen Wert zurueck, samt "sicher ja/nein".
 3. Gegen Halluzination gilt dieselbe Regel wie fuer die lokale KI
@@ -155,6 +158,18 @@ def timeout_s() -> int:
         return max(10, int(os.environ.get("RECHNUNG_CLAUDE_TIMEOUT", "120")))
     except ValueError:
         return 120
+
+
+def lokale_ki() -> bool:
+    """Lokale KI (Ollama, semantic.py) beim Anlernen mitlaufen lassen?
+    Standard NEIN: Claude prueft ohnehin jedes Feld, die lokale KI kostet
+    auf einem Laptop ohne Grafikkarte je Rechnung bis zu
+    ``RECHNUNG_LLM_TIMEOUT`` Sekunden -- auch fuer Rechnungen, die danach
+    nur uebersprungen werden (Lieferant noch Entwurf) -- und ihre Werte
+    gelten ohnehin als unsicher. Der Schattenbetrieb misst dann das
+    Programm ohne KI. ``RECHNUNG_CLAUDE_LOKALE_KI=1`` schaltet sie zu."""
+    return os.environ.get("RECHNUNG_CLAUDE_LOKALE_KI", "").strip().lower() in (
+        "1", "true", "yes", "on", "ja")
 
 
 def stichprobe(sha256: str) -> bool:
@@ -483,7 +498,7 @@ def _bestaetigen(store, path: Path, res, doc):
             tpl.confirmations += 1
             store.save_template(tpl)
             if tpl.secured != was_secured:
-                res = process(path, store)
+                res = process(path, store, use_llm=lokale_ki())
     shadow.record(store, res, OPERATOR)
     eventlog.record(store, res, OPERATOR)
     gelernt = learn.learn_from_confirmed(_LernStore(store, res.sha256), res, doc, OPERATOR)
@@ -542,7 +557,7 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
                    gruende=[f"{MAX_FEHLVERSUCHE}x gescheitert -- siehe lehrer.jsonl"])
         return rec
 
-    res = process(path, store)
+    res = process(path, store, use_llm=lokale_ki())
     if res.aborted:
         rec.update(ergebnis=ERG_FEHLER, gruende=list(res.hold_reasons or ["abgebrochen"]))
         _protokoll(store, rec)
@@ -600,7 +615,7 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
                                    file=path.name, template_id=res.template_id,
                                    quelle_vorher=quelle)
     if ab.korrekturen:
-        res = process(path, store)
+        res = process(path, store, use_llm=lokale_ki())
 
     gruende = [f"{n}: {g}" for n, g in sorted(ab.unsicher.items())]
     if gruende:

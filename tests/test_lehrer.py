@@ -265,6 +265,26 @@ def test_cli_ohne_claude_code(monkeypatch):
     assert "nicht gefunden" in lehrer.bereit()
 
 
+def test_lokale_ki_bleibt_beim_anlernen_aus(tmp_path, monkeypatch):
+    """Claude ist der Pruefer -- die lokale KI (Ollama) wuerde je Rechnung nur
+    Minuten kosten. Jeder Pipeline-Lauf des Lehrers geht mit use_llm=False."""
+    from rechnung import pipeline
+    gesehen = []
+    echt = pipeline.process
+
+    def mitgeschnitten(path, store, use_llm=True, **kw):
+        gesehen.append(use_llm)
+        return echt(path, store, use_llm=use_llm, **kw)
+
+    monkeypatch.setattr(pipeline, "process", mitgeschnitten)
+    store, ordner, src = _store(tmp_path)
+    r = lehrer.anlernen_datei(store, src, post=_claude(RICHTIG))
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT, r
+    assert gesehen and all(u is False for u in gesehen), gesehen
+    monkeypatch.setenv("RECHNUNG_CLAUDE_LOKALE_KI", "1")
+    assert lehrer.lokale_ki()
+
+
 def test_rechnung_im_menschordner_bleibt_erhalten(tmp_path):
     """Lehrer arbeitet direkt im Ordner "Menschliche Bearbeitung": eine von
     Claude bestaetigte Rechnung darf dort NICHT geloescht werden."""

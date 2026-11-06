@@ -14,6 +14,7 @@ RECHNUNG_CLAUDE_API_KEY=sk-ant-...        # aus der Claude Console (Firmenkonto)
 # RECHNUNG_CLAUDE_MODELL=claude-sonnet-5-5
 # RECHNUNG_CLAUDE_STICHPROBE=10           # % Kontrolle durch einen Menschen
 # RECHNUNG_CLAUDE_TIMEOUT=120
+# RECHNUNG_CLAUDE_LOKALE_KI=1          # lokale KI (Ollama) beim Anlernen mitlaufen lassen
 ```
 
 ### Alternativ: über Claude Code statt API-Schlüssel
@@ -76,7 +77,12 @@ Skript mit `-Entfernen`.
 
 ## Was passiert
 
-Je Rechnung liest das Programm wie immer aus. Claude bekommt das Original und
+Je Rechnung liest das Programm wie immer aus – nur **ohne die lokale KI**
+(Ollama): Claude ist hier der Prüfer, und die lokale KI würde auf dem Laptop
+je Rechnung bis zu zwei Minuten kosten, auch für Rechnungen, die danach nur
+übersprungen werden. Der Schattenbetrieb misst in der Anlernphase also das
+Programm ohne KI; `RECHNUNG_CLAUDE_LOKALE_KI=1` schaltet sie wieder dazu.
+Claude bekommt das Original und
 die Werte des Programms, nennt je Feld den richtigen Wert (mit „sicher ja/nein“),
 und das Programm gleicht ab. Abweichungen werden als Korrektur gespeichert
 (Operator `claude`, im Audit und im Fehlerbericht sichtbar), die Rechnung wird
