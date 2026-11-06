@@ -2,6 +2,12 @@
 
 *Allgemeine Erklärung zur Vorlage bei der IT · Stand: 2026-09-18*
 
+> **Nachtrag 2026-11-06:** Die Aussage „keine Cloud-KI“ gilt für die Anlernphase
+> nicht mehr. In dieser Phase prüft Claude (Anthropic) Übungsrechnungen; dazu
+> werden die Rechnungen an Anthropic übertragen. Was, wann, wie und mit welchen
+> Sicherungen steht in `IT-FREIGABE-AENDERUNG-CLAUDE.md`. Alles Übrige in dieser
+> Beschreibung bleibt unverändert.
+
 **Wichtiger Hinweis vorab:** Das hier ist ausdrücklich erst ein **Konzept/Prototyp**, kein
 fertiges Produkt. Ich habe es zunächst so gebaut und beschrieben, dass es auf meinem
 **Firmen-Laptop** läuft, weil ich davon ausgegangen bin, dass das der naheliegendste Ort
@@ -59,7 +65,7 @@ IT brauchen, bevor Punkt 4 oben geändert wird.
 
 | Punkt | Status |
 |---|---|
-| Internet-/Cloud-Zugriff | **Keiner.** Das Programm braucht keine Netzwerkverbindung. (Eine optionale IONOS-Postfach-Abholung und JobRouter-Übergabe sind im Code vorbereitet, aber standardmäßig **ausgeschaltet** und für den jetzigen Testbetrieb nicht aktiv.) |
+| Internet-/Cloud-Zugriff | **Keiner** im Normalbetrieb. Das Programm braucht keine Netzwerkverbindung. (Eine optionale IONOS-Postfach-Abholung und JobRouter-Übergabe sind im Code vorbereitet, aber standardmäßig **ausgeschaltet** und für den jetzigen Testbetrieb nicht aktiv.) **Ausnahme seit 2026-11-06:** Anlernphase mit Claude, ausgehend HTTPS zu `api.anthropic.com`, siehe `IT-FREIGABE-AENDERUNG-CLAUDE.md`. |
 | Lokales Sprachmodell (optional) | **Standardmäßig ausgeschaltet.** Falls aktiviert: nur lokale Verbindung zu Ollama auf demselben Gerät (`127.0.0.1`), kein Cloud-Anbieter, keine Rechnungsdaten verlassen den Rechner. |
 | Admin-/Installationsrechte | **Keine nötig.** Läuft als einzelne Programmdatei bzw. reiner Python-Code im Nutzerkontext, ohne Systemänderungen, ohne Registry-Einträge. |
 | Datenspeicherort | Ausschließlich lokal auf meinem Rechner, in einem Ordner neben dem Programm. Keine Übertragung an Dritte. |
