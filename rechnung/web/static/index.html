@@ -54,7 +54,7 @@
   .tr-seite { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border-radius: 8px;
               background: #eee; font-size: 12px; cursor: pointer; }
   .tr-seite.ok { background: #e6d9f0; border: 1px solid #9b59b6; }
-  .li-cell-ziel { outline: 2px solid #2f6fd0; }
+  .li-cell-ziel, .tax-cell-ziel { outline: 2px solid #2f6fd0; }
   /* Baustein 3 (Aaron 12.10.2026): Vorschlag fuer die uebrigen Spalten
      derselben Zeile -- gelb, ein Klick uebernimmt ihn. */
   .li-vorschlag { display: inline-block; margin-left: 2px; padding: 0 4px; border-radius: 4px;
@@ -189,7 +189,24 @@
   .ab-hit { padding: 5px 6px; border-bottom: 1px solid #eee; cursor: pointer; }
   .ab-hit:hover { background: #e3efe9; }
   .li-scroll { overflow-x: auto; }
-  table.ab-li { min-width: 520px; } table.ab-li th { font-weight: 500; font-size: 12px; text-align: left; background: #eee; }
+  /* Positionstabelle: Beschreibung bekommt den meisten Platz, Zahlen-Spalten
+     eine Mindestbreite, damit nichts abgeschnitten wird (Aaron 06.11.2026).
+     table-layout auto + Mindestbreiten je Spalte statt starrer Prozente,
+     weil die Zahl der Spalten (Zusatzspalten wie Kategorie) variiert;
+     horizontales Scrollen (.li-scroll) greift nur, wenn selbst die Minima
+     nicht mehr in den Bereich passen (z.B. ~1000px Fensterbreite). */
+  table.ab-li { width: 100%; table-layout: auto; }
+  table.ab-li th { font-weight: 500; font-size: 12px; text-align: left; background: #eee; }
+  table.ab-li td[data-col="beschreibung"], table.ab-li th[data-col="beschreibung"] { min-width: 180px; width: 36%; }
+  table.ab-li td[data-col="menge"], table.ab-li th[data-col="menge"] { min-width: 50px; }
+  table.ab-li td[data-col="mwst_satz"], table.ab-li th[data-col="mwst_satz"] { min-width: 50px; }
+  table.ab-li td[data-col="waehrung"], table.ab-li th[data-col="waehrung"] { min-width: 46px; }
+  table.ab-li td[data-col="einzelpreis_netto"], table.ab-li th[data-col="einzelpreis_netto"],
+  table.ab-li td[data-col="gesamt_netto"], table.ab-li th[data-col="gesamt_netto"] { min-width: 82px; }
+  table.ab-li td[data-col="kategorie"], table.ab-li th[data-col="kategorie"] { min-width: 100px; }
+  table.ab-li textarea.li-besch { width: 100%; min-height: 2.6em; resize: vertical; font: inherit;
+    border: 1px solid transparent; background: transparent; padding: 1px 3px; white-space: pre-wrap; word-break: break-word; }
+  table.ab-li textarea.li-besch:focus { border-color: #2f6fd0; background: #fff; outline: none; }
   .actionbar { position: sticky; bottom: 0; background: #fff; border-top: 2px solid #1c7550;
                padding: 8px 0; margin-top: 10px; z-index: 6; }
   td.abw { background: #fff1b8; outline: 1px solid #faad14; }
@@ -218,6 +235,14 @@
   .chk { display: inline-block; margin: 2px 6px 2px 0; font-size: 12px; }
   .chk.ok { color: #389e0d; } .chk.bad { color: #cf1322; } .chk.na { color: #888; }
   .chk.warn { color: #ad6800; background: #fffbe6; padding: 0 4px; border-radius: 3px; }
+  /* Rechen-Pruefung als Ampel (Aaron 06.11.2026): nur noch passt/passt nicht */
+  .chk-ampel { font-weight: 600; padding: 4px 8px; border-radius: 4px; display: inline-block; }
+  .chk-ampel.ok { background: #e6f7e0; color: #389e0d; }
+  .chk-ampel.bad { background: #fff1f0; color: #cf1322; }
+  .chk-ampel.na { background: #f0f0f0; color: #888; }
+  .chk-details { margin-top: 6px; }
+  .chk-details > summary { cursor: pointer; font-size: 12px; color: #555; }
+  .chk-details > .chk { display: block; margin-top: 4px; }
   .li-col { display: inline-block; background: #eef4fb; border: 1px solid #cfe0f4; border-radius: 4px; padding: 2px 6px; margin: 2px; }
   .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; z-index: 1000; }
   .modal-box { background: #fff; border-radius: 8px; padding: 18px 22px; max-width: 480px; box-shadow: 0 4px 24px rgba(0,0,0,.25); }
@@ -601,7 +626,6 @@ function applyInvoiceData(d) {
     detectedAddress: d.detected_address || null,
     holdReasons: d.hold_reasons || [], statusLabel: d.status_label || '',
     hinweise: d.hinweise || [],
-    pflichtangaben: d.pflichtangaben || null,
     // rote Pruefungen (Plausibilitaet, Datum, Lieferanten-Gedaechtnis, ...)
     checks: d.checks || [], roteFelder: d.rote_felder || {}, kiAbweichungen: d.ki_abweichungen || {},
     // Dezenter Positionsmodus-Vorschlag bei langem Beleg (Teil B) -- eigens
@@ -644,6 +668,9 @@ function applyInvoiceData(d) {
     // Einzelne Positions-Zelle als Rahmen-Ziel ausgewaehlt (wie ein
     // Kopffeld, STATE.zielInput) -- {ri, col} oder null.
     zielLiCell: null,
+    // Dasselbe fuer eine Zelle der USt-Aufstellung ("Weitere Beträge") --
+    // {ri, satz, k} oder null (Aaron 06.11.2026).
+    zielTaxCell: null,
     // Baustein 3: Vorschlag fuer die uebrigen Spalten derselben Zeile nach
     // dem Fuellen EINER Zelle per Rahmen -- {ri, vorschlag} oder null.
     liVorschlag: null,
@@ -1028,7 +1055,8 @@ function renderInvoice(d) {
   // Hinweise (blockieren nichts, z.B. Skonto gestaffelt, Gegencheck
   // uebersprungen) -- der "Langer Beleg"-Vorschlag steht gezielt bei
   // "Positionsdaten" (renderPositionsmodusAuswahl), hier nicht doppelt.
-  // Pflichtangaben stehen als eigene Gruppe weiter unten, nicht doppelt hier
+  // Pflichtangaben komplett aus der Oberflaeche entfernt (Aaron 06.11.2026) --
+  // Hinweis bleibt im Hintergrund (kein Rueckstellgrund, Export), nur nicht sichtbar.
   const sonstigeHinweise = (d.hinweise || STATE.hinweise || []).filter(h =>
     !h.startsWith('Langer Beleg') && !h.startsWith('Pflichtangaben ('));
   if (sonstigeHinweise.length) {
@@ -1152,18 +1180,6 @@ function renderInvoice(d) {
   be.appendChild(gruppe('AdditionalCosts',
     '<div class="hint">Zusatzkosten (Fracht, Porto, Verpackung) – werden noch nicht eigens ausgelesen; stehen sie als Position auf der Rechnung, erscheinen sie unter Positionsdaten.</div>', true));
   be.appendChild(renderPruefBox());
-
-  // Pflichtangaben (§ 14 Abs. 4 UStG / § 33 UStDV / Art. 26 MWSTG) -- nur
-  // Hinweis, gelb, blockiert nichts (Aaron 10.10.2026)
-  const pf = d.pflichtangaben !== undefined ? d.pflichtangaben : STATE.pflichtangaben;
-  if (pf) {
-    const g = gruppe(`Pflichtangaben (${pf.regelwerk})` + (pf.fehlt.length ? ` – ${pf.fehlt.length} fehlt` : ' – vollständig'),
-      '<div class="hint">Nur Hinweis, kein Rückstellgrund – Erkennung per Text, kann irren.</div>' +
-      pf.punkte.map(p => `<div class="chk ${p.ok === true ? 'ok' : p.ok === false ? 'warn' : 'na'}">
-        ${p.ok === true ? '✓' : p.ok === false ? '!' : '–'} ${esc(p.name)}${p.detail ? ` <span class="hint">(${esc(p.detail)})</span>` : ''}</div>`).join(''),
-      !pf.fehlt.length);
-    fbox.appendChild(g);
-  }
 
   // Positionsdaten
   const pd = gruppe('Positionsdaten', '');
@@ -1519,6 +1535,9 @@ function selectField(name, tr) {
   STATE.li.selCol = null;
   STATE.selField = name;
   STATE.zielInput = null;
+  STATE.zielLiCell = null;
+  STATE.zielTaxCell = null;
+  document.querySelectorAll('.li-cell-ziel, .tax-cell-ziel').forEach(x => x.classList.remove('li-cell-ziel', 'tax-cell-ziel'));
   document.querySelectorAll('#fields .ziel-sel').forEach(x => x.classList.remove('ziel-sel'));
   document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
   document.querySelectorAll('#fields [data-field].sel, #fields tr.sel').forEach(x => x.classList.remove('sel'));
@@ -1703,12 +1722,57 @@ function paintTabRahmen() {
    ein Wort anklicken (mehrere dazu/weg) oder einen Rahmen ziehen -- Text
    kommt in die Zelle (Code/Optik wie beim Kopffeld-Rahmen-Ziehen). */
 function selLiZelle(ri, col) {
-  STATE.selField = null; STATE.zielInput = null;
+  STATE.selField = null; STATE.zielInput = null; STATE.zielTaxCell = null;
   STATE.zielLiCell = { ri, col, page: null, values: [] };
-  document.querySelectorAll('.li-cell-ziel').forEach(e => e.classList.remove('li-cell-ziel'));
+  document.querySelectorAll('.li-cell-ziel, .tax-cell-ziel').forEach(e => e.classList.remove('li-cell-ziel', 'tax-cell-ziel'));
   const el = document.getElementById(`li-cell-${ri}-${col}`);
   if (el) el.classList.add('li-cell-ziel');
   document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+}
+/* -------- "Weitere Beträge" (USt-Aufstellung): Zelle per Wort/Rahmen fuellen
+   (Aaron 06.11.2026) -- gleiche Ziel-Logik wie bei den Positionszellen
+   (selLiZelle/liZelleWortToggle), nur dass das Ergebnis ueber taxSetSlot
+   normalisiert wird (wie Eingabe von Hand: taxSetSlot -> taxTouched ->
+   taxRedraw + „Beträge übernehmen"). `ri` ist -1 fuer einen Platzhalter-
+   Steuersatz, der noch keine eigene Zeile in STATE.taxRows hat. */
+function selTaxZelle(ri, satz, k) {
+  STATE.selField = null; STATE.zielInput = null; STATE.zielLiCell = null;
+  STATE.zielTaxCell = { ri, satz, k, page: null, values: [] };
+  document.querySelectorAll('.li-cell-ziel, .tax-cell-ziel').forEach(e => e.classList.remove('li-cell-ziel', 'tax-cell-ziel'));
+  const el = document.getElementById(`tax-cell-${ri >= 0 ? ri : 's' + satz}-${k}`);
+  if (el) el.classList.add('tax-cell-ziel');
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+}
+function paintZielTaxCell(page) {
+  const wraps = document.querySelectorAll('.pdfwrap');
+  const wds = wraps[page] && wraps[page].querySelectorAll('.w');
+  if (!wds) return;
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+  (STATE.zielTaxCell.values || []).forEach(i => wds[i] && wds[i].classList.add('ziel'));
+}
+function taxZelleUebernehmen(z, page) {
+  const text = woerterText(page, z.values).replace(/\n/g, ' ').trim();
+  taxSetSlot(z.ri, z.satz, z.k, text);
+  // Platzhalter kann durch taxSetSlot gerade zur echten Zeile geworden sein --
+  // Ziel-Zuordnung mitziehen, damit nach dem Neuzeichnen weiter markiert wird.
+  if (z.ri < 0) {
+    const num = x => parseFloat(String(x ?? '').replace(',', '.'));
+    const ri = STATE.taxRows.findIndex(r => num(r.satz) === z.satz);
+    if (ri >= 0) z.ri = ri;
+  }
+}
+function taxZelleWortToggle(page, i) {
+  const z = STATE.zielTaxCell;
+  if (z.page !== page) { z.page = page; z.values = []; }
+  z.values.includes(i) ? z.values = z.values.filter(x => x !== i) : z.values.push(i);
+  paintZielTaxCell(page);
+  taxZelleUebernehmen(z, page);
+}
+function taxZelleRahmen(page, indices) {
+  const z = STATE.zielTaxCell;
+  z.page = page; z.values = indices;
+  paintZielTaxCell(page);
+  taxZelleUebernehmen(z, page);
 }
 function paintZielLiCell(page) {
   const wraps = document.querySelectorAll('.pdfwrap');
@@ -1863,11 +1927,11 @@ function renderLiPreviewBox(items) {
   const pr = (STATE.pruefung || {}).positionen || [];
   const fest = STATE.positionenFest;
   box.innerHTML = `
-    <div class="li-scroll"><table class="edit ab-li"><tr><th title="Zeile bestätigen / Status">Zeile</th>${cols.map(c => `<th title="${esc(c)}">${esc(label(c))}</th>`).join('')}<th>Prüfung</th><th></th></tr>
+    <div class="li-scroll"><table class="edit ab-li"><tr><th title="Zeile bestätigen / Status">Zeile</th>${cols.map(c => `<th title="${esc(c)}" data-col="${esc(c)}">${esc(label(c))}</th>`).join('')}<th>Prüfung</th><th></th></tr>
     ${items.map((it, ri) => `<tr class="${rowCls(pr[ri])} zs-${liStatus(ri)}">${zeilenStatusZelle(ri, fest)}${cols.map(c => {
         if (c === 'kategorie') {
           const conf = it.kategorie_konfidenz;
-          return `<td><input value="${esc(nz(it.kategorie))}" size="14" placeholder="Kategorie …"
+          return `<td data-col="kategorie"><input value="${esc(nz(it.kategorie))}" size="14" placeholder="Kategorie …"
                    onchange="saveCategoryCorrection('${esc((it._kategorie_text || '').replace(/'/g, "\\'"))}', this.value)">
             ${conf != null ? `<span class="hint">(${conf})</span>` : ''}</td>`;
         }
@@ -1886,7 +1950,17 @@ function renderLiPreviewBox(items) {
         const vorschlagHtml = vLiVorschlag != null
           ? ` <span class="li-vorschlag" title="Vorschlag aus derselben Zeile – Klick übernimmt"
                 onclick="liVorschlagUebernehmen(${ri}, '${esc(c)}')">${esc(vLiVorschlag)}</span>` : '';
-        return `<td class="${typeof it[c] === 'number' ? 'num' : ''}"><input id="li-cell-${ri}-${c}"
+        // Beschreibung bekommt ein mehrzeiliges, umbrechendes Feld statt
+        // eines einzeiligen <input> -- sonst schneidet lange Positionstexte
+        // ab (Aaron 06.11.2026). Tooltip zeigt den vollen Text zusätzlich.
+        if (c === 'beschreibung') {
+          return `<td data-col="beschreibung"><textarea id="li-cell-${ri}-${c}"
+                    class="li-besch ${hcls}${istZiel ? ' li-cell-ziel' : ''}" rows="2"
+                    title="${esc(h ? h + ': ' + String(nz(v)) : String(nz(v)))}" ${fest ? 'readonly' : ''}
+                    onclick="${fest ? '' : `selLiZelle(${ri}, '${c}')`}"
+                    onchange="liSetCell(${ri}, '${esc(c)}', this.value)">${esc(nz(v))}</textarea>${vorschlagHtml}</td>`;
+        }
+        return `<td class="${typeof it[c] === 'number' ? 'num' : ''}" data-col="${esc(c)}"><input id="li-cell-${ri}-${c}"
                   class="${hcls}${istZiel ? ' li-cell-ziel' : ''}" value="${esc(nz(v))}"
                   ${h ? `title="${esc(h)}"` : ''} ${fest ? 'readonly' : ''}
                   onclick="${fest ? '' : `selLiZelle(${ri}, '${c}')`}"
@@ -2086,6 +2160,7 @@ function renderTaxPreview() {
   const pr = (STATE.pruefung || {}).ust || [];
   const cur = STATE.current.ust_aufstellung || {};
   const slots = taxSlots();
+  const z = STATE.zielTaxCell;
   const zelle = (sl, k, label) => {
     const r = sl.ri >= 0 ? STATE.taxRows[sl.ri] : null;
     let v = r ? r[k] : (k === 'satz' ? sl.satz : '');
@@ -2097,9 +2172,17 @@ function renderTaxPreview() {
       : (r._abgeleitet && !STATE.tabDirty.ust) ? 'vorschlag' : 'gut';
     const h = r && (r._herkunft || {})[k];
     const ro = sl.fest && k === 'satz' ? 'readonly tabindex="-1"' : '';
+    // Markierbar wie jedes andere Feld (Aaron 06.11.2026): ⌖ -> Ziel-Logik
+    // analog zu den Positionszellen (STATE.zielTaxCell/taxZelleWortToggle).
+    const istZiel = z && z.k === k && (sl.ri >= 0 ? z.ri === sl.ri : (z.ri < 0 && z.satz === sl.satz));
+    const id = `tax-cell-${sl.ri >= 0 ? sl.ri : 's' + sl.satz}-${k}`;
     return `<div class="af"><label>${esc(label)}</label>
-      <input class="ab-in ${st} ${(h === 'errechnet' || h === 'kopf') ? h : ''}" value="${esc(nz(v))}" ${ro}
-             ${h ? `title="${esc(h)}"` : ''} onchange="taxSetSlot(${sl.ri}, ${sl.satz ?? 'null'}, '${k}', this.value)"></div>`;
+      <input id="${id}" class="ab-in ${st} ${(h === 'errechnet' || h === 'kopf') ? h : ''}${istZiel ? ' tax-cell-ziel' : ''}"
+             value="${esc(nz(v))}" ${ro}
+             ${h ? `title="${esc(h)}"` : ''} onchange="taxSetSlot(${sl.ri}, ${sl.satz ?? 'null'}, '${k}', this.value)">
+      <button class="mk-btn" tabindex="-1" style="right:3px"
+        title="Anderen Wert markieren: danach in der Rechnung das Wort anklicken oder einen Rahmen darum ziehen"
+        onclick="event.stopPropagation(); selTaxZelle(${sl.ri}, ${sl.satz ?? 'null'}, '${k}'); $('#msg').textContent = 'Jetzt in der Rechnung den richtigen Wert anklicken oder einen Rahmen darum ziehen.'">⌖</button></div>`;
   };
   const satzZeile = (sl, n) => `<div class="ab-row3">${zelle(sl, 'netto', 'Nettobetrag ' + n)}${zelle(sl, 'ust', 'Steuerbetrag ' + n)}${zelle(sl, 'satz', 'Steuersatz ' + n)}</div>`;
   const weitere = slots.slice(3);
@@ -2196,13 +2279,24 @@ function refreshPruefung() {
   }, 250);
 }
 function renderPruefBox() {
+  // Baustein 11b, vereinfacht (Aaron 06.11.2026): nur noch eine Ampel
+  // grün/rot/grau statt der Liste aller Einzelpruefungen -- Details nur
+  // noch zum Aufklappen, standardmaessig zu. Die Pruefungen selbst
+  // (/api/pruefen, STATE.pruefung) sind unveraendert, nur die Anzeige.
   const box = document.createElement('div'); box.className = 'box'; box.id = 'pruef-box';
   const checks = (STATE.pruefung || {}).checks || [];
   const hatPos = (STATE.lineItems || []).length > 0;
-  box.innerHTML = `<h4>Rechen-Prüfungen</h4>
-    ${checks.map(c => `<span class="chk ${c.ok === true ? 'ok' : c.ok === false ? 'bad' : 'na'}"
-        title="${esc(c.detail)}">${c.ok === true ? '✓' : c.ok === false ? '✗' : '–'} ${esc(c.name)}${c.ok === false ? ': ' + esc(c.detail) : ''}</span>`).join('')}
-    ${hatPos ? '' : '<div class="hint">Hinweis: keine Positionstabelle erkannt – kein Fehler, die Positions-Prüfungen entfallen.</div>'}`;
+  const pruefbar = checks.filter(c => c.ok !== null);
+  const status = !pruefbar.length ? 'na' : pruefbar.every(c => c.ok) ? 'ok' : 'bad';
+  const ampelText = status === 'ok' ? '✓ Rechnung rechnet sich'
+    : status === 'bad' ? '✗ Beträge passen nicht zusammen' : '– nichts prüfbar';
+  box.innerHTML = `<h4>Rechen-Prüfung</h4>
+    <div class="chk-ampel ${status}">${ampelText}</div>
+    <details class="chk-details"><summary>Details</summary>
+      ${checks.map(c => `<span class="chk ${c.ok === true ? 'ok' : c.ok === false ? 'bad' : 'na'}"
+          title="${esc(c.detail)}">${c.ok === true ? '✓' : c.ok === false ? '✗' : '–'} ${esc(c.name)}${c.ok === false ? ': ' + esc(c.detail) : ''}</span>`).join('')}
+      ${hatPos ? '' : '<div class="hint">Hinweis: keine Positionstabelle erkannt – kein Fehler, die Positions-Prüfungen entfallen.</div>'}
+    </details>`;
   return box;
 }
 function paintPruefBox() {
@@ -2225,6 +2319,7 @@ function clickWord(page, i, ev) {
   }
   if (RAHMEN_KLICK_SPERRE) return;   // Klick am Ende einer Rahmen-Auswahl
   if (STATE.zielLiCell) { liZelleWortToggle(page, i); return; }
+  if (STATE.zielTaxCell) { taxZelleWortToggle(page, i); return; }
   if (STATE.zielInput) { zielWoerter(page, [i], false); return; }
   if (!STATE.selField) { $('#msg').textContent = 'erst ein Feld anklicken, dann den Wert in der Rechnung markieren'; return; }
   const a = STATE.assign[STATE.selField] || { page, anchor: null, values: [] };
@@ -2266,6 +2361,8 @@ function wertEintragen(field, page, indices) {
 }
 function zielInput(id, el) {
   STATE.selField = null; STATE.zielInput = id; STATE.zielWoerter = { page: null, values: [] };
+  STATE.zielLiCell = null; STATE.zielTaxCell = null;
+  document.querySelectorAll('.li-cell-ziel, .tax-cell-ziel').forEach(x => x.classList.remove('li-cell-ziel', 'tax-cell-ziel'));
   document.querySelectorAll('#fields .sel, #fields .ziel-sel').forEach(x => x.classList.remove('sel', 'ziel-sel'));
   el.classList.add('ziel-sel');
   document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
@@ -2356,8 +2453,9 @@ function rahmenAuswahl(wrap, page) {
       const cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2;
       if (cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) treffer.push(i);
     });
-    if (!treffer.length) { if (!STATE.zielLiCell) ausschnittLesen(wrap, page, r); return; }
+    if (!treffer.length) { if (!STATE.zielLiCell && !STATE.zielTaxCell) ausschnittLesen(wrap, page, r); return; }
     if (STATE.zielLiCell) { liZelleRahmen(page, treffer); return; }
+    if (STATE.zielTaxCell) { taxZelleRahmen(page, treffer); return; }
     if (STATE.zielInput) { zielWoerter(page, treffer, true); return; }
     if (!STATE.selField) { $('#msg').textContent = 'erst ein Feld anklicken, dann den Wert in der Rechnung markieren'; return; }
     const a = { page, anchor: (STATE.assign[STATE.selField] || {}).anchor ?? null, values: treffer };
@@ -2554,6 +2652,11 @@ document.addEventListener('keydown', (ev) => {
   if (STATE.zielLiCell) {
     STATE.zielLiCell = null;
     document.querySelectorAll('.li-cell-ziel').forEach(e => e.classList.remove('li-cell-ziel'));
+    document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+  }
+  if (STATE.zielTaxCell) {
+    STATE.zielTaxCell = null;
+    document.querySelectorAll('.tax-cell-ziel').forEach(e => e.classList.remove('tax-cell-ziel'));
     document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
   }
 });
