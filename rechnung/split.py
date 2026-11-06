@@ -176,14 +176,17 @@ def part_info(store, sha256: str) -> dict | None:
 def _write_part(src: Path, pages: list[int], target: Path) -> None:
     import pypdfium2 as pdfium
 
-    orig = pdfium.PdfDocument(str(src))
-    out = pdfium.PdfDocument.new()
-    try:
-        out.import_pages(orig, pages=pages)
-        out.save(str(target))
-    finally:
-        out.close()
-        orig.close()
+    from .pdfium_sperre import sperre
+
+    with sperre():
+        orig = pdfium.PdfDocument(str(src))
+        out = pdfium.PdfDocument.new()
+        try:
+            out.import_pages(orig, pages=pages)
+            out.save(str(target))
+        finally:
+            out.close()
+            orig.close()
 
 
 def split_file(path: Path, store) -> list[Path]:
