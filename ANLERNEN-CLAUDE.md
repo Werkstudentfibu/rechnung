@@ -27,6 +27,26 @@ python -m rechnung.lehrer --data <data-Ordner> --bilanz              # Stand
 `--data` ist derselbe Datenordner, den das Programm sonst nutzt (Vorlagen,
 Lieferanten). Ohne Angabe: `RECHNUNG_DATA` bzw. `./data`.
 
+## Automatisch im Hintergrund (Laptop, Arbeitszeit)
+
+Einmalig in PowerShell (keine Adminrechte nötig):
+
+```
+powershell -ExecutionPolicy Bypass -File C:\Rechnung\app\windows\anlernen-einrichten.ps1
+```
+
+Das legt die Aufgabe „Rechnung Anlernen“ an: Montag bis Freitag ab 08:00,
+neun Stunden lang alle 30 Minuten eine Runde (`windows\anlernen.cmd`), ohne
+sichtbares Fenster, nur solange du angemeldet bist. Je Runde höchstens
+`RECHNUNG_CLAUDE_LIMIT` Rechnungen (Standard 10) aus `RECHNUNG_UEBUNG`
+(Standard `C:\Rechnung\uebung`). Bereits von Claude bestätigte Rechnungen
+werden übersprungen und kosten nichts. Ohne `RECHNUNG_CLAUDE_LEHRER=1` tut
+die Aufgabe nichts; läuft gerade der Nachtlauf, setzt sie eine Runde aus.
+
+Protokoll: `C:\Rechnung\data\anlernen.log`. Sofort testen:
+`Start-ScheduledTask -TaskName 'Rechnung Anlernen'`. Entfernen: dasselbe
+Skript mit `-Entfernen`.
+
 ## Was passiert
 
 Je Rechnung liest das Programm wie immer aus. Claude bekommt das Original und

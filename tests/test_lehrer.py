@@ -153,3 +153,26 @@ def test_kommandozeile_bilanz(tmp_path, capsys):
     lehrer.anlernen_datei(store, src, post=_claude(RICHTIG))
     assert lehrer.main(["--data", str(store.root), "--bilanz"]) == 0
     assert "von Claude bestaetigt: 1" in capsys.readouterr().out
+
+
+def test_dauerbetrieb_menschfall_blockiert_nicht_das_limit(tmp_path):
+    store, ordner, src = _store(tmp_path)
+    make_invoice(ordner / "b.pdf", rechnungsnr="RE-2026-00050", netto=420.0)
+    calls = []
+    unsicher = _claude(RICHTIG, sicher=False, calls=calls)
+    r1 = lehrer.anlernen(store, ordner, limit=1, post=unsicher)
+    assert [r["ergebnis"] for r in r1] == [lehrer.ERG_MENSCH]
+    # naechste Runde: a.pdf liegt beim Menschen -> uebersprungen, b.pdf kommt dran
+    r2 = lehrer.anlernen(store, ordner, limit=1, post=unsicher)
+    assert [r["ergebnis"] for r in r2] == [lehrer.ERG_UEBERSPRUNGEN, lehrer.ERG_MENSCH]
+    assert r2[1]["datei"] == "b.pdf"
+
+
+def test_wiederholte_fehler_ruhen(tmp_path):
+    store, ordner, src = _store(tmp_path)
+
+    def kaputt(body):
+        raise OSError("keine Verbindung")
+    for _ in range(lehrer.MAX_FEHLVERSUCHE):
+        assert lehrer.anlernen_datei(store, src, post=kaputt)["ergebnis"] == lehrer.ERG_FEHLER
+    assert lehrer.anlernen_datei(store, src, post=kaputt)["ergebnis"] == lehrer.ERG_UEBERSPRUNGEN
