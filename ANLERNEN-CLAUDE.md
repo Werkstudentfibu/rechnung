@@ -90,12 +90,15 @@ wenn
 - Claude unsicher ist oder ein Wert von Claude **nicht im PDF-Text steht**
   (dieselbe Regel gegen Halluzination wie bei der lokalen KI),
 - Claude bei einem Feld keinen Wert findet, das Programm aber schon,
-- der Lieferant unbekannt oder nur ein Entwurf ist (Stammdaten entscheidet
-  immer ein Mensch),
 - nach Claudes Korrekturen noch eine Prüfung rot ist,
 - die Rechnung in der **Stichprobe** liegt: Claude prüft vor, ein Mensch
   kontrolliert und bestätigt. `--bilanz` zeigt, wie oft der Mensch Claude
   korrigieren musste.
+
+Rechnungen, deren Lieferant unbekannt oder nur ein **Entwurf** ist, fasst
+Claude nicht an: Stammdaten (z. B. die IBAN) gibt immer ein Mensch frei. Sie
+erscheinen im Protokoll als „uebersprungen“ und werden automatisch angelernt,
+sobald du den Lieferanten im Programm bestätigt hast.
 
 ## Übung bleibt Übung
 
