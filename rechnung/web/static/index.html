@@ -68,6 +68,14 @@
   .badge.zurueckgestellt { background: #f5222d; color: #fff; }
   .holdbox { background: #fff1f0; border: 1px solid #ffa39e; color: #a8071a; padding: 6px 8px;
              margin: 6px 0; border-radius: 4px; font-size: 13px; }
+  /* Lieferanten-Bibliothek-Status (Aaron 06.11.2026, Befund "erkennt
+     garnichts"): klar sichtbarer Hinweis direkt am Lieferantenfeld, ob und
+     warum die Bibliothek getroffen/nicht getroffen hat -- nicht nur der
+     knappe Score-Hinweis in .hint. */
+  .lief-status { padding: 6px 8px; margin: 4px 0 8px; border-radius: 4px; font-size: 13px; }
+  .lief-status.ok { background: #d9f2d9; border: 1px solid #389e0d; color: #205006; }
+  .lief-status.warn { background: #fffbe6; border: 1px solid #d4b106; color: #614700; }
+  .lief-status.bad { background: #fff1f0; border: 1px solid #ffa39e; color: #a8071a; }
   .badge.scan_no_textlayer { background: #e0d3f7; }
   .badge.library { background: #d3e4f7; }
   .badge.manual { background: #e8d3f7; border: 1px solid #b37feb; color: #531dab; }
@@ -973,6 +981,36 @@ async function lieferantSpeichern(bestaetigen) {
   $('#msg').textContent = `Lieferant „${name || id}“ ${bestaetigen ? 'bestätigt' : 'angelegt'}.`;
 }
 
+// Lieferanten-Bibliothek-Status fuer die Bearbeitungsansicht (Aaron
+// 06.11.2026, Befund "erkennt garnichts -- und wenn, weiss ich nicht ob die
+// Bibliothek getroffen hat"): fasst zusammen, was /api/invoice an Match-/
+// Lieferanten-/Rueckstellinformation schon mitliefert (d.match, d.supplier,
+// hold_reasons), zu EINEM klaren Status statt dem knappen ".hint"-Text.
+// Eigene Funktion statt den Fall in renderInvoice() zu verschachteln -- hier
+// unabhaengig testbar/lesbar, und beruehrt keine Stelle, an der parallel
+// andere Worker (pdfium-sperre/ui-aufraeumen) an derselben Datei arbeiten.
+function liefBibliothekStatus(d, holdReasons) {
+  const supO = d.supplier || null;
+  const isDraft = !!(supO && supO.bestaetigt === false);
+  if (supO && !isDraft) {
+    const score = d.match && d.match.score != null ? d.match.score : null;
+    return { cls: 'ok', icon: '✓',
+      text: `Lieferant aus Bibliothek erkannt${score != null ? ` (Score ${score})` : ''}`,
+      detail: 'IBAN, USt-IdNr und Adresse dieses Feldes stammen aus den gepflegten Stammdaten des Lieferanten.' };
+  }
+  if (supO && isDraft) {
+    return { cls: 'warn', icon: '⚠',
+      text: 'Lieferant in der Bibliothek gefunden, aber noch nicht bestätigt',
+      detail: 'Stammdaten im Reiter „Lieferanten“ prüfen und bestätigen – erst danach gelten sie als gesichert.' };
+  }
+  // Kein Treffer: den tatsaechlichen Grund aus hold_reasons nehmen statt
+  // generisch "nicht erkannt" zu zeigen (identify_with_reason/pipeline.py
+  // schreibt ihn als erstes Element, Praefix "Lieferant: ").
+  const grundRoh = (holdReasons || []).find(h => /^Lieferant:/.test(h));
+  const grund = grundRoh ? grundRoh.replace(/^Lieferant:\s*/, '') : 'kein Lieferant aus der Bibliothek passt';
+  return { cls: 'bad', icon: '⚠', text: 'Kein Lieferant aus der Bibliothek erkannt', detail: grund };
+}
+
 function renderInvoice(d) {
   const work = $('#work');
   // Neuaufbau derselben Rechnung (Wert bestaetigt/markiert, Zeile geaendert):
@@ -1086,6 +1124,14 @@ function renderInvoice(d) {
     ${!addrObj && gaVorschlag ? `<button onclick="geschaeftsbereichAnlegen()">✓ Als Geschäftsbereich anlegen</button>` : ''}`);
   fbox.appendChild(ga);
 
+  // Lieferant-Bibliothek-Status (Aaron 06.11.2026, Befund "erkennt
+  // garnichts"): eigener, klar sichtbarer Block statt nur dem knappen
+  // ".hint"-Vermerk -- grün = erkannt+bestätigt (Stammdaten gelten), gelb =
+  // erkannt aber unbestätigter Entwurf, rot = kein Treffer (mit dem
+  // tatsächlichen Grund aus hold_reasons/identify_with_reason, nicht nur
+  // generisch "nicht erkannt").
+  const liefStatus = liefBibliothekStatus(d, holdReasons);
+
   // Lieferant
   const supO = d.supplier || null;
   const lA = supO && (supO.address_lines || []).length ? splitAdresse(supO.address_lines)
@@ -1099,7 +1145,7 @@ function renderInvoice(d) {
   const li = gruppe('Lieferant', `
     <div class="ab-row"><button class="ghost mini" onclick="suchen('lieferant')">Suchen...</button>
       <label class="inl">ID</label><input class="ab-in ${lCls}" id="sid" value="${esc(lId)}" ${supO ? 'readonly' : ''} placeholder="neu: wird beim Anlegen vergeben"></div>
-    ${isDraft ? '<div class="hint"><span class="badge zurueckgestellt">unbestätigt</span> Unbekannter Lieferant – aus dieser Rechnung angelegt, bitte prüfen.</div>' : ''}
+    <div class="lief-status ${liefStatus.cls}"><b>${liefStatus.icon} ${esc(liefStatus.text)}</b><br>${esc(liefStatus.detail)}</div>
     ${abFeld('Name', 'sname', lName, lCls, lRO)}
     <div class="ab-row2">${abFeld('Umsatzsteuer ID', 'ls-ust', lUst, lCls, lRO)}${abFeld('Steuernummer', 'ls-stnr', supO ? (supO.creditor_id || kiL.creditor_id || '') : (kiL.creditor_id || ''), lCls, lRO)}</div>
     ${abFeld('Straße', 'ls-strasse', lA.strasse, lCls, lRO)}

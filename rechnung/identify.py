@@ -330,16 +330,18 @@ def _address_scope_reason(has_addresses: bool, address_id: str | None,
 def identify(doc: Document, suppliers: list[Supplier], threshold: float = 0.5,
             min_margin: float = 0.15, index: dict | None = None,
             address_id: str | None = None, has_addresses: bool = False,
-            address_name: str = ""):
+            address_name: str = "", einzelkandidat_namensschwelle: float | None = None):
     """-> (Supplier, score) oder None. Kurzform von ``identify_with_reason``."""
     return identify_with_reason(doc, suppliers, threshold, min_margin, index,
-                                address_id, has_addresses, address_name)[0]
+                                address_id, has_addresses, address_name,
+                                einzelkandidat_namensschwelle)[0]
 
 
 def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: float = 0.5,
                          min_margin: float = 0.15, index: dict | None = None,
                          address_id: str | None = None, has_addresses: bool = False,
-                         address_name: str = ""):
+                         address_name: str = "",
+                         einzelkandidat_namensschwelle: float | None = None):
     """-> ((Supplier, score) oder None, Grund).
 
     Die Lieferanten-Identitaet kommt ausschliesslich aus der Bibliothek
@@ -378,7 +380,24 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
     sicherer Treffer" als eine mehrdeutige Zuordnung zu raten (verhindert
     eine stille Verwechslung zwischen zwei Lieferanten mit aehnlichem
     Kopf-Layout, z.B. derselben Buchhaltungssoftware).
-    """
+
+    ``einzelkandidat_namensschwelle`` -- VORSCHLAG, NICHT in der echten
+    Verarbeitung aktiv (pipeline.py ruft diese Funktion ohne dieses Argument
+    auf, Standard ``None`` aendert am bisherigen Verhalten nichts; braucht
+    Aarons Bestaetigung an echten Daten, siehe
+    worker/bericht-lieferant-erkennung-1106.md Teil C). Befund Aaron
+    06.11.2026: Lieferanten aus dem Excel-Stammdatenimport
+    (stammdaten_import.py) haben oft nur ``name`` (+ ggf. ``address_lines``),
+    keine IBAN/USt-IdNr/Fingerprint/Domain -- ein reiner Namens-Teiltreffer
+    bringt dann nur 0.2 Score und erreicht die globale ``threshold`` (0.5)
+    nie, SELBST WENN nach ``kandidaten()`` ueberhaupt kein zweiter Kandidat
+    uebrig ist (also keine Verwechslungsgefahr). Ist dieser Wert gesetzt UND
+    bleibt nach ``kandidaten()`` GENAU EIN Lieferant uebrig UND steht sein
+    Name als Teilstring auf der Rechnung, gilt fuer IHN dieser (niedrigere)
+    Wert statt ``threshold``. Bei zwei oder mehr Kandidaten bleibt die
+    normale ``threshold``-/``min_margin``-Pruefung unveraendert streng --
+    dieser Parameter beeinflusst nie den Mehrdeutigkeits-/Betrugsschutz-Pfad
+    weiter unten."""
     suppliers = kandidaten(suppliers, address_id, has_addresses)
     if not suppliers:
         if has_addresses:
@@ -424,7 +443,13 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
         scored.append((s, round(score, 3)))
     scored.sort(key=lambda x: x[1], reverse=True)
     best_s, best_score = scored[0]
-    if best_score < threshold:
+    eff_threshold = threshold
+    # Vorschlag (siehe Docstring oben) -- nur wirksam, wenn der Aufrufer ihn
+    # ausdruecklich anfordert UND wirklich nur ein Kandidat zur Auswahl stand.
+    if (einzelkandidat_namensschwelle is not None and len(scored) == 1
+            and best_s.name and norm(best_s.name) in text_n):
+        eff_threshold = min(threshold, einzelkandidat_namensschwelle)
+    if best_score < eff_threshold:
         return None, _address_scope_reason(has_addresses, address_id, address_name,
                                            "kein Lieferant aus der Bibliothek passt")
     if len(scored) > 1:
