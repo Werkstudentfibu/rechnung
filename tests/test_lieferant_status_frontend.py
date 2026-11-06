@@ -30,7 +30,11 @@ def _status(d: dict, hold_reasons: list[str]) -> dict:
     const r = liefBibliothekStatus({json.dumps(d)}, {json.dumps(hold_reasons)});
     console.log(JSON.stringify(r));
     """
-    out = subprocess.run([node, "-e", prog], capture_output=True, text=True, check=True).stdout
+    # encoding="utf-8" explizit: ohne das decodiert Windows subprocess-stdout
+    # mit der Locale-Kodierung (cp1252) statt UTF-8 -- "bestätigt" wurde so
+    # in der Windows-CI zu "best�tigt" (Befund 06.11.2026).
+    out = subprocess.run([node, "-e", prog], capture_output=True, text=True,
+                         encoding="utf-8", check=True).stdout
     return json.loads(out)
 
 
