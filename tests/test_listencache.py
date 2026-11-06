@@ -174,7 +174,7 @@ def test_neue_datei_erscheint_sofort_bei_kleinem_zugang(tmp_path, aufrufe):
     aufrufe.clear()
     _rechnungen(samples, 1, ab=50)
     d = client.get("/api/scan").json()
-    assert [r["file"].rsplit("/", 1)[-1] for r in d["results"]].count("r050.pdf") == 1
+    assert [r["file"].replace("\\", "/").rsplit("/", 1)[-1] for r in d["results"]].count("r050.pdf") == 1
     assert aufrufe == ["r050.pdf"]
     assert next(r for r in d["results"] if r["file"].endswith("r050.pdf"))["status"] != "wird_gelesen"
 
