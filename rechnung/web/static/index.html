@@ -967,7 +967,16 @@ async function lieferantSpeichern(bestaetigen) {
 }
 
 function renderInvoice(d) {
-  const work = $('#work'); work.innerHTML = ''; work.classList.add('split');
+  const work = $('#work');
+  // Neuaufbau derselben Rechnung (Wert bestaetigt/markiert, Zeile geaendert):
+  // Bildlaufposition beider Spalten behalten statt nach oben zu springen
+  // (Aaron 06.11.2026). Andere Rechnung -> oben anfangen.
+  const scrollVorher = STATE._renderFile === STATE.file ? {
+    pages: work.querySelector(':scope > .pages')?.scrollTop || 0,
+    panels: work.querySelector(':scope > .panels')?.scrollTop || 0,
+    work: work.scrollTop } : null;
+  STATE._renderFile = STATE.file;
+  work.innerHTML = ''; work.classList.add('split');
   // Rechnung links, Werte rechts -- jede Spalte scrollt fuer sich, damit auf dem
   // Laptop-Bildschirm Werte und Rechnung gleichzeitig zu sehen sind.
   const w = document.createElement('div'); w.className = 'panels';
@@ -1209,8 +1218,16 @@ function renderInvoice(d) {
     }
     rahmenAuswahl(wrap, pg.index);
     pagesCol.appendChild(wrap);
-    img.onload = fitPages;
+    img.onload = () => { fitPages(); scrollZurueck(); };
   }
+  // Seitenbilder laden neu -> Hoehe stimmt erst nach onload, daher auch dort.
+  function scrollZurueck() {
+    if (!scrollVorher) return;
+    pagesCol.scrollTop = scrollVorher.pages;
+    w.scrollTop = scrollVorher.panels;
+    work.scrollTop = scrollVorher.work;
+  }
+  scrollZurueck();
   paintMarkierungen();
   paint();
   paintTabRahmen();
