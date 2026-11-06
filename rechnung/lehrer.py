@@ -71,6 +71,9 @@ ERG_MENSCH = "mensch"
 ERG_UEBERSPRUNGEN = "uebersprungen"
 ERG_FEHLER = "fehler"
 
+# So oft darf eine Rechnung scheitern (API-Fehler, Zeitgrenze), dann ruht sie
+MAX_FEHLVERSUCHE = 3
+
 # Art des Grundes im Ordner "Menschliche Bearbeitung" (human.py)
 ART_CLAUDE = "claude"
 
@@ -392,10 +395,22 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
     if store.is_confirmed(doc.sha256) or angelernt(store, doc.sha256):
         rec.update(ergebnis=ERG_UEBERSPRUNGEN, gruende=["schon bestaetigt"])
         return rec
+    # Dauerbetrieb (windows/anlernen.cmd): was schon beim Menschen liegt oder
+    # wiederholt scheiterte, nicht in jeder Runde erneut anfassen -- sonst
+    # verbraucht es das Rundenlimit und neue Rechnungen kommen nie dran.
+    frueher = [r.get("ergebnis") for r in protokoll(store) if r.get("sha256") == doc.sha256]
+    if ERG_MENSCH in frueher:
+        rec.update(ergebnis=ERG_UEBERSPRUNGEN, gruende=["liegt beim Menschen"])
+        return rec
+    if frueher.count(ERG_FEHLER) >= MAX_FEHLVERSUCHE:
+        rec.update(ergebnis=ERG_UEBERSPRUNGEN,
+                   gruende=[f"{MAX_FEHLVERSUCHE}x gescheitert -- siehe lehrer.jsonl"])
+        return rec
 
     res = process(path, store)
     if res.aborted:
         rec.update(ergebnis=ERG_FEHLER, gruende=list(res.hold_reasons or ["abgebrochen"]))
+        _protokoll(store, rec)
         return rec
     rec["lieferant"] = res.supplier_name or res.supplier_id
     if res.extraction == "einvoice":
