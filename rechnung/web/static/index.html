@@ -409,6 +409,8 @@ const LI_TYPES = ['text', 'amount', 'number', 'date'];
 const LI_COLUMNS = ['pos', 'beschreibung', 'menge', 'einzelpreis_netto', 'gesamt_netto',
                     'mwst_satz', 'waehrung', 'einheit'];
 let STATE = null;
+// Bildlauf ueber Neuaufbauten derselben Rechnung hinweg (STATE wird dabei ersetzt)
+let RENDER_DATEI = null, SCROLL_MERKEN = null;
 let LIST_FILES = [];  // Reihenfolge der zuletzt geladenen Liste, fuer "naechste Rechnung"
 let SUP_ADDRESSES = [];  // Rechnungsadressen fuer die Checkboxen im Lieferanten-Formular
 
@@ -560,6 +562,11 @@ async function openInvoice(file, row) {
   // dem Laptop ggf. eine Weile; Fehler anzeigen statt still nichts zu tun
   // (Befund Aaron 09.10.2026: "es passiert gar nichts").
   const w = $('#work'); const t0 = Date.now();
+  // Dieselbe Rechnung neu laden (z.B. Positionsmodus geaendert): Bildlauf merken,
+  // renderInvoice stellt ihn wieder her (Aaron 06.11.2026).
+  SCROLL_MERKEN = (STATE && file === STATE.file && w.classList.contains('split')) ? {
+    pages: w.querySelector(':scope > .pages')?.scrollTop || 0,
+    panels: w.querySelector(':scope > .panels')?.scrollTop || 0, work: w.scrollTop } : null;
   w.className = '';
   w.innerHTML = `<p class="hint" style="padding:12px">„${esc(file)}“ wird gelesen (Texterkennung/KI) … <span id="lade-zeit">0</span> s</p>`;
   const tick = setInterval(() => { const el = $('#lade-zeit'); if (el) el.textContent = Math.round((Date.now() - t0) / 1000); }, 1000);
@@ -971,11 +978,12 @@ function renderInvoice(d) {
   // Neuaufbau derselben Rechnung (Wert bestaetigt/markiert, Zeile geaendert):
   // Bildlaufposition beider Spalten behalten statt nach oben zu springen
   // (Aaron 06.11.2026). Andere Rechnung -> oben anfangen.
-  const scrollVorher = STATE._renderFile === STATE.file ? {
+  const scrollVorher = SCROLL_MERKEN || (RENDER_DATEI === STATE.file ? {
     pages: work.querySelector(':scope > .pages')?.scrollTop || 0,
     panels: work.querySelector(':scope > .panels')?.scrollTop || 0,
-    work: work.scrollTop } : null;
-  STATE._renderFile = STATE.file;
+    work: work.scrollTop } : null);
+  SCROLL_MERKEN = null;
+  RENDER_DATEI = STATE.file;
   work.innerHTML = ''; work.classList.add('split');
   // Rechnung links, Werte rechts -- jede Spalte scrollt fuer sich, damit auf dem
   // Laptop-Bildschirm Werte und Rechnung gleichzeitig zu sehen sind.
