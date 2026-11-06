@@ -17,9 +17,11 @@ reifen. Ablauf je Rechnung:
 5. Zum Menschen (Ordner "Menschliche Bearbeitung") geht die Rechnung statt
    dessen, wenn Claude unsicher ist, ein Wert nicht belegt ist, Claude und
    Programm sich bei einem Feld widersprechen, das Claude fuer nicht
-   vorhanden haelt, der Lieferant unbekannt/nur Entwurf ist (Stammdaten
-   entscheidet immer ein Mensch), eine Pruefung rot bleibt -- oder die
-   Rechnung in der Stichprobe liegt (Kontrolle des Lehrers).
+   vorhanden haelt, eine Pruefung rot bleibt -- oder die Rechnung in der
+   Stichprobe liegt (Kontrolle des Lehrers).
+6. Ist der Lieferant unbekannt oder nur ein Entwurf, wird Claude gar nicht
+   gefragt: Stammdaten entscheidet immer ein Mensch. Die Rechnung wartet und
+   wird automatisch aufgegriffen, sobald der Lieferant bestaetigt ist.
 
 Sicherungen:
 
@@ -452,6 +454,14 @@ class _LernStore:
         return sha == self._sha or self._store.is_confirmed(sha)
 
 
+def _wartete_auf_lieferant(r: dict) -> bool:
+    """Protokolleintrag, der nur am fehlenden/unbestaetigten Lieferanten hing
+    (auch aeltere Eintraege, die noch als 'mensch' gezaehlt wurden)."""
+    return bool(r.get("wartet_auf_lieferant")) or any(
+        "Lieferant unbekannt" in g or "Lieferant ist nur ein Entwurf" in g
+        for g in (r.get("gruende") or []))
+
+
 def angelernt(store, sha256: str) -> bool:
     """Hat Claude diese Rechnung schon bestaetigt (eigenes Protokoll)?"""
     return any(r.get("sha256") == sha256 and r.get("ergebnis") == ERG_BESTAETIGT
@@ -522,7 +532,8 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
     # wiederholt scheiterte, nicht in jeder Runde erneut anfassen -- sonst
     # verbraucht es das Rundenlimit und neue Rechnungen kommen nie dran.
     frueher = [r.get("ergebnis") for r in protokoll(store)
-               if r.get("sha256") == doc.sha256 and not r.get("claude_weg")]
+               if r.get("sha256") == doc.sha256 and not r.get("claude_weg")
+               and not _wartete_auf_lieferant(r)]
     if ERG_MENSCH in frueher:
         rec.update(ergebnis=ERG_UEBERSPRUNGEN, gruende=["liegt beim Menschen"])
         return rec
@@ -550,11 +561,15 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
         _protokoll(store, rec)
         return rec
 
+    # Stammdaten entscheidet immer ein Mensch. Bis dahin nur ueberspringen
+    # (kostet nichts, zaehlt nicht zum Rundenlimit) -- sobald der Lieferant
+    # bestaetigt ist, greift die naechste Runde die Rechnung von selbst auf.
     sup = store.supplier(res.supplier_id) if res.supplier_id else None
-    if sup is None:
-        return _zum_menschen(["Lieferant unbekannt -- Stammdaten legt ein Mensch an"])
-    if not getattr(sup, "bestaetigt", True):
-        return _zum_menschen(["Lieferant ist nur ein Entwurf -- Stammdaten prueft ein Mensch"])
+    if sup is None or not getattr(sup, "bestaetigt", True):
+        rec.update(ergebnis=ERG_UEBERSPRUNGEN, wartet_auf_lieferant=True, gruende=[
+            "Lieferant unbekannt -- bitte im Programm anlegen" if sup is None else
+            "Lieferant ist nur ein Entwurf -- bitte im Programm bestaetigen"])
+        return rec
 
     felder = _felder()
     programm = {n: (res.fields[n].value if n in res.fields
@@ -643,7 +658,7 @@ def bilanz(store) -> dict:
             letzte[r["sha256"]] = r
     zaehl = {ERG_BESTAETIGT: 0, ERG_MENSCH: 0, ERG_FEHLER: 0}
     for r in letzte.values():
-        if r.get("ergebnis") in zaehl:
+        if r.get("ergebnis") in zaehl and not _wartete_auf_lieferant(r):
             zaehl[r["ergebnis"]] += 1
 
     stich = {s: r for s, r in letzte.items() if r.get("stichprobe")}

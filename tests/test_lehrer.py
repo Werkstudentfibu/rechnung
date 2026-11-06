@@ -101,11 +101,36 @@ def test_unsicherer_claude_geht_zum_menschen(tmp_path):
     assert "unsicher" in r["gruende"][0]
 
 
-def test_lieferanten_entwurf_entscheidet_mensch_ohne_api(tmp_path):
+def test_lieferanten_entwurf_wartet_und_wird_spaeter_aufgegriffen(tmp_path):
     store, ordner, src = _store(tmp_path, bestaetigt=False)
     calls = []
     r = lehrer.anlernen_datei(store, src, post=_claude(RICHTIG, calls=calls))
-    assert r["ergebnis"] == lehrer.ERG_MENSCH and not calls
+    assert r["ergebnis"] == lehrer.ERG_UEBERSPRUNGEN and r["wartet_auf_lieferant"]
+    assert not calls  # Stammdaten entscheidet ein Mensch, Claude wird nicht gefragt
+    # Mensch bestaetigt den Lieferanten -> naechste Runde nimmt die Rechnung
+    sup = store.supplier("muster")
+    sup.bestaetigt = True
+    store.save_supplier(sup)
+    r = lehrer.anlernen_datei(store, src, post=_claude(RICHTIG, calls=calls))
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT and calls
+
+
+def test_alte_menscheintraege_wegen_lieferant_blockieren_nicht(tmp_path):
+    """Eintraege aus der ersten Version (Lieferanten-Entwurf als 'mensch'
+    protokolliert) duerfen die Rechnung nicht dauerhaft sperren."""
+    store, ordner, src = _store(tmp_path)
+    sha = pdfmod.load(src).sha256
+    lehrer._protokoll(store, {"sha256": sha, "ergebnis": lehrer.ERG_MENSCH, "gruende": [
+        "Lieferant ist nur ein Entwurf -- Stammdaten prueft ein Mensch"]})
+    r = lehrer.anlernen_datei(store, src, post=_claude(RICHTIG))
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT
+
+
+def test_wartende_zaehlen_nicht_zum_rundenlimit(tmp_path):
+    store, ordner, src = _store(tmp_path, bestaetigt=False)
+    make_invoice(ordner / "b.pdf", rechnungsnr="RE-2026-00050", netto=420.0)
+    r = lehrer.anlernen(store, ordner, limit=1, post=_claude(RICHTIG))
+    assert [x["ergebnis"] for x in r] == [lehrer.ERG_UEBERSPRUNGEN] * 2
 
 
 def test_stichprobe_und_bilanz(tmp_path, monkeypatch):
