@@ -1188,7 +1188,9 @@ function renderInvoice(d) {
     <div class="hint">${supO && !isDraft ? (d.match && d.match.score != null ? `erkannt (${d.match.score})` : 'gewählt') + ' – Stammdaten ändern im Reiter „Lieferanten“'
       : (lName || lIban || lUst) ? 'Von der Rechnung gelesen (teils KI) – bitte prüfen.' : 'Kein Lieferant erkannt – über „Suchen...“ wählen.'}</div>
     ${isDraft ? `<button onclick="lieferantSpeichern(true)">✓ Lieferant bestätigen</button>
-                 <button class="danger" onclick="discardDraftSupplier()">Entwurf verwerfen</button>`
+                 <button class="ghost" onclick="uebernehmenDialog(STATE.supplier, 'rechnung')">In bestehenden Lieferanten übernehmen…</button>
+                 <button class="danger" onclick="discardDraftSupplier()">Entwurf verwerfen</button>
+                 ${entwurfHinweisName(STATE.hinweise) ? `<div class="hint">Hinweis: der Name des bestehenden Lieferanten „${esc(entwurfHinweisName(STATE.hinweise))}“ steht auf der Rechnung – vermutlich ist der Entwurf dieser Lieferant (dann „übernehmen“, nicht „bestätigen“, sonst entsteht ein zweiter Lieferant).</div>` : ''}`
       : !supO && (lName || lIban || lUst) ? `<button onclick="lieferantSpeichern(false)">✓ Als Lieferant anlegen</button>` : ''}`);
   fbox.appendChild(li);
   if ((STATE.similar || []).length) {
@@ -1556,6 +1558,97 @@ async function discardDraftSupplier() {
   $('#msg').textContent = 'Entwurf verworfen.';
   const d2 = await api('/api/invoice?file=' + encodeURIComponent(STATE.file));
   applyInvoiceData(d2);
+}
+
+/* Entwurf in bestehenden Lieferanten uebernehmen (entwurf_uebernahme.py,
+   Entscheidung Aaron 09.11.2026): die Lieferanten aus dem Excel-Import haben
+   weder USt-IdNr noch IBAN, deshalb legt jede ihrer Rechnungen einen Entwurf
+   "Unbekannt (DE...)" an. "Bestaetigen" machte daraus einen ZWEITEN
+   Lieferanten (Dublette); hier wandern die Kennungen des Entwurfs stattdessen
+   in den bestehenden Lieferanten. Immer ein bewusster Klick des Menschen --
+   der Pipeline-Hinweis (Name eines bestehenden Lieferanten steht auf der
+   Rechnung) belegt nur die Auswahl vor, entscheidet aber nichts. */
+function entwurfHinweisName(hinweise) {
+  // pipeline.ENTWURF_HINWEIS: "Lieferanten-Entwurf: der Name des bestehenden
+  // Lieferanten 'X' steht auf der Rechnung -- vermutlich ist er gemeint"
+  for (const h of hinweise || []) {
+    const m = /^Lieferanten-Entwurf: der Name des bestehenden Lieferanten '(.+?)' steht auf der Rechnung/.exec(h || '');
+    if (m) return m[1];
+  }
+  return '';
+}
+
+async function uebernehmenDialog(entwurf, nachher) {
+  // nachher: 'rechnung' (Pruefmaske: Rechnung neu laden) | 'liste' (Reiter Lieferanten)
+  if (!entwurf || !entwurf.id || entwurf.bestaetigt !== false) return;
+  const liste = await api('/api/suppliers').then(r => Array.isArray(r) ? r : (r.suppliers || []));
+  const ziele = liste.filter(sp => sp.bestaetigt !== false && sp.id !== entwurf.id);
+  const hinweisName = nachher === 'rechnung' ? entwurfHinweisName(STATE && STATE.hinweise) : '';
+  const vorschlag = hinweisName
+    ? ziele.find(sp => (sp.name || '').trim().toLowerCase() === hinweisName.trim().toLowerCase()) || null
+    : null;
+  const dlg = document.createElement('div'); dlg.className = 'ab-dlg';
+  dlg.innerHTML = `<div class="ab-dlg-in">
+      <h4>Entwurf „${esc(entwurf.name || entwurf.id)}“ in bestehenden Lieferanten übernehmen</h4>
+      <div class="hint">USt-IdNr, IBAN, Domain, Bankdaten und Anschrift des Entwurfs wandern in den gewählten
+        Lieferanten (seine vorhandenen Werte bleiben). Der Entwurf wird gelöscht, seine Rechnungen
+        zählen danach zum gewählten Lieferanten. Nur bestätigte Lieferanten stehen zur Wahl.</div>
+      ${vorschlag ? `<div class="hint"><b>Vorschlag:</b> „${esc(vorschlag.name)}“ steht laut Hinweis auf der Rechnung – bitte prüfen.</div>` : ''}
+      <input id="ab-q" placeholder="Name, ID, Lieferantennr., USt-IdNr, Ort ..." autofocus>
+      <div id="ab-list"></div>
+      <button class="ghost" onclick="this.closest('.ab-dlg').remove()">Abbrechen</button></div>`;
+  document.body.appendChild(dlg);
+  const zeichne = () => {
+    const q = $('#ab-q').value.toLowerCase();
+    let hits = ziele.filter(x => JSON.stringify(x).toLowerCase().includes(q)).slice(0, 50);
+    // Vorschlag aus dem Hinweis immer oben (vorbelegt), auch ohne Suchtext
+    if (vorschlag && !q) hits = [vorschlag, ...hits.filter(x => x.id !== vorschlag.id)];
+    $('#ab-list').innerHTML = hits.length ? hits.map(x => `<div class="ab-hit" data-id="${esc(x.id)}" ${vorschlag && x.id === vorschlag.id ? 'style="background:#e3efe9"' : ''}>
+        <b>${esc(x.name || x.id)}</b> <span class="hint">${esc(x.id)}${x.external_id ? ' · Nr. ' + esc(x.external_id) : ''} · ${esc((x.address_lines || []).join(', '))}</span>
+        ${vorschlag && x.id === vorschlag.id ? '<span class="badge">Vorschlag aus Hinweis</span>' : ''}</div>`).join('')
+      : '<div class="hint">Nichts gefunden.</div>';
+    $('#ab-list').querySelectorAll('.ab-hit').forEach(el => el.onclick = () =>
+      uebernehmenAusfuehren(entwurf, ziele.find(x => x.id === el.dataset.id), dlg, nachher));
+  };
+  $('#ab-q').oninput = zeichne; zeichne(); $('#ab-q').focus();
+}
+
+async function uebernehmenAusfuehren(entwurf, ziel, dlg, nachher) {
+  if (!ziel) return;
+  if (!confirm(`Entwurf „${entwurf.name || entwurf.id}“ in „${ziel.name || ziel.id}“ (${ziel.id}) übernehmen?\n\n`
+               + `Der Entwurf wird gelöscht. USt-IdNr/IBAN/Bankdaten gehen in den bestehenden Lieferanten, `
+               + `seine Rechnungen zählen danach zu ihm. Das lässt sich nicht rückgängig machen.`)) return;
+  dlg.remove();
+  const r = await api('/api/suppliers/' + encodeURIComponent(entwurf.id) + '/uebernehmen', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ziel_id: ziel.id }),
+  });
+  // #msg gibt es nur in der Pruefmaske; im Reiter "Lieferanten" steht die
+  // Meldung ueber der (geleerten) Bearbeitungsmaske.
+  const meldung = text => {
+    const m = $('#msg');
+    if (m && nachher === 'rechnung') m.textContent = text;
+    else if ($('#sup-form')) $('#sup-form').innerHTML = `<div class="hint">${esc(text)}</div>`;
+    else alert(text);
+  };
+  if (!r || !r.ok) {
+    meldung('Übernahme fehlgeschlagen: ' + ((r && r.detail) || 'unbekannter Fehler'));
+    return;
+  }
+  const neu = Object.entries(r.uebernommen || {}).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : (typeof v === 'object' ? JSON.stringify(v) : v)}`);
+  if (nachher === 'rechnung' && STATE && STATE.file) {
+    const d2 = await api('/api/invoice?file=' + encodeURIComponent(STATE.file));
+    applyInvoiceData(d2);          // leert #msg -- Meldung deshalb erst danach
+  } else {
+    await loadSuppliers();         // leert #sup-form -- dito
+  }
+  meldung(`Entwurf in „${ziel.name || ziel.id}“ übernommen` + (neu.length ? ` (${neu.join('; ')}).` : ' (nichts Neues, Entwurf gelöscht).'));
+}
+
+async function uebernehmenSupplierRow(id) {
+  const rows = await api('/api/suppliers').then(r => Array.isArray(r) ? r : (r.suppliers || []));
+  const s = rows.find(x => x.id === id);
+  if (s) uebernehmenDialog(s, 'liste');
 }
 
 function renderSupplierInfoBox(sup) {
@@ -3067,6 +3160,7 @@ async function loadSuppliers() {
          <button class="danger" onclick="event.stopPropagation();delTemplate('${esc(x.id)}')">×</button>`).join('<br>')}</td>
       <td>${s.bestaetigt === false
         ? `<button onclick="event.stopPropagation();confirmSupplierRow('${esc(s.id)}')">Bestätigen</button>
+           <button class="ghost" onclick="event.stopPropagation();uebernehmenSupplierRow('${esc(s.id)}')">In bestehenden übernehmen…</button>
            <button class="danger" onclick="event.stopPropagation();discardSupplierRow('${esc(s.id)}')">Verwerfen</button>`
         : ''}
         <button class="danger" onclick="event.stopPropagation();delSupplier('${esc(s.id)}')">Löschen</button></td>`;

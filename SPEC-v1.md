@@ -1219,6 +1219,39 @@ automatisch durch, was ein Mensch nicht bestaetigt hat.
    Mehrfachtreffer "mehrdeutig" -> Mensch -- keiner der beiden gewinnt
    stillschweigend.
 
+6. **Entwurf in bestehenden Lieferanten uebernehmen** (Entscheidung Aaron,
+   09.11.2026, Modul `entwurf_uebernahme.py`): die 11.219 Lieferanten aus dem
+   Excel-Import (`stammdaten_import.py`) haben weder USt-IdNr noch IBAN --
+   jede ihrer Rechnungen legt also einen Entwurf "Unbekannt (DE...)" an, und
+   "bestaetigen" ergaebe einen zweiten Lieferanten neben dem Excel-Eintrag
+   (Dublette). `POST /api/suppliers/{entwurf_id}/uebernehmen` (`ziel_id`,
+   Oberflaeche: Knopf "In bestehenden Lieferanten uebernehmen…" in der
+   Pruefmaske und im Reiter "Lieferanten", Auswahl nur ueber bestaetigte
+   Lieferanten) uebernimmt den Entwurf in das Ziel:
+   `entwurf_uebernahme.zusammenfuehren` vereinigt die Listen (USt-IdNrn,
+   IBANs, Domains, Fingerprint, Rechnungsadressen -- leer beim Ziel bleibt
+   "alle"), fuellt leere Einzelwerte (Bank, BIC, BLZ, Konto, Glaeubiger-ID,
+   Kontakt, Zahlungsziel, Steuersatz, Notizen, feste Werte) und uebernimmt
+   die Anschrift nur, wenn das Ziel keine hat; Name, Lieferantennummer,
+   Waehrung, Positionsmodus des Ziels bleiben immer. Vorlagen des Entwurfs
+   werden auf `<ziel>__<variante>` umgehaengt (belegt: naechste Version wie
+   `learn._next_template_id`). Der Entwurf wird geloescht; alles, was seine
+   `supplier_id` gespeichert hat, zeigt danach auf das Ziel
+   (`Store.lieferant_umhaengen`: `processed.jsonl` -- damit die
+   Dublettenpruefung `seen_invoice` die Rechnungen beim Ziel kennt --,
+   `events.jsonl`, `shadow.jsonl`, `lehrer.jsonl`; dazu
+   `menschlich/*.grund.json` und `vorlernen/*.json`). `audit.jsonl` bleibt
+   append-only; `liste-cache.json` veraltet ueber `_Kontext.stand` von
+   selbst, der Server wirft die Eintraege des Entwurfs zusaetzlich sofort
+   weg (`Listencache.vergessen`). Audit `lieferant_uebernommen` (Operator,
+   Entwurf, Ziel, uebernommene Werte, umgehaengte Eintraege) und Ereignis
+   `lieferant`/`uebernommen`. Verweigert (409): Entwurf schon bestaetigt,
+   Ziel selbst ein Entwurf, beide gleich, Dummy; 404: unbekannte Id.
+   Sicherheitsregel: nie automatisch -- der Hinweis `ENTWURF_HINWEIS`
+   (Name eines bestehenden Lieferanten steht auf der Rechnung) belegt in der
+   Oberflaeche nur die Auswahl vor; kein Modul ausser dem Endpunkt ruft die
+   Uebernahme auf (Test `test_pipeline_ruft_uebernehmen_nie_selbst`).
+
 §7ac **Beträge aus dem Kontext herleiten** (Befund Aaron 09.10.2026, Modul
 `summen.py`): das kleine lokale Modell liest Beträge, versteht aber nicht
 sicher, welcher Brutto/Netto ist, wenn es nicht wörtlich dasteht ("Total
