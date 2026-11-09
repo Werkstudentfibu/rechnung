@@ -91,7 +91,17 @@ def kopf_fuss_seiten() -> tuple[int, int]:
 
 
 def partial_pages(n: int) -> list[int] | None:
-    """Seitenindizes fuer die schnelle Teil-Erkennung, ``None`` = alle."""
+    """Seitenindizes fuer die schnelle Teil-Erkennung, ``None`` = alle. Im
+    gruendlichen Modus (config.gruendlich) werden Scans bis
+    ``gruendlich_seiten()`` Seiten immer vollstaendig erkannt."""
+    from .config import gruendlich, gruendlich_seiten, process_timeout
+
+    # Nur mit genug Zeit: bei einer fest auf 120 s gestellten Zeitgrenze
+    # (Laptop-Profil, RECHNUNG_TIMEOUT=120) wuerde eine volle Erkennung von
+    # 8+ Seiten die Grenze reissen und die ganze Rechnung zurueckstellen --
+    # dann lieber wie bisher Kopf-/Fussseiten.
+    if gruendlich() and n <= gruendlich_seiten() and process_timeout() >= 300:
+        return None
     kopf, fuss = kopf_fuss_seiten()
     if n <= kopf + fuss + 1:
         return None
@@ -240,11 +250,14 @@ def page_count(path: Path) -> int:
             return sum(1 for _ in ImageSequence.Iterator(im))
     import pypdfium2 as pdfium
 
-    doc = pdfium.PdfDocument(str(path))
-    try:
-        return len(doc)
-    finally:
-        doc.close()
+    from .pdfium_sperre import sperre
+
+    with sperre():
+        doc = pdfium.PdfDocument(str(path))
+        try:
+            return len(doc)
+        finally:
+            doc.close()
 
 
 def _page_images(path: Path, indices: list[int] | None = None):
@@ -258,18 +271,70 @@ def _page_images(path: Path, indices: list[int] | None = None):
             return [frame.convert("RGB") for frame in ImageSequence.Iterator(im)]
     import pypdfium2 as pdfium
 
-    doc = pdfium.PdfDocument(str(path))
+    from .pdfium_sperre import sperre
+
+    # Je Seite eine eigene, kurze Sperrzeit (nicht den ganzen Dokumentzyklus
+    # in einem Block) -- so blockiert eine OCR-Vorbereitung mit vielen
+    # Seiten das Seitenbild der gerade im Browser geoeffneten Rechnung
+    # hoechstens fuer die Dauer EINES Renderns, nicht fuer das ganze Dokument.
+    with sperre():
+        doc = pdfium.PdfDocument(str(path))
     try:
-        want = set(range(len(doc)) if indices is None else indices)
-        return [doc[i].render(scale=DPI / 72).to_pil().convert("RGB") if i in want else None
-                for i in range(len(doc))]
+        with sperre():
+            n = len(doc)
+        want = set(range(n) if indices is None else indices)
+        out = []
+        for i in range(n):
+            if i not in want:
+                out.append(None)
+                continue
+            with sperre():
+                page = doc[i]
+                try:
+                    bitmap = page.render(scale=DPI / 72)
+                    try:
+                        out.append(bitmap.to_pil().convert("RGB"))  # convert() kopiert
+                    finally:
+                        bitmap.close()
+                finally:
+                    page.close()
+        return out
     finally:
-        doc.close()
+        with sperre():
+            doc.close()
+
+
+_langs_cache: dict[str, frozenset[str]] = {}
+
+
+def _installierte_sprachen(cmd: str) -> frozenset[str]:
+    if cmd not in _langs_cache:
+        try:
+            r = _run([cmd, "--list-langs"], 20)
+            zeilen = (r.stdout or b"").decode("utf-8", "replace").splitlines()
+            _langs_cache[cmd] = frozenset(z.strip() for z in zeilen[1:] if z.strip())
+        except (OSError, subprocess.SubprocessError):
+            _langs_cache[cmd] = frozenset()
+    return _langs_cache[cmd]
+
+
+def sprache() -> str:
+    """Erkennungssprache. Standard ``deu``; im gruendlichen Modus ``deu+eng``,
+    sofern das englische Sprachpaket installiert ist (englische Rechnungen
+    werden mit nur ``deu`` zu "Quantity"->"Quantlty"/"Unit Price"-Salat). Nie
+    eine nicht installierte Sprache anfordern -- Tesseract bricht sonst ganz
+    ab."""
+    from .config import gruendlich
+
+    cmd = tesseract_cmd()
+    if gruendlich() and cmd and {"deu", "eng"} <= _installierte_sprachen(cmd):
+        return "deu+eng"
+    return LANG
 
 
 def _run_tesseract(image: Path, out_base: Path, timeout: float | None) -> None:
     """Eine Seite erkennen -> ``out_base.pdf`` + ``out_base.tsv``."""
-    _run([tesseract_cmd(), str(image), str(out_base), "-l", LANG,
+    _run([tesseract_cmd(), str(image), str(out_base), "-l", sprache(),
           "--dpi", str(DPI), "pdf", "tsv"], timeout, check=True)
 
 
@@ -307,21 +372,24 @@ def _merge_mixed(original: Path, page_pdfs: list[Path | None], skip: list[bool],
     der jeweils per Tesseract erkannten Seiten-PDF."""
     import pypdfium2 as pdfium
 
-    out = pdfium.PdfDocument.new()
-    src_orig = pdfium.PdfDocument(str(original)) if any(skip) else None
-    try:
-        for i, is_skip in enumerate(skip):
-            if is_skip:
-                out.import_pages(src_orig, pages=[i])
-            else:
-                src = pdfium.PdfDocument(str(page_pdfs[i]))
-                out.import_pages(src)
-                src.close()
-        out.save(str(target))
-    finally:
-        out.close()
-        if src_orig is not None:
-            src_orig.close()
+    from .pdfium_sperre import sperre
+
+    with sperre():
+        out = pdfium.PdfDocument.new()
+        src_orig = pdfium.PdfDocument(str(original)) if any(skip) else None
+        try:
+            for i, is_skip in enumerate(skip):
+                if is_skip:
+                    out.import_pages(src_orig, pages=[i])
+                else:
+                    src = pdfium.PdfDocument(str(page_pdfs[i]))
+                    out.import_pages(src)
+                    src.close()
+            out.save(str(target))
+        finally:
+            out.close()
+            if src_orig is not None:
+                src_orig.close()
 
 
 def _cached(target: Path, meta: Path, sha: str) -> OcrResult | None:

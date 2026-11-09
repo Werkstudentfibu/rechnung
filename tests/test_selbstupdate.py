@@ -33,6 +33,11 @@ def commit(repo, name, inhalt, msg):
     git(repo, "push", "-q", "origin", "HEAD:release")
 
 
+@pytest.fixture(autouse=True)
+def ohne_wartepausen(monkeypatch):
+    monkeypatch.setattr(selbstupdate, "FETCH_WARTEN", (0, 0))
+
+
 @pytest.fixture
 def repos(tmp_path):
     bare = tmp_path / "server.git"
@@ -117,3 +122,185 @@ def test_daten_und_env_bleiben_unberuehrt(repos):
     e = selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
     assert e.status == "aktualisiert"
     assert (laptop / "rechnung.env").read_text() == "X=1\n"
+
+
+# ---- Testsatz-Schutz (Aaron 10.10.2026) -----------------------------------
+
+def _bericht(quote, nur_ohne_ki=True):
+    return {"art": "testsatz", "anzahl": 6, "trefferquote": quote,
+            "filter": {"lieferant": None, "variante": "A", "nur_ohne_ki": nur_ohne_ki},
+            "felder": {"brutto": {"richtig": 6, "falsch": 0, "fehlt": 0, "quote": quote}},
+            "positionen": {}, "faelle": []}
+
+
+@pytest.fixture
+def testsatz_da(monkeypatch):
+    from rechnung import testsatz
+    aufrufe = []
+    monkeypatch.setattr(testsatz, "anzahl", lambda root, nur_ohne_ki=False: 6)
+
+    def fake(root, data_root, python, ohne_ki):
+        aufrufe.append(ohne_ki)
+        return fake.bericht, ""
+    fake.bericht = _bericht(90.0)
+    monkeypatch.setattr(selbstupdate, "_testsatz", fake)
+    return fake, aufrufe
+
+
+def test_testsatz_schlechter_rollt_zurueck(repos, testsatz_da):
+    from rechnung import testsatz
+    fake, aufrufe = testsatz_da
+    dev, laptop, data = repos
+    testsatz.speichern(data, _bericht(95.0))
+    alt = git(laptop, "rev-parse", "HEAD")
+    commit(dev, "test_b.py", PASSING, "liest schlechter")
+    fake.bericht = _bericht(92.5)
+    e = selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    assert e.status == "zurueckgerollt", e.meldung
+    assert "Testsatz schlechter: Trefferquote 95.0 % -> 92.5 %" in e.meldung
+    assert "brutto" in e.meldung
+    assert git(laptop, "rev-parse", "HEAD") == alt
+    assert aufrufe == [True]  # Standard: nur Testfaelle ohne KI
+    # der schlechte Lauf wird nicht zum neuen Bezug
+    assert testsatz.letzter_bericht(data)["trefferquote"] == 95.0
+
+
+def test_testsatz_kleiner_rueckgang_ist_ok_und_wird_bezug(repos, testsatz_da, monkeypatch):
+    from rechnung import testsatz
+    fake, aufrufe = testsatz_da
+    dev, laptop, data = repos
+    testsatz.speichern(data, _bericht(95.0, nur_ohne_ki=False))
+    monkeypatch.setenv("RECHNUNG_UPDATE_TESTSATZ", "voll")
+    commit(dev, "test_b.py", PASSING, "fast gleich")
+    fake.bericht = _bericht(93.0, nur_ohne_ki=False)
+    e = selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    assert e.status == "aktualisiert", e.meldung
+    assert aufrufe == [False]
+    assert testsatz.letzter_bericht(data)["trefferquote"] == 93.0
+
+
+def test_testsatz_abschaltbar_und_erst_ab_5_faellen(repos, testsatz_da, monkeypatch):
+    from rechnung import testsatz
+    fake, aufrufe = testsatz_da
+    dev, laptop, data = repos
+    testsatz.speichern(data, _bericht(99.0))
+    fake.bericht = _bericht(10.0)
+    monkeypatch.setenv("RECHNUNG_UPDATE_TESTSATZ", "0")
+    commit(dev, "test_b.py", PASSING, "egal")
+    assert selbstupdate.aktualisieren(data, root=laptop, python=sys.executable).status \
+        == "aktualisiert"
+    monkeypatch.delenv("RECHNUNG_UPDATE_TESTSATZ")
+    monkeypatch.setattr(testsatz, "anzahl", lambda root, nur_ohne_ki=False: 4)
+    commit(dev, "test_c.py", PASSING, "egal 2")
+    assert selbstupdate.aktualisieren(data, root=laptop, python=sys.executable).status \
+        == "aktualisiert"
+    assert aufrufe == []
+
+
+def test_testsatz_fehler_rollt_zurueck(repos, testsatz_da, monkeypatch):
+    dev, laptop, data = repos
+    monkeypatch.setattr(selbstupdate, "_testsatz",
+                        lambda *a: (None, "ModuleNotFoundError: rechnung"))
+    commit(dev, "test_b.py", PASSING, "kaputt")
+    e = selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    assert e.status == "zurueckgerollt" and "Testsatz liess sich" in e.meldung
+
+
+def test_testsatz_echter_prozess(tmp_path):
+    """Der Kindprozess-Aufruf selbst (ohne Testfaelle): liefert einen Bericht."""
+    data = tmp_path / "data"
+    data.mkdir()
+    bericht, fehler = selbstupdate._testsatz(selbstupdate.repo_root(), data, sys.executable,
+                                             ohne_ki=True)
+    assert fehler == "" and bericht["anzahl"] == 0
+    assert bericht["filter"]["nur_ohne_ki"] is True
+    assert not (data / "berichte").exists()
+
+
+def test_neuer_stand_auch_ohne_fetch_regel_im_klon(repos):
+    """Laptop 02.11.2026: im Klon fehlte ``remote.origin.fetch`` -- das Update
+    meldete trotz neuem Stand auf GitHub wochenlang "schon aktuell"."""
+    dev, laptop, data = repos
+    git(laptop, "config", "--unset-all", "remote.origin.fetch")
+    commit(dev, "test_d.py", PASSING, "Stand nach fehlender Fetch-Regel")
+    e = selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    assert e.status == "aktualisiert", e.meldung
+    assert git(laptop, "rev-parse", "HEAD") == git(dev, "rev-parse", "HEAD")
+
+
+# ---- Absicherung 05.11.2026: Wiederholen + gelbe Warnung --------------------
+
+def test_fetch_wird_wiederholt(repos, monkeypatch):
+    """Kurzer Netz-Aussetzer: der erste fetch scheitert, der zweite klappt."""
+    dev, laptop, data = repos
+    commit(dev, "test_b.py", PASSING, "nach Aussetzer")
+    echt = selbstupdate._git
+    versuche = []
+
+    def wackelig(root, *args):
+        if args and args[0] == "fetch":
+            versuche.append(1)
+            if len(versuche) == 1:
+                return subprocess.CompletedProcess(args, 128, "", "fatal: Could not resolve host: github.com")
+        return echt(root, *args)
+    monkeypatch.setattr(selbstupdate, "_git", wackelig)
+    e = selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    assert e.status == "aktualisiert", e.meldung
+    assert len(versuche) == 2
+
+
+def test_offline_versucht_dreimal(repos):
+    _, laptop, data = repos
+    git(laptop, "remote", "set-url", "origin", str(laptop.parent / "gibt-es-nicht.git"))
+    e = selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    assert e.status == "offline"
+
+
+def test_status_ohne_versuch_keine_warnung(repos):
+    _, laptop, data = repos
+    assert selbstupdate.status(data, root=laptop)["warnung"] == ""
+
+
+def test_status_aktuell_keine_warnung(repos):
+    _, laptop, data = repos
+    selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    s = selbstupdate.status(data, root=laptop)
+    assert s["status"] == "aktuell" and s["warnung"] == "" and s["letzter_kontakt"]
+
+
+def test_status_warnt_bei_zurueckgerollt(repos):
+    dev, laptop, data = repos
+    commit(dev, "test_c.py", FAILING, "kaputt")
+    selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    w = selbstupdate.status(data, root=laptop)["warnung"]
+    assert "nicht installiert" in w and "Tests fehlgeschlagen" in w
+
+
+def test_status_warnt_wenn_geholt_aber_nicht_aktiv(repos):
+    dev, laptop, data = repos
+    commit(dev, "test_b.py", PASSING, "neu")
+    lock.lock_path(data).write_text("{}")
+    assert selbstupdate.aktualisieren(data, root=laptop, python=sys.executable).status == "beschaeftigt"
+    assert "noch nicht aktiv" in selbstupdate.status(data, root=laptop)["warnung"]
+
+
+def test_status_offline_erst_nach_tagen(repos, monkeypatch):
+    import json
+    _, laptop, data = repos
+    selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)  # Kontakt jetzt
+    git(laptop, "remote", "set-url", "origin", str(laptop.parent / "gibt-es-nicht.git"))
+    selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    assert selbstupdate.status(data, root=laptop)["warnung"] == ""  # frisch -> ruhig
+    p = data / selbstupdate.STATUS_DATEI
+    s = json.loads(p.read_text("utf-8"))
+    s["letzter_kontakt"] = "2026-10-23T08:00:00"
+    p.write_text(json.dumps(s), "utf-8")
+    w = selbstupdate.status(data, root=laptop)["warnung"]
+    assert "seit 2026-10-23 08:00 nicht erreicht" in w
+
+
+def test_status_offline_ohne_jeden_kontakt_warnt(repos):
+    _, laptop, data = repos
+    git(laptop, "remote", "set-url", "origin", str(laptop.parent / "gibt-es-nicht.git"))
+    selbstupdate.aktualisieren(data, root=laptop, python=sys.executable)
+    assert "Update-Server bisher nicht erreicht" in selbstupdate.status(data, root=laptop)["warnung"]

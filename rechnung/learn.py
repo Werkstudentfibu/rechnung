@@ -27,11 +27,12 @@ import re
 from dataclasses import dataclass, field
 
 from . import rechnen
+from .identify import POSITIONSMODUS_EINE_POSITION
 from .pdf import Document, Word
 from .template import (STANDARD_FIELDS, ausgeblendet, FieldResult, FieldSpec, LineItemSpec, Template,
                        apply_line_items, apply_template, build_field_spec,
                        build_line_item_spec)
-from .textnorm import MAX_SPAN, norm, parse_amount, parse_date, parse_tax_summary, same_value
+from .textnorm import MAX_SPAN, ist_seitenwechsel_wort, norm, parse_amount, parse_date, parse_tax_summary, same_value
 
 # Felder, die als Anker+Region gelernt werden koennen. taxblock (USt-
 # Aufstellung) ist ein Mehrzeilen-Block, dafuer reicht "Wert wiederfinden"
@@ -231,6 +232,12 @@ def _value_types(value) -> list[str]:
         return ["number", "amount"]
     if isinstance(value, str):
         s = value.strip()
+        # Beschreibung mit Ziffern ("Artikel 0001", "Schulung 2 Tage") ist Text,
+        # kein Betrag -- sonst lernt die Beschreibungsspalte als "number"/
+        # "amount", liest nur das erste Wort und der Probelauf scheitert
+        # (Aaron 05.11.2026: gruendlich).
+        if re.search(r"[^\W\d_]{2,}", re.sub(r"\b(?:EUR|CHF|USD|GBP)\b", "", s, flags=re.I)):
+            return ["text"]
         if re.fullmatch(r"-?\d+", s):
             return ["number", "amount"]
         if parse_amount(s) is not None:
@@ -344,14 +351,33 @@ def _match_header_words(header_line: list[Word], col_spans: dict[str, list[Word]
     return out
 
 
-def learn_line_items(doc: Document, items: list[dict]) -> LineItemSpec | None:
+def learn_line_items(doc: Document, items: list[dict], store=None) -> LineItemSpec | None:
+    """Siehe ``_learn_line_items``. Steht die Positionsnummer nicht im PDF (die
+    Rahmen-Markierung und die Anzeige nummerieren fehlende ``pos`` selbst
+    durch 1..n), wird ohne diese erfundene Spalte noch einmal gelernt -- sonst
+    liesse sich eine Tabelle ohne Pos.-Spalte nie als Vorlage anlernen."""
+    spec = _learn_line_items(doc, items, store)
+    if spec is None and items and all(_value_equiv(it.get("pos"), i)
+                                      for i, it in enumerate(items, 1)):
+        spec = _learn_line_items(doc, [{k: v for k, v in it.items() if k != "pos"} for it in items],
+                                 store)
+    return spec
+
+
+def _learn_line_items(doc: Document, items: list[dict], store=None) -> LineItemSpec | None:
     """``LineItemSpec`` aus bestaetigten Positionen ableiten: jede Position
     im PDF wiederfinden (Werte -> Zeile), daraus die Kopfzeile (Label-
     Woerter oberhalb der ersten Position), Spalten-x-Bereiche
     (``template.build_line_item_spec``, Mitte zum Nachbarn) und das
     Stoppwort (erste Zeile unterhalb der letzten Position). Nur wenn der
     Probelauf (``apply_line_items``) die bestaetigten Positionen exakt
-    reproduziert -- sonst ``None`` statt geraten."""
+    reproduziert -- sonst ``None`` statt geraten.
+
+    ``store``: optional (SPEC Baustein 5, Aaron 12.10.2026) -- gelingt das
+    Lernen, wandert jedes Kopfwort der erkannten Spalten automatisch ins
+    globale Spaltenwoerterbuch (``store.spaltenwort_lernen``); gilt als
+    "bestaetigt", weil der Probelauf unten die Positionen exakt reproduziert
+    (SPEC: "Einmal korrigieren = gelernt (ohne Extraschritt)")."""
     if not items:
         return None
     lines = _lines(doc)
@@ -368,6 +394,7 @@ def learn_line_items(doc: Document, items: list[dict]) -> LineItemSpec | None:
     first_words = [w for span, _t in rows[0].values() for w in span]
     last_words = [w for span, _t in rows[-1].values() for w in span]
     page = first_words[0].page
+    last_page = last_words[0].page
     h = max(w.bottom - w.top for w in first_words)
     header_line = _nearest_line(lines, page, min(w.top for w in first_words), 0, h, above=True)
     if not header_line:
@@ -375,10 +402,10 @@ def learn_line_items(doc: Document, items: list[dict]) -> LineItemSpec | None:
     header_map = _match_header_words(header_line, {k: span for k, (span, _t) in rows[0].items()})
     if header_map is None:
         return None
-    # Stoppwort: erste Zeile unterhalb der letzten Position -- auch wenn
-    # der Summenblock etwas abgesetzt steht (Trennlinie, Leerraum); ob das
-    # passt, entscheidet ohnehin der Probelauf unten.
-    stop_line = _nearest_line(lines, page, 0, max(w.bottom for w in last_words), h,
+    # Stoppwort: erste Zeile unterhalb der letzten Position (auf deren Seite)
+    # -- auch wenn der Summenblock etwas abgesetzt steht (Trennlinie,
+    # Leerraum); ob das passt, entscheidet ohnehin der Probelauf unten.
+    stop_line = _nearest_line(lines, last_page, 0, max(w.bottom for w in last_words), h,
                               above=False, max_gap_lines=12.0)
 
     page_w = doc.pages[page].width
@@ -387,9 +414,26 @@ def learn_line_items(doc: Document, items: list[dict]) -> LineItemSpec | None:
     # Waehrung -- "EUR" steht womoeglich auch in jeder Positionszeile und
     # wuerde die Tabelle schon nach der ersten Zeile beenden.
     stop_words = [w for w in (stop_line or []) if _is_label(w)]
+    mehrseitig = last_page != page
+    if mehrseitig:
+        # "Uebertrag"/"Zwischensumme" steht auf JEDER Seite -- als Stopp-Wort
+        # wuerde es die Tabelle schon auf Seite 1 beenden.
+        stop_words = [w for w in stop_words if not ist_seitenwechsel_wort(w.text)]
     spec = build_line_item_spec(header_cols, stop_words, page_w)
+    if mehrseitig:
+        spec.folgeseiten = True
+        # Beginn der Tabelle auf der zweiten Seite: oberster Positionswert dort
+        alle_woerter = [w for row in rows for span, _t in row.values() for w in span]
+        zweite_seite = min(w.page for w in alle_woerter if w.page > page)
+        zweite = [w for w in alle_woerter if w.page == zweite_seite]
+        if zweite:
+            ph = doc.pages[zweite[0].page].height
+            spec.folge_top = round(max(0.0, (min(w.top for w in zweite) - h * 0.4) / ph), 4)
     if not _items_equiv(apply_line_items(doc, spec), items):
         return None
+    if store is not None:
+        for key, w in header_map.items():
+            store.spaltenwort_lernen(w.text, key)
     return spec
 
 
@@ -540,8 +584,13 @@ def confirmed_values(fields: dict[str, FieldResult]) -> dict[str, object]:
         vtype = STANDARD_FIELDS.get(name, ("",))[0]
         # "text": per Regel aus dem Text gelesen (zahlung.py) -- die Regel
         # findet den Wert auch kuenftig selbst; gelernt wird, was der Mensch
-        # korrigiert hat bzw. was Vorlage/KI geliefert haben.
-        if vtype not in LEARNABLE_TYPES or fr.source in ("missing", "library", "text"):
+        # korrigiert hat bzw. was Vorlage/KI geliefert haben. "errechnet"
+        # (rechnen.py, Teil A/B Selbstlernen 2 inkl. summen.py) steht an
+        # KEINER festen Stelle im PDF -- ein zufaelliger Textfund waere kein
+        # verlaesslicher Anker, nur ein Nebenprodukt der Formel/des
+        # Kontexts; die Rechenstufe ergaenzt den Wert ohnehin bei jeder
+        # kuenftigen Rechnung von selbst (Befund 10.10.2026).
+        if vtype not in LEARNABLE_TYPES or fr.source in ("missing", "library", "text", rechnen.ERRECHNET):
             continue
         if fr.value is None or fr.value == "":
             continue
@@ -554,6 +603,7 @@ def learn_template(doc: Document, supplier_id: str, values: dict[str, object],
                    template_id: str | None = None,
                    line_items: list[dict] | None = None,
                    taxblock: list[dict] | None = None,
+                   store=None,
                    ) -> tuple[Template | None, LearnOutcome]:
     """Aus bestaetigten Werten ein Template ableiten bzw. ``existing`` ergaenzen.
     Speichert nichts -- liefert das Template (oder None, wenn sich nichts
@@ -562,7 +612,9 @@ def learn_template(doc: Document, supplier_id: str, values: dict[str, object],
     markierte Vorlage fuer dieselbe Variante schon die Standard-Id belegt
     (SPEC §7p: Layoutwechsel erkennen). ``line_items``/``taxblock``:
     bestaetigte Positionstabelle/USt-Aufstellung -- Postfach-Baustein 11a,
-    siehe ``learn_line_items``/``learn_taxblock``."""
+    siehe ``learn_line_items``/``learn_taxblock``. ``store``: optional,
+    durchgereicht an ``learn_line_items`` fuers globale Spaltenwoerterbuch
+    (SPEC Baustein 5)."""
     tid = existing.id if existing else (template_id or f"{supplier_id}__{variant}")
     outcome = LearnOutcome(template_id=tid, created=existing is None)
     tpl = (Template.from_dict(existing.to_dict()) if existing
@@ -621,7 +673,7 @@ def learn_template(doc: Document, supplier_id: str, values: dict[str, object],
         elif tpl.line_items is not None and tpl.secured:
             outcome.skipped["_positionen"] = "gesichertes Template liefert andere Positionen"
         else:
-            spec_li = learn_line_items(doc, line_items)
+            spec_li = learn_line_items(doc, line_items, store=store)
             if spec_li is None:
                 outcome.skipped["_positionen"] = "nicht reproduzierbar/nicht gefunden"
             else:
@@ -816,10 +868,18 @@ def learn_from_confirmed(store, res, doc: Document, operator: str = "") -> Learn
     taxblock = (rechnen.nur_gelesene_werte(tb_fr.value)
                if tb_fr is not None and tb_fr.source != "missing"
                and isinstance(tb_fr.value, list) and tb_fr.value else None)
-    gelesene_items = rechnen.nur_gelesene_werte(res.line_items) or None
+    sup = store.supplier(res.supplier_id)
+    # Positionsmodus 'eine_position' (SPEC Baustein 1, Aaron 12.10.2026):
+    # die "Positionen" sind aus der USt-Aufstellung gebildet
+    # (positionen.aus_summen), stehen nicht als eigene Tabellenzeile im PDF
+    # -- eine Tabellen-Spec daraus zu lernen waere Zufallstreffer. Explizit
+    # ausgelassen statt sich auf die Herkunfts-Filterung unten zu verlassen.
+    gelesene_items = (rechnen.nur_gelesene_werte(res.line_items) or None
+                      if (sup is None or sup.positionsmodus != POSITIONSMODUS_EINE_POSITION)
+                      else None)
     tpl, outcome = learn_template(doc, res.supplier_id, confirmed_values(res.fields),
                                   existing, variant, template_id=tid_override,
-                                  line_items=gelesene_items, taxblock=taxblock)
+                                  line_items=gelesene_items, taxblock=taxblock, store=store)
 
     if used_tpl is not None and used_tpl.secured:
         _track_field_corrections(store, used_tpl, outcome, res, operator)

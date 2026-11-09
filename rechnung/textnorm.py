@@ -23,6 +23,20 @@ def norm(s: str) -> str:
     return s
 
 
+# Zeilen am Seitenwechsel einer Positionstabelle, die KEINE Position sind
+# (Aaron 05.11.2026): "Uebertrag"/"Zwischensumme" (Praefix) und
+# "Seite 2 von 3"/"Page 2" (nur als ganzes Wort, sonst waere "Seitenteil"
+# eine Seitenzeile). Gemeinsam fuer tabelle.py und template.py.
+SEITENWECHSEL_WOERTER = ("zwischensumme", "uebertrag", "ubertrag")
+SEITENZUBEHOER_WOERTER = ("seite", "page", "blatt", "pagina")
+
+
+def ist_seitenwechsel_wort(text: str) -> bool:
+    """Erstes Wort einer Tabellenzeile -> Seitenwechsel-/Seitenzubehoer-Zeile?"""
+    fw = norm(text)
+    return fw.startswith(SEITENWECHSEL_WOERTER) or fw in SEITENZUBEHOER_WOERTER
+
+
 _AMOUNT_RE = re.compile(r"-?\d[\d.\s ]*,\d{1,2}|-?\d[\d,\s ]*\.\d{1,2}|-?\d+")
 
 # Schweizer Zahlenformat: Hochkomma als Tausendertrenner (1'234.50, 1’234.50)
@@ -133,9 +147,72 @@ def iban_valid(iban: str | None) -> bool:
     return int(digits) % 97 == 1
 
 
-_USTID_RE = re.compile(r"\b(DE\s?\d{9}|[A-Z]{2}\s?[A-Z0-9]{8,12})\b")
+# Laenderspezifische Formate echter USt-IdNrn (EU/VIES, Nordirland "XI";
+# die Schweiz separat ueber _CHE_RE mit Pruefziffer). Nur diese Muster gelten.
+# Frueher reichte "2 Buchstaben + 8-12 Zeichen mit >= 2 Ziffern" -- dadurch
+# galten BICs (COKSDE33XXX, MALADE51WOR, DEUTDEDB384), Filtermasse
+# (AB1000X450MM) oder "TELEFON0511" als USt-IdNr, und ein Lieferanten-Entwurf
+# "Unbekannt (COKSDE33XXX)" buendelte Rechnungen verschiedener Firmen, die
+# zufaellig bei derselben Sparkasse sind (Befund Aaron 09.11.2026).
+_USTID_FORMATS = {
+    "AT": r"U\d{8}",
+    "BE": r"[01]\d{9}",
+    "BG": r"\d{9,10}",
+    "CY": r"\d{8}[A-Z]",
+    "CZ": r"\d{8,10}",
+    "DE": r"\d{3}\s?\d{3}\s?\d{3}",            # auch gruppiert "DE 123 456 789"
+    "DK": r"\d{2}\s?\d{2}\s?\d{2}\s?\d{2}",
+    "EE": r"\d{9}",
+    "EL": r"\d{9}",                            # Griechenland
+    "ES": r"[A-Z0-9]\d{7}[A-Z0-9]",            # nicht beide Randzeichen Ziffern (unten)
+    "FI": r"\d{8}",
+    "FR": r"[A-HJ-NP-Z0-9]{2}\s?\d{9}",
+    "GB": r"\d{3}\s?\d{4}\s?\d{2}(?:\s?\d{3})?|GD\d{3}|HA\d{3}",
+    "HR": r"\d{11}",
+    "HU": r"\d{8}",
+    "IE": r"\d{7}[A-W][A-I]?|\d[A-Z+*]\d{5}[A-W]",
+    "IT": r"\d{11}",
+    "LT": r"\d{9}|\d{12}",
+    "LU": r"\d{8}",
+    "LV": r"\d{11}",
+    "MT": r"\d{8}",
+    "NL": r"\d{9}B\d{2}",
+    "PL": r"\d{10}",
+    "PT": r"\d{9}",
+    "RO": r"\d{6,10}",                         # amtlich 2-10 Ziffern; kurze Formen zu riskant
+    "SE": r"\d{10}01",
+    "SI": r"\d{8}",
+    "SK": r"\d{10}",
+    "XI": r"\d{3}\s?\d{4}\s?\d{2}(?:\s?\d{3})?|GD\d{3}|HA\d{3}",
+}
+_USTID_RE = re.compile(
+    r"\b(?:" + "|".join(rf"{cc}\s?(?:{fmt})" for cc, fmt in _USTID_FORMATS.items()) + r")\b")
+# Beschriftung unmittelbar vor der Kennung, die sie als BIC ausweist
+# ("BIC:", "SWIFT-BIC", "BIC/SWIFT:", "S.W.I.F.T.").
+_BIC_LABEL_RE = re.compile(r"(?:BIC|SWIFT|S\.W\.I\.F\.T)[A-Z/.\-]*\s*[:.]?\s*$")
+# ISO-3166-Laendercodes (fuer Stelle 5-6 eines BIC)
+_ISO_COUNTRIES = frozenset("""
+AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ
+BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM
+DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS
+GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN
+KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ
+MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM
+PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV
+SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI
+VN VU WF WS XK YE YT ZA ZM ZW
+""".split())
+_BIC_RE = re.compile(r"[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?")
 # Schweizer UID/MWST-Nummer: CHE-123.456.789 (MWST/TVA/IVA)
-_CHE_RE = re.compile(r"\bCHE[-\s]?(\d{3})[.\s]?(\d{3})[.\s]?(\d{3})\b")
+_CHE_RE = re.compile(r"\bCHE[-\s]*(\d{3})[.\s]?(\d{3})[.\s]?(\d{3})(?!\d)")
+
+
+def looks_like_bic(s: str) -> bool:
+    """Sieht die Folge wie ein BIC/SWIFT-Code aus? 8 oder 11 Zeichen,
+    Stellen 1-4 Buchstaben (Bank), 5-6 ein ISO-Laendercode, 7-8 Ort,
+    optional 9-11 Filiale. Ein BIC ist nie eine USt-IdNr."""
+    c = re.sub(r"[^A-Z0-9]", "", str(s or "").upper())
+    return bool(_BIC_RE.fullmatch(c)) and c[4:6] in _ISO_COUNTRIES
 
 
 def che_valid(uid: str) -> bool:
@@ -157,19 +234,23 @@ def norm_ustid(s) -> str:
 
 
 def find_ustids(s: str) -> set[str]:
-    """EU-USt-IdNr: 2 Laenderbuchstaben + Kennung. Kennung muss >=2 Ziffern
-    enthalten, sonst matchen auch normale Grossbuchstaben-Woerter. Dazu die
-    Schweizer UID/MWST-Nummer (CHE-123.456.789, nur mit gueltiger
-    Pruefziffer) als 'CHE123456789'."""
+    """USt-IdNrn im Text, streng: nur Laenderpraefix + landesspezifisches
+    Format (``_USTID_FORMATS``), nie etwas, das wie ein BIC aussieht
+    (``looks_like_bic``) oder hinter einer BIC/SWIFT-Beschriftung steht.
+    Dazu die Schweizer UID/MWST-Nummer (CHE-123.456.789, nur mit gueltiger
+    Pruefziffer) als 'CHE123456789'. Ergebnis kompakt (ohne Leerzeichen)."""
     out = set()
     up = s.upper()
-    che = {"CHE" + "".join(m.groups()) for m in _CHE_RE.finditer(up)}
     for m in _USTID_RE.finditer(up):
-        cand = re.sub(r"\s+", "", m.group(1))
-        if cand.startswith("CHE"):
-            continue   # Schweizer UID: nur ueber _CHE_RE (mit Pruefziffer)
-        if sum(c.isdigit() for c in cand[2:]) >= 2:
-            out.add(cand)
+        cand = re.sub(r"\s+", "", m.group(0))
+        if cand.startswith("ES") and cand[2].isdigit() and cand[-1].isdigit():
+            continue   # spanisch: mindestens ein Randzeichen ist ein Buchstabe
+        if looks_like_bic(cand):
+            continue
+        if _BIC_LABEL_RE.search(up[max(0, m.start() - 24):m.start()]):
+            continue
+        out.add(cand)
+    che = {"CHE" + "".join(m.groups()) for m in _CHE_RE.finditer(up)}
     return out | {u for u in che if che_valid(u)}
 
 
@@ -302,6 +383,9 @@ def same_value(raw: str, value, value_type: str) -> bool:
             return False
         return want is not None and parse_date(raw) == want
     if value_type in ("number", "iban", "ustid"):
+        # 19.0 (aus einer Betragsspalte gelesen) ist die Nummer "19", nicht "190"
+        if isinstance(value, float) and value == int(value):
+            value = int(value)
         a, b = compact(raw), compact(value)
         return bool(a) and a == b
     return bool(norm(raw)) and norm(raw) == norm(str(value))

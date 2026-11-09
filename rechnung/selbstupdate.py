@@ -16,13 +16,28 @@ Ablauf ``aktualisieren()``:
    geaendert, Abhaengigkeiten nachinstallieren.
 5. Tests (``pytest -q -x``). Rot -> zurueck auf den alten Stand
    (``zurueckgerollt``), das laufende Programm bleibt wie es war.
+6. Testsatz-Schutz (testsatz.py, Aaron 10.10.2026): gibt es mindestens 5
+   bestaetigte Testfaelle, liest der NEUE Stand sie im Trockenlauf; sinkt
+   die Gesamt-Trefferquote gegenueber dem letzten gespeicherten Lauf (gleicher
+   Filter) um mehr als 2 Prozentpunkte -> zurueckgerollt mit Grund.
+   ``RECHNUNG_UPDATE_TESTSATZ``: ``0`` = aus, Standard = nur Testfaelle ohne
+   KI (Vorlage/E-Rechnung, KI auf dem Laptop ist langsam), ``voll`` = alle.
 
 ``data\\`` und ``rechnung.env`` liegen ausserhalb des Klons und werden nie
 angefasst. Jeder Versuch steht in ``<data>/update.log``.
+
+Absicherung (05.11.2026, Updates kamen 23.10.-02.11. unbemerkt nicht an):
+``fetch`` wird bei einem Fehlschlag nach ``FETCH_WARTEN`` Sekunden erneut
+versucht (kurze WLAN-/VPN-Aussetzer). Das Ergebnis jedes Versuchs steht
+zusaetzlich in ``<data>/update-status.json``; ``status()`` macht daraus die
+gelbe Warnung im Programm (gescheitert, zurueckgerollt, neuer Stand geholt
+aber nicht aktiv, oder seit ``OFFLINE_WARNUNG_TAGE`` kein Kontakt).
 """
 
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 import sys
 import time
@@ -38,6 +53,18 @@ RESTART_EXIT_CODE = 42
 GIT_TIMEOUT_S = 90
 PIP_TIMEOUT_S = 900
 TEST_TIMEOUT_S = 900
+TESTSATZ_TIMEOUT_S = 1800
+# ab so vielen Testfaellen wird der Testsatz-Schutz aktiv (weniger: zu
+# zufaellig, ein einzelnes Feld waere schon mehrere Prozentpunkte)
+TESTSATZ_MIN_FAELLE = 5
+# erlaubter Rueckgang der Gesamt-Trefferquote in Prozentpunkten
+TESTSATZ_MAX_RUECKGANG = 2.0
+# Wartezeiten (Sekunden) vor dem 2. und 3. fetch-Versuch
+FETCH_WARTEN = (5, 20)
+# "offline" erst warnen, wenn so lange kein erfolgreicher Kontakt war --
+# ein einzelner Start ohne Netz ist kein Problem
+OFFLINE_WARNUNG_TAGE = 2
+STATUS_DATEI = "update-status.json"
 
 
 @dataclass
@@ -81,14 +108,28 @@ def _rev(root: Path, ref: str) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def _quelle(root: Path) -> str:
+    """GitHub-Quelle ohne moegliche Zugangsdaten aus der Remote-URL."""
+    r = _git(root, "remote", "get-url", "origin")
+    raw = r.stdout.strip() if r.returncode == 0 else ""
+    raw = re.sub(r"^(https?://)[^/@]+@", r"\1", raw)
+    raw = raw.removeprefix("git@").replace(":", "/", 1).removesuffix(".git")
+    return raw
+
+
 def version(root: Path | None = None) -> dict:
-    """Aktueller Stand fuer die Anzeige: Commit, Datum, Betreff."""
+    """Aktueller Stand und eindeutige Update-Quelle fuer die Anzeige."""
     root = root or repo_root()
     if not ist_git_klon(root):
         return {"git": False, "commit": "", "datum": "", "betreff": ""}
     r = _git(root, "log", "-1", "--format=%h%x1f%cd%x1f%s", "--date=format:%d.%m.%Y %H:%M")
     teile = (r.stdout.strip().split("\x1f") + ["", "", ""])[:3] if r.returncode == 0 else ["", "", ""]
-    return {"git": True, "commit": teile[0], "datum": teile[1], "betreff": teile[2]}
+    aktiv = _git(root, "branch", "--show-current")
+    ziel = _rev(root, f"origin/{BRANCH}")
+    return {"git": True, "commit": teile[0], "datum": teile[1], "betreff": teile[2],
+            "update_branch": BRANCH,
+            "aktiver_branch": aktiv.stdout.strip() if aktiv.returncode == 0 else "",
+            "update_remote": _quelle(root), "update_ziel": ziel[:7]}
 
 
 def _pip_install(root: Path, python: str) -> subprocess.CompletedProcess:
@@ -98,6 +139,63 @@ def _pip_install(root: Path, python: str) -> subprocess.CompletedProcess:
 
 def _tests(root: Path, python: str) -> subprocess.CompletedProcess:
     return _run([python, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider"], root, TEST_TIMEOUT_S)
+
+
+def _testsatz_modus() -> str:
+    """"aus" | "ohne_ki" (Standard) | "voll" -- aus RECHNUNG_UPDATE_TESTSATZ."""
+    import os
+
+    v = os.environ.get("RECHNUNG_UPDATE_TESTSATZ", "").strip().lower()
+    if v in ("0", "aus", "nein", "false", "off"):
+        return "aus"
+    return "voll" if v == "voll" else "ohne_ki"
+
+
+def _testsatz(root: Path, data_root: Path, python: str, ohne_ki: bool) -> tuple[dict | None, str]:
+    """Testsatz mit dem NEUEN Stand (eigener Prozess aus dem Klon) im
+    Trockenlauf -> (Bericht, Fehlertext). Speichert selbst nichts -- erst
+    nach bestandenem Vergleich wird der Lauf als neuer Bezug abgelegt."""
+    import json
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "testsatz.json"
+        cmd = [python, "-m", "rechnung.cli", "--data", str(data_root), "testsatz",
+               "--kein-bericht", "--ausgabe", str(out)] + (["--ohne-ki"] if ohne_ki else [])
+        r = _run(cmd, root, TESTSATZ_TIMEOUT_S)
+        if r.returncode != 0 or not out.exists():
+            return None, _letzte_zeilen(r.stdout + r.stderr)
+        try:
+            return json.loads(out.read_text("utf-8")), ""
+        except (OSError, ValueError) as exc:
+            return None, f"Bericht nicht lesbar: {exc}"
+
+
+def _testsatz_schutz(root: Path, data_root: Path | None, python: str) -> str:
+    """Leerer Text = in Ordnung (oder nicht anwendbar), sonst Grund fuers
+    Zurueckrollen."""
+    modus = _testsatz_modus()
+    if modus == "aus" or data_root is None:
+        return ""
+    from . import testsatz
+
+    ohne_ki = modus != "voll"
+    if testsatz.anzahl(data_root, nur_ohne_ki=ohne_ki) < TESTSATZ_MIN_FAELLE:
+        return ""
+    neu, fehler = _testsatz(root, data_root, python, ohne_ki)
+    if neu is None:
+        return "Testsatz liess sich mit dem neuen Stand nicht ausfuehren:\n" + fehler
+    alt = testsatz.letzter_bericht(data_root, neu.get("filter"))
+    neu["vergleich"] = testsatz.vergleich(alt, neu)
+    qa, qn = (alt or {}).get("trefferquote"), neu.get("trefferquote")
+    if qa is not None and qn is not None and qa - qn > TESTSATZ_MAX_RUECKGANG:
+        schlechter = "; ".join(neu["vergleich"]["schlechter"][:8])
+        return (f"Testsatz schlechter: Trefferquote {qa:.1f} % -> {qn:.1f} % "
+                f"(mehr als {TESTSATZ_MAX_RUECKGANG:g} Prozentpunkte)"
+                + (f" -- schlechter bei: {schlechter}" if schlechter else ""))
+    neu["selbstupdate"] = True
+    testsatz.speichern(data_root, neu)
+    return ""
 
 
 def _letzte_zeilen(text: str, n: int = 15) -> str:
@@ -123,26 +221,100 @@ def aktualisieren(data_root: Path | None = None, root: Path | None = None,
     python = python or sys.executable
     e = _aktualisieren(root, data_root, tests, python)
     _log(data_root, e)
+    _status_schreiben(data_root, e)
     return e
+
+
+def _fetch(root: Path) -> str:
+    """origin/release holen, bei Fehlschlag mit Pausen erneut versuchen.
+    Leerer Text = geklappt, sonst die letzte Fehlermeldung."""
+    fehler = ""
+    for warten in (0, *FETCH_WARTEN):
+        if warten:
+            time.sleep(warten)
+        try:
+            # Explizite Zielangabe: ohne ``remote.origin.fetch`` in der Klon-
+            # Konfiguration (Laptop, Befund 02.11.2026) aktualisierte ein
+            # blankes ``fetch origin release`` nur FETCH_HEAD, nie
+            # origin/release -- das Programm meldete wochenlang "aktuell".
+            f = _git(root, "fetch", "--quiet", "origin",
+                     f"+refs/heads/{BRANCH}:refs/remotes/origin/{BRANCH}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            fehler = str(exc)
+            continue
+        if f.returncode == 0:
+            return ""
+        fehler = _letzte_zeilen(f.stderr, 3)
+    return fehler
+
+
+def _status_schreiben(data_root: Path | None, e: Ergebnis) -> None:
+    if data_root is None:
+        return
+    p = Path(data_root) / STATUS_DATEI
+    try:
+        alt = json.loads(p.read_text("utf-8")) if p.exists() else {}
+    except (OSError, ValueError):
+        alt = {}
+    jetzt = time.strftime("%Y-%m-%dT%H:%M:%S")
+    neu = {"zeit": jetzt, "status": e.status, "meldung": e.meldung,
+           "alt": e.alt[:7], "neu": e.neu[:7],
+           "letzter_kontakt": jetzt if e.status not in ("offline", "kein_git") else alt.get("letzter_kontakt", "")}
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(neu, ensure_ascii=False, indent=1), "utf-8")
+    except OSError:
+        pass
+
+
+def status(data_root: Path, root: Path | None = None) -> dict:
+    """Letzter Update-Versuch + ob das Programm gewarnt werden muss.
+    Liest nur lokal (kein Netz): ``warnung`` ist ein Satz fuer die gelbe
+    Leiste oder leer."""
+    root = root or repo_root()
+    p = Path(data_root) / STATUS_DATEI
+    try:
+        s = json.loads(p.read_text("utf-8")) if p.exists() else {}
+    except (OSError, ValueError):
+        s = {}
+    warnung = ""
+    if ist_git_klon(root):
+        st = s.get("status", "")
+        head, ziel = _rev(root, "HEAD"), _rev(root, f"origin/{BRANCH}")
+        zeit = s.get("zeit", "").replace("T", " ")[:16]
+        if st in ("zurueckgerollt", "fehler"):
+            warnung = f"Letztes Update ({zeit}) nicht installiert: {s.get('meldung', '')}"
+        elif head and ziel and head != ziel and _git(root, "merge-base", "--is-ancestor", head, ziel).returncode == 0:
+            warnung = (f"Neuer Stand {ziel[:7]} ist geholt, aber noch nicht aktiv "
+                       f"(laeuft: {head[:7]}) -- 'Update holen' und neu starten.")
+        elif st == "offline":
+            kontakt = s.get("letzter_kontakt", "")
+            try:
+                alter = time.time() - time.mktime(time.strptime(kontakt, "%Y-%m-%dT%H:%M:%S"))
+            except ValueError:
+                alter = float("inf")
+            if alter > OFFLINE_WARNUNG_TAGE * 86400:
+                seit = f"seit {kontakt.replace('T', ' ')[:16]}" if kontakt else "bisher"
+                warnung = f"Update-Server {seit} nicht erreicht: {s.get('meldung', '')}"
+    return dict(s, warnung=warnung)
 
 
 def _aktualisieren(root: Path, data_root: Path | None, tests: bool, python: str) -> Ergebnis:
     if not ist_git_klon(root):
         return Ergebnis("kein_git", meldung="Programm laeuft nicht aus einem Git-Klon (z.B. als rechnung.exe).")
 
-    try:
-        f = _git(root, "fetch", "--quiet", "origin", BRANCH)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return Ergebnis("offline", meldung=f"Update-Server nicht erreichbar: {exc}")
-    if f.returncode != 0:
-        return Ergebnis("offline", meldung="Update-Server nicht erreichbar: " + _letzte_zeilen(f.stderr, 3))
+    fehler = _fetch(root)
+    if fehler:
+        return Ergebnis("offline", meldung="Update-Server nicht erreichbar: " + fehler)
 
     alt = _rev(root, "HEAD")
     neu = _rev(root, f"origin/{BRANCH}")
+    quelle = _quelle(root)
     if not neu:
-        return Ergebnis("fehler", alt=alt, meldung=f"Zweig {BRANCH} nicht gefunden.")
+        return Ergebnis("fehler", alt=alt, meldung=f"Zweig {BRANCH} nicht gefunden in {quelle or 'der eingestellten Quelle'}.")
     if alt == neu:
-        return Ergebnis("aktuell", alt=alt, neu=neu, meldung="Schon auf dem neuesten Stand.")
+        return Ergebnis("aktuell", alt=alt, neu=neu,
+                        meldung=f"Schon auf dem neuesten Stand von {quelle or 'origin'} ({BRANCH}).")
 
     if data_root is not None and lock.is_locked(data_root):
         return Ergebnis("beschaeftigt", alt=alt, neu=neu,
@@ -171,6 +343,9 @@ def _aktualisieren(root: Path, data_root: Path | None, tests: bool, python: str)
             t = _tests(root, python)
             if t.returncode != 0:
                 return zurueck("Tests fehlgeschlagen:\n" + _letzte_zeilen(t.stdout + t.stderr))
+            grund = _testsatz_schutz(root, data_root, python)
+            if grund:
+                return zurueck(grund)
     except subprocess.TimeoutExpired as exc:
         return zurueck(f"Zeitueberschreitung: {exc}")
 

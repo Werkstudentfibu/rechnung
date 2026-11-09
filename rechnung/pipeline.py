@@ -16,25 +16,34 @@ from . import billing
 from . import dubletten
 from . import einvoice
 from . import jobrouter
+from . import keine_rechnung
 from . import ocr
 from . import pdf as pdfmod
+from . import pflicht
+from . import plausi
 from . import positionen
 from . import rechnen
 from . import semantic
 from . import shadow
 from . import split
 from . import swissqr
+from . import tabelle
 from . import waehrung
 from . import zahlung
 from .timing import StageTimer
 from .config import jobrouter as _jr_cfg
 from .config import operator as _operator
+from .config import namenserkennung as _namenserkennung
+from .identify import empfaenger_namen as _empfaenger_namen
+from .identify import namenstreffer as _namenstreffer
 from .identify import (DEFAULT_CURRENCY, EXPECTED_RATES, FIXED_FIELD_TYPES, IBAN_DEVIATES,
-                       NEW_SUPPLIER_HOLD, Supplier, _address_scope_reason, _detect_currency,
-                       cross_check, extract_identifiers, identify_einvoice,
-                       identify_with_reason, kandidaten)
+                       NEW_SUPPLIER_HOLD, POSITIONSMODI, POSITIONSMODUS_EINE_POSITION,
+                       POSITIONSMODUS_EINZELN, POSITIONSMODUS_ZUSAMMENFASSUNG, Supplier,
+                       _address_scope_reason, _detect_currency, cross_check,
+                       land_aus_beleg_text, land_aus_kennungen,
+                       extract_identifiers, identify_einvoice, identify_with_reason, kandidaten)
 from .store import Store
-from .suggest import suggest_category
+from .suggest import similar_suppliers, suggest_category
 from .template import (STANDARD_FIELDS, FieldResult, Template, apply_line_items,
                        apply_template)
 from .textnorm import coerce, compact, find_ibans, norm
@@ -43,6 +52,10 @@ from .validate import Check, run_all
 # Status
 AUTO = "auto"                    # kann automatisch weitergeleitet werden
 REVIEW = "review"                # Template da, aber Konfidenz/Prüfung schwach
+NAME_HINWEIS = ("Lieferant nur ueber den Namen erkannt (Namens-Erkennung) -- "
+                "bitte beim Bestaetigen pruefen")
+ENTWURF_HINWEIS = ("Lieferanten-Entwurf: der Name des bestehenden Lieferanten '{name}' "
+                   "steht auf der Rechnung -- vermutlich ist er gemeint")
 NO_TEMPLATE = "no_template"      # Lieferant bekannt, kein Template -> anlernen
 # Kein eindeutiger Lieferant / keine eindeutige Rechnungsadresse aus der
 # Bibliothek, IBAN weicht von den Stammdaten ab, ... -> ein Mensch muss die
@@ -53,6 +66,10 @@ UNKNOWN = DEFERRED
 SCAN = "scan_no_textlayer"      # historisch, wird nicht mehr vergeben -- Scans
                                  # laufen seit Stufe 3 automatisch durch ocr.py
 UNSUPPORTED = "unsupported_file"  # weder PDF noch lesbare E-Rechnung (z.B. fremdes XML)
+# Keine Rechnung (keine_rechnung.py, Entscheidung Aaron 14.10.2026): Titel
+# traegt eine bekannte Nicht-Beleg-Beschriftung, keine Belegart, kein
+# QR-Zahlteil, kein Rechnungsnummer-/Summen-Label im Text -- wird aussortiert.
+KEINE_RECHNUNG = "keine_rechnung"
 
 # Anzeigetexte fuer die Oberflaeche
 STATUS_LABELS = {
@@ -62,6 +79,7 @@ STATUS_LABELS = {
     DEFERRED: "zurückgestellt – menschlich bearbeiten",
     SCAN: "Scan ohne Text",
     UNSUPPORTED: "nicht lesbar",
+    KEINE_RECHNUNG: "keine Rechnung – aussortiert",
 }
 
 # Woher die Feldwerte stammen (Result.extraction)
@@ -101,6 +119,11 @@ class Result:
     template_secured: bool = False
     billing_address_id: str | None = None
     billing_address_name: str | None = None
+    # Mandant aus dem Postfach (Entscheidung Aaron 15.10.2026), falls im Text
+    # selbst KEINE Rechnungsadresse erkannt wurde -- reiner gelber Vorschlag,
+    # nie automatisch uebernommen (siehe pipeline._mailbox_mandant_check).
+    billing_address_suggestion_id: str | None = None
+    billing_address_suggestion_name: str | None = None
     fields: dict[str, FieldResult] = field(default_factory=dict)
     line_items: list[dict] = field(default_factory=list)
     tax_breakdown: list[dict] = field(default_factory=list)
@@ -112,6 +135,9 @@ class Result:
     # KI-Vorschlaege, die NICHT im PDF-Text belegt waren (Feld -> Grund) --
     # verworfen, aber sichtbar, damit der Mensch weiss, was das Modell meinte.
     llm_rejected: dict[str, str] = field(default_factory=dict)
+    # Gegencheck (Postfach-Baustein 10): Feld -> {"vorlage", "ki"}, wo die
+    # unabhaengige KI-Lesung von der Vorlage abweicht -- im UI "unsicher".
+    gegencheck_abweichungen: dict[str, dict] = field(default_factory=dict)
     # Von der KI auf der Rechnung belegte Lieferantenangaben (semantic
     # _SUPPLIER_KEYS) -- nur Hinweis, nie Identitaet; dient dazu, den Namen
     # eines Lieferanten-Entwurfs zu fuellen (09.10.2026).
@@ -157,6 +183,15 @@ class Result:
     # Andere beschriftete Mail-Anhaenge derselben Mail, die an diesen Beleg
     # gehaengt sind (anlagen.py, Postfach-Baustein 8): [{dateiname, art}]
     anlagen: list[dict] = field(default_factory=list)
+    # Pflichtangaben-Pruefung (pflicht.py, Aaron 10.10.2026): reine
+    # Hinweis-Gruppe {regelwerk, punkte, fehlt}, nie ein Rueckstellgrund
+    pflichtangaben: dict | None = None
+    # Nicht-Rechnung (keine_rechnung.py, Entscheidung Aaron 14.10.2026):
+    # {"grund", "beschriftung"}, gesetzt nur bei status == KEINE_RECHNUNG
+    keine_rechnung: dict | None = None
+    # Rechnungstext fuer die Nachlauf-Pruefungen in ``process`` -- wird dort
+    # wieder geleert (nicht mit dem Ergebnis herumtragen)
+    _pruef_text: str = field(default="", repr=False)
 
     def to_dict(self) -> dict:
         return {
@@ -173,6 +208,8 @@ class Result:
             "template_secured": self.template_secured,
             "billing_address_id": self.billing_address_id,
             "billing_address_name": self.billing_address_name,
+            "billing_address_suggestion_id": self.billing_address_suggestion_id,
+            "billing_address_suggestion_name": self.billing_address_suggestion_name,
             "status": self.status,
             "status_label": STATUS_LABELS.get(self.status, self.status),
             "hold_reasons": self.hold_reasons,
@@ -183,6 +220,8 @@ class Result:
             "dublette": self.dublette,
             "qr": self.qr,
             "anlagen": self.anlagen,
+            "pflichtangaben": self.pflichtangaben,
+            "keine_rechnung": self.keine_rechnung,
             "duration_s": self.duration_s,
             "aborted": self.aborted,
             "stufenzeiten": self.stufenzeiten,
@@ -218,6 +257,20 @@ def extraction_text(doc) -> str:
     idx = ocr.partial_pages(len(doc.pages))
     if idx is None:
         return doc.text
+    return "\n".join(" ".join(w.text for w in doc.pages[i].words) for i in idx)
+
+
+# Positionsmodus "zusammenfassung" ohne Vorlage (Teil B, Entscheidung Aaron
+# 10.10.2026): die Uebersichtstabelle steht am Rechnungsende -- die KI soll
+# nicht alle Einzelpositionsseiten lesen, nur um am Schluss die paar
+# Summenzeilen zu finden (spart Laptop-Zeit bei 10+ Seiten).
+_ZUSAMMENFASSUNG_SCHLUSSSEITEN = 2
+
+
+def _schlussseiten_text(doc, n: int = _ZUSAMMENFASSUNG_SCHLUSSSEITEN) -> str:
+    if len(doc.pages) <= n:
+        return doc.text
+    idx = range(len(doc.pages) - n, len(doc.pages))
     return "\n".join(" ".join(w.text for w in doc.pages[i].words) for i in idx)
 
 
@@ -385,6 +438,20 @@ def _iban_master_check(supplier, invoice_ibans: set[str], fields: dict) -> Check
                  "ok" if seen else "keine IBAN auf der Rechnung -- Stammdaten-IBAN verwendet")
 
 
+def _setze_lieferantennummer(res, supplier, land: str | None) -> None:
+    """Lieferantennummer (Fremdsystem) fuer JobRouter. Hat der Lieferant je
+    Land eine eigene Nummer (verschmolzene DE/CH-Kreditoren, Stammdaten-
+    Import 16.10.2026), zaehlt die zum Beleg passende; ist das Land nicht
+    erkennbar, wird keine geraten -- stattdessen bleibt der Beleg beim
+    Menschen."""
+    nummer = supplier.external_id_fuer(land)
+    res.supplier_external_id = nummer or None
+    if not nummer and supplier.external_id_mehrdeutig:
+        res.hold_reasons.append(
+            "Lieferant hat je Land (DE/CH) eine eigene Lieferantennummer, das Land "
+            "des Belegs ist nicht erkennbar -- bitte Nummer pruefen")
+
+
 def _billing_check(text: str, store: Store, res: "Result") -> Check:
     """Rechnungsadresse eindeutig aus der Bibliothek? Setzt bei Treffer
     ``res.billing_address_*``, sonst einen Rueckstellgrund. Solange (noch)
@@ -400,6 +467,33 @@ def _billing_check(text: str, store: Store, res: "Result") -> Check:
     res.billing_address_id = hit[0].id
     res.billing_address_name = hit[0].name
     return Check("rechnungsadresse", True, hit[0].name)
+
+
+def _mailbox_mandant_check(res: "Result", store: Store) -> None:
+    """Mandant aus dem Postfach (Entscheidung Aaron 15.10.2026, mehrere
+    IONOS-Postfaecher, je Mandant eines): starker HINWEIS fuer den
+    Geschaeftsbereich, nie eine stille Entscheidung.
+
+    - Erkennt die Rechnung selbst (per Text, ``_billing_check`` oben)
+      eindeutig eine ANDERE Rechnungsadresse als die des Postfachs ->
+      zurueckstellen mit Grund (nicht raten, welche davon stimmt).
+    - Stimmen beide ueberein -> keine Aenderung (schon gruen).
+    - Keine Rechnungsadresse im Text erkannt -> der Postfach-Mandant wird
+      nur als GELBER VORSCHLAG angeboten (``billing_address_suggestion_*``),
+      NICHT automatisch als ``billing_address_id`` gesetzt."""
+    mandant_id = store.datei_mandant(res.sha256)
+    if not mandant_id:
+        return
+    mandant = store.address(mandant_id)
+    mandant_name = mandant.name if mandant else mandant_id
+    if res.billing_address_id:
+        if res.billing_address_id != mandant_id:
+            res.hold_reasons.append(
+                f"Postfach Mandant {mandant_name}, Rechnungsadresse "
+                f"{res.billing_address_name or res.billing_address_id} -- bitte entscheiden")
+    else:
+        res.billing_address_suggestion_id = mandant_id
+        res.billing_address_suggestion_name = mandant_name
 
 
 def _apply_hold(res: "Result") -> None:
@@ -461,7 +555,9 @@ def _draft_id_base(name: str, ustid: str, iban: str) -> str:
 
 
 def _unique_supplier_id(store: Store, base: str) -> str:
-    existing = {s.id for s in store.suppliers()}
+    from .dummy import DUMMY_ID
+
+    existing = {s.id for s in store.suppliers()} | {DUMMY_ID}
     if base not in existing:
         return base
     i = 2
@@ -557,7 +653,17 @@ def _auto_draft_pdf(res: "Result", doc, store: Store, use_llm: bool,
     belegt findet (``_enrich_draft``; semantic.py ``_SUPPLIER_KEYS``,
     Beleg-Pflicht dort schon eingebaut). Anschrift/Bank/BIC/Steuernummer/
     Kontakt kommen ebenso nachtraeglich aus der KI-Stufe (``_enrich_draft``),
-    nur belegte Teile -- ohne KI bleiben sie leer statt geraten."""
+    nur belegte Teile -- ohne KI bleiben sie leer statt geraten.
+
+    Schluessel/Platzhalter des Entwurfs (``_draft_id_base``/
+    ``_draft_placeholder_name``): erste USt-IdNr, sonst erste IBAN
+    (``neu-<kennung>``, "Unbekannt (<kennung>)"); steht beides nicht auf
+    der Rechnung, ``neu`` (bzw. ``neu-2`` ...) und "Unbekannt" -- so ein
+    Entwurf hat keine harte Kennung und kann ueber den Index nie weitere
+    Rechnungen an sich binden. Als USt-IdNr gelten nur echte Formate
+    (``textnorm.find_ustids``, streng seit 09.11.2026): eine BIC wie
+    COKSDE33XXX darf nie Schluessel werden, sonst buendelt ein Entwurf
+    Rechnungen aller Kunden derselben Sparkasse."""
     ids = extract_identifiers(doc)
     ibans = sorted(ids["ibans"] | find_ibans(doc.text))
     ustids = sorted(ids["ustids"])
@@ -697,7 +803,8 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
     muss wie jede andere Rechnung auch (§7b)."""
     timer = timer or StageTimer()
     res = Result(file=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                 extraction=EXTRACT_EINVOICE, einvoice=inv.to_dict())
+                 extraction=EXTRACT_EINVOICE, einvoice=inv.to_dict(),
+                 _pruef_text=_einvoice_pdf_text(path, inv))
     res.anlagen = anlagen.info(store, res.sha256)
 
     with timer.stage("lieferant"):
@@ -707,6 +814,7 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
         # Lieferanten gesucht, nie uebergreifend.
         pdf_text = _einvoice_pdf_text(path, inv)
         addr_check = _billing_check("\n".join([inv.kaeufer_name, pdf_text]), store, res)
+        _mailbox_mandant_check(res, store)
         has_addr = bool(store.addresses())
         candidates = kandidaten(store.suppliers(), res.billing_address_id, has_addr)
         match = identify_einvoice(inv, candidates)
@@ -717,7 +825,8 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
             supplier, res.match_score = match
             res.supplier_id = supplier.id
             res.supplier_name = supplier.name
-            res.supplier_external_id = supplier.external_id or None
+            _setze_lieferantennummer(
+                res, supplier, land_aus_kennungen([inv.verkaeufer_ustid], inv.verkaeufer_iban))
             if not supplier.bestaetigt:
                 res.hold_reasons.append(NEW_SUPPLIER_HOLD)
         else:
@@ -775,9 +884,11 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
 
     with timer.stage("pruefungen"):
         res.line_items = positionen.normalize_columns([dict(p) for p in inv.positionen])
+        _positionsmodus_vorbereiten(res, supplier)
         rk = rechnen.rechne(res.fields, res.line_items, pdf_text)
         res.fields, res.line_items, res.tax_breakdown = rk.fields, rk.line_items, rk.tax_breakdown
         res.hinweise.extend(g for g in rk.gruende if g not in res.hinweise)
+        _positionsmodus_abschliessen(res, supplier)
         pdf_check = _check_pdf_matches_xml(path, inv)
 
         def checks_for(fields):
@@ -790,6 +901,9 @@ def _process_einvoice(path: Path, inv, store: Store, timer: StageTimer | None = 
                 cs = _replace_check(cs, bc)
             for wc in waehrung.checks(fields, pdf_text):
                 cs = _replace_check(cs, wc)
+            for pc in plausi.checks(fields, supplier.id if supplier is not None else None,
+                                    store, res.sha256):
+                cs = _replace_check(cs, pc)
             return _replace_check(cs, _iban_master_check(supplier, invoice_ibans, fields)) + [addr_check]
 
         res.checks = checks_for(res.fields)
@@ -848,11 +962,49 @@ def _apply_line_item_correction(res: "Result", corrections: dict) -> None:
             [dict(it) for it in items if isinstance(it, dict)])
 
 
-def _llm_full(res: Result, doc) -> None:
+def _llm_full(res: Result, doc, positionsmodus: str = POSITIONSMODUS_EINZELN,
+              variante: str = semantic.VARIANTE_A, skip_items: bool = False) -> None:
     """Stufe 2: komplette KI-Extraktion, wenn es (noch) kein Template gibt.
     Fuellt nur, was nicht schon da ist -- Stammdaten aus dem gepflegten
-    Lieferanten-Datensatz (``library``) gewinnen gegen das Modell."""
-    full = semantic.extract_full(extraction_text(doc))
+    Lieferanten-Datensatz (``library``) gewinnen gegen das Modell.
+
+    Positionsmodus (Teil B, Entscheidung Aaron 10.10.2026): 'eine_position'
+    -- die KI liest ueberhaupt keine Einzelpositionen (die Positionen werden
+    stattdessen aus der USt-Aufstellung gebildet, ``positionen.aus_summen``
+    in ``_positionsmodus_post``). 'zusammenfassung' -- die Uebersichts-
+    tabelle steht am Rechnungsende, die KI bekommt nur die Schlussseiten
+    statt der ganzen (ggf. langen) Rechnung. ``skip_items``: Baustein 2 hat
+    die Positionen schon ohne KI gefunden -- gar nicht erst danach fragen
+    (kleinerer Prompt, schneller).
+
+    ``variante`` (Testsatz, Aaron 10.10.2026): A = eine Anfrage ueber die
+    ganze Rechnung (unten); B = Positionen als eigener kleiner Block
+    (SPEC Baustein 3, Schwerpunkt Aaron 12.10.2026), Kopf/Parteien wie A;
+    C = noch nicht gebaut (``semantic.pruefe_variante``)."""
+    v = semantic.pruefe_variante(variante)
+    text = (_schlussseiten_text(doc) if positionsmodus == POSITIONSMODUS_ZUSAMMENFASSUNG
+            else extraction_text(doc))
+    want_lines = positionsmodus != POSITIONSMODUS_EINE_POSITION and not skip_items
+    tbl_pages = (list(range(max(0, len(doc.pages) - _ZUSAMMENFASSUNG_SCHLUSSSEITEN), len(doc.pages)))
+                if positionsmodus == POSITIONSMODUS_ZUSAMMENFASSUNG else None)
+    excerpt = tabelle.tabelle_text(doc, pages=tbl_pages) if v == semantic.VARIANTE_B else ""
+    if v == semantic.VARIANTE_B and want_lines and excerpt:
+        # Positionen als eigener kleiner Block (Baustein 3) -- der grosse
+        # Prompt fragt dann gar nicht erst danach.
+        full = semantic.extract_full(text, want_line_items=False)
+        items, rejected = semantic.positions_block(excerpt, doc.text)
+        netto_fr = full.fields.get("netto")
+        netto_wert = _to_amount(netto_fr.value) if netto_fr else None
+        items, grund = semantic.positionen_plausibel(items, netto_wert)
+        if grund:
+            rejected["positionen"] = grund
+        full.line_items = items
+        full.rejected.update(rejected)
+    else:
+        # Kein Tabellenausschnitt gefunden (kein erkennbarer Tabellenkopf) --
+        # dann wie Variante A nach Positionen im Rundum-Prompt fragen, statt
+        # sie ganz entfallen zu lassen.
+        full = semantic.extract_full(text, want_line_items=want_lines)
     res.llm_rejected.update(full.rejected)
     res.ki_lieferant = {**(full.lieferant_details or {}), **(full.supplier or {})}
     res.ki_empfaenger = dict(full.empfaenger or {})
@@ -879,9 +1031,14 @@ def _gegencheck_active(tpl: Template, store: Store) -> bool:
     from . import modus
     from .config import gegencheck_autonom, gegencheck_min
 
-    if tpl.confirmations >= gegencheck_min():
-        return False
-    return gegencheck_autonom() if modus.is_autonomous(store) else True
+    from .config import gruendlich
+
+    if modus.is_autonomous(store):
+        return gegencheck_autonom() and (gruendlich() or tpl.confirmations < gegencheck_min())
+    # Lernphase: im gruendlichen Modus (Aaron 05.11.2026) wird die Vorlage
+    # IMMER gegen eine unabhaengige KI-Lesung gehalten, nicht nur bis zur
+    # fuenften Bestaetigung -- Abweichungen sind je Feld "unsicher".
+    return gruendlich() or tpl.confirmations < gegencheck_min()
 
 
 def _gegencheck_felder(tpl: Template, fields: dict) -> list[str]:
@@ -949,6 +1106,9 @@ def _gegencheck(res: "Result", doc, tpl: Template, store: Store, timer: StageTim
             continue
         if _gegencheck_mismatch(name, fr_vorlage.value, fr_ki.value):
             abweichungen.append(f"{name} (Vorlage: {fr_vorlage.value!r}, KI: {fr_ki.value!r})")
+            res.gegencheck_abweichungen[name] = {"vorlage": fr_vorlage.value, "ki": fr_ki.value}
+            # je Feld "unsicher": unter die Auto-Schwelle (rot im UI, Mensch entscheidet)
+            fr_vorlage.confidence = min(fr_vorlage.confidence, 0.5)
     if hat_positionen:
         vorlage_summe = round(sum(_item_total(it) or 0.0 for it in res.line_items), 2)
         fr_ki_netto = ki_fields.get("netto")
@@ -960,10 +1120,75 @@ def _gegencheck(res: "Result", doc, tpl: Template, store: Store, timer: StageTim
         res.hold_reasons.append("Gegencheck Vorlage/KI weicht ab: " + "; ".join(abweichungen))
 
 
+_TABELLENRANG_VERSION_RE = re.compile(r"__v(\d+)$")
+
+
+def _tabellenrang_version(tpl: Template) -> int:
+    m = _TABELLENRANG_VERSION_RE.search(tpl.id)
+    return int(m.group(1)) if m else 0
+
+
+def _eigene_tabellen_specs(store: Store, supplier_id: str) -> list[Template]:
+    """Alle Templates MIT Positionstabelle dieses Lieferanten, neueste
+    Version zuerst -- auch als veraltet markierte (SPEC Baustein 5:
+    "gelernte Spec dieses Lieferanten (neuere Rechnungen staerker, wegen
+    Layoutwechseln)"). Eine aktive (nicht veraltete) Vorlage haette
+    ``_pick_template`` schon ausgewaehlt -- landet hier also nur, wenn ALLE
+    Vorlagen dieses Lieferanten veraltet sind: besser eine frueher gelernte
+    Spec probieren als gleich auf Schluesselwoerter/KI zurueckzufallen."""
+    tpls = [t for t in store.templates_for(supplier_id) if t.line_items is not None]
+    return sorted(tpls, key=lambda t: (not t.stale, _tabellenrang_version(t)), reverse=True)
+
+
+def _tabelle_rangfolge(doc, supplier, store: Store, netto: float | None, brutto: float | None,
+                       text: str, pages: list[int] | None
+                       ) -> tuple[list[dict] | None, str]:
+    """Rangfolge der Positionstabellen-Erkennung bei einem Lieferanten ohne
+    aktives Template (SPEC Baustein 5, Aaron 12.10.2026, Grundsatz: "Wissen
+    ueber DENSELBEN Lieferanten wiegt staerker als uebertragenes"). EINE
+    Stelle statt verstreuter Sonderfaelle:
+
+        1. eigene (ggf. veraltete) Spec(s) dieses Lieferanten
+        2. Layout-Familie: Spec eines nach Kopf-Fingerprint aehnlichen
+           Lieferanten (``suggest.similar_suppliers`` -- derselbe
+           Mechanismus wie beim manuellen "Vorlage kopieren")
+        3. eingebaute Schluesselwoerter + globales Spaltenwoerterbuch
+           (``tabelle.extract``)
+
+    Jede Stufe nur, wenn die Rechen-Pruefung (Baustein 4, ``tabelle.
+    pruefe_kandidat``) nicht widerspricht -- sonst weiter zur naechsten,
+    nie geraten. -> (Positionen oder ``None``, Herkunfts-Hinweis fuers UI
+    als ``res.hinweise``-Eintrag, leer bei Stufe 3/kein Treffer -- der
+    normale, nicht extra erklaerungsbeduerftige Weg). Speichert nichts --
+    eine fremde Spec wird nie automatisch fuer einen Lieferanten
+    uebernommen (erst durch eine Bestaetigung, ``learn.learn_from_confirmed``)."""
+    if supplier is not None:
+        for tpl in _eigene_tabellen_specs(store, supplier.id):
+            kandidat = tabelle.pruefe_kandidat(apply_line_items(doc, tpl.line_items),
+                                               netto, brutto, text, quelle="tabelle_eigene_spec")
+            if kandidat:
+                return kandidat, f"Positionstabelle aus frueher gelernter Vorlage ({tpl.id})"
+
+    fp = extract_identifiers(doc)["fingerprint"]
+    exclude_id = supplier.id if supplier is not None else None
+    kandidaten_lieferanten = [s for s in store.suppliers() if s.id != exclude_id]
+    for s, _score in similar_suppliers(fp, kandidaten_lieferanten):
+        for tpl in _eigene_tabellen_specs(store, s.id):
+            kandidat = tabelle.pruefe_kandidat(apply_line_items(doc, tpl.line_items),
+                                               netto, brutto, text, quelle="tabelle_layout_familie")
+            if kandidat:
+                return kandidat, (f"Positionstabelle wie bei Lieferant {s.name or s.id} erkannt "
+                                  f"(Vorschlag, noch nicht gespeichert)")
+
+    return tabelle.extract(doc, netto=netto, brutto=brutto, text=text, pages=pages,
+                           woerterbuch=store.spaltenwoerter()), ""
+
+
 def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
                         extra_checks: list[Check] | None = None,
                         timer: StageTimer | None = None,
-                        qr: "swissqr.SwissQR | None" = None) -> None:
+                        qr: "swissqr.SwissQR | None" = None,
+                        variante: str = semantic.VARIANTE_A) -> None:
     """Rechnung ohne Template (Lieferant unbekannt oder noch nicht angelernt):
     optional KI-Extraktion (Stufe 2), Korrekturen einmischen und, sobald Werte
     da sind, pruefen. Damit kann ein Mensch die Werte (KI-Vorschlag oder
@@ -974,14 +1199,40 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
     gedeckelt)."""
     timer = timer or StageTimer()
     extra = list(extra_checks or [])
+    modus = _positionsmodus(supplier)
+    # SPEC Effizienz-Baustein 2 (Schwerpunkt Aaron 12.10.2026): die
+    # Positionstabelle zuerst OHNE KI aus dem Wort-Layout versuchen -- noch
+    # ohne Netto/Brutto (die kommen erst aus ``rechnen.rechne`` unten), also
+    # greift hier nur die Zeilen-Mathematik (menge * einzelpreis ≈ gesamt),
+    # nicht die Summenpruefung. Gelingt das, fragt die KI unten erst gar
+    # nicht mehr nach Positionen (``skip_items``).
+    tbl_pages = (list(range(max(0, len(doc.pages) - _ZUSAMMENFASSUNG_SCHLUSSSEITEN),
+                            len(doc.pages)))
+                if modus == POSITIONSMODUS_ZUSAMMENFASSUNG else None)
+    # SPEC Baustein 5 (Aaron 12.10.2026): Rangfolge statt nur eingebauter
+    # Schluesselwoerter -- eigene (ggf. veraltete) Spec dieses Lieferanten
+    # vor Layout-Familie vor Schluesselwoerter/-woerterbuch.
+    tbl_items, tbl_herkunft = (_tabelle_rangfolge(doc, supplier, store, None, None, doc.text,
+                                                  tbl_pages)
+                               if modus != POSITIONSMODUS_EINE_POSITION else (None, ""))
+    if tbl_items:
+        res.line_items = positionen.normalize_columns(tbl_items)
+        if tbl_herkunft:
+            res.hinweise.append(tbl_herkunft)
     if use_llm:
         with timer.stage("ki"):
-            _llm_full(res, doc)
+            _llm_full(res, doc, modus, variante, skip_items=bool(tbl_items))
+    if tbl_items:
+        # Deterministisch gefundene Tabelle gewinnt gegen einen KI-Vorschlag
+        # (der bei ``skip_items`` ohnehin nicht mehr erfragt wurde).
+        res.line_items = positionen.normalize_columns(tbl_items)
     machine = dict(res.fields)
     corrections = store.corrections(doc.sha256)
     _apply_corrections(res.fields, corrections)
     machine_items = res.line_items
     _apply_line_item_correction(res, corrections)
+    manuell_korrigiert = POSITIONEN_KEY in corrections
+    _positionsmodus_vorbereiten(res, supplier, manuell_korrigiert)
     # Faelligkeit/Skonto per Textregel -- nach den Korrekturen, damit eine
     # relative Frist ein vom Menschen eingetragenes Rechnungsdatum nutzt
     zahlung.apply(res.fields, doc.text, res.hinweise)
@@ -1006,6 +1257,25 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
         rk = rechnen.rechne(res.fields, res.line_items, doc.text)
         res.fields, res.line_items, res.tax_breakdown = rk.fields, rk.line_items, rk.tax_breakdown
         res.hinweise.extend(g for g in rk.gruende if g not in res.hinweise)
+        # Baustein 2, zweiter Versuch: jetzt sind Netto/Brutto bekannt (ohne
+        # KI, aus ``rechnen.rechne``/``summen.py``) -- eine Tabelle, die beim
+        # ersten Versuch nur an der fehlenden Summenpruefung scheiterte (z.B.
+        # keine Mengen-Spalte), noch einmal pruefen, bevor die Rechnung ohne
+        # Positionen bleibt.
+        if (not manuell_korrigiert and not res.line_items
+                and modus != POSITIONSMODUS_EINE_POSITION):
+            netto_fr, brutto_fr = res.fields.get("netto"), res.fields.get("brutto")
+            retry, retry_herkunft = _tabelle_rangfolge(
+                doc, supplier, store, _to_amount(netto_fr.value) if netto_fr else None,
+                _to_amount(brutto_fr.value) if brutto_fr else None, doc.text, tbl_pages)
+            if retry:
+                rk2 = rechnen.rechne(res.fields, positionen.normalize_columns(retry), doc.text)
+                res.fields, res.line_items, res.tax_breakdown = (
+                    rk2.fields, rk2.line_items, rk2.tax_breakdown)
+                res.hinweise.extend(g for g in rk2.gruende if g not in res.hinweise)
+                if retry_herkunft and retry_herkunft not in res.hinweise:
+                    res.hinweise.append(retry_herkunft)
+        _positionsmodus_abschliessen(res, supplier, manuell_korrigiert)
         res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, extra, qr)
         _set_dublette(res, store, doc)
 
@@ -1036,6 +1306,9 @@ def _all_checks(fields, supplier, store: Store, line_items, doc,
         checks = _replace_check(checks, wc)
     for qc in swissqr.checks(fields, qr, supplier):
         checks = _replace_check(checks, qc)
+    for pc in plausi.checks(fields, supplier.id if supplier is not None else None, store,
+                            doc.sha256):
+        checks = _replace_check(checks, pc)
     checks = [_credit_check(c, fields) for c in checks]
     return checks + list(extra or [])
 
@@ -1058,15 +1331,127 @@ def _set_dublette(res: "Result", store: Store, doc=None, text: str = "") -> None
                                        doc, text)[1]
 
 
+# ---- Positionsmodus je Lieferant (Teil B, Entscheidung Aaron 10.10.2026) --
+# Wie in Abbyy entscheidet die bearbeitende Person beim Pruefen einer
+# Rechnung, wie die Positionstabelle dieses Lieferanten zu lesen ist
+# (Supplier.positionsmodus) -- Normalfall "einzeln" (unveraendertes
+# Verhalten). "zusammenfassung": die ohnehin gelesene/gelernte
+# Positionstabelle IST die Uebersichtstabelle am Rechnungsende -- dafuer
+# muss hier nichts Besonderes passieren, nur die KI (ohne Vorlage) bekommt
+# gezielt nur die Schlussseiten (siehe ``_llm_full``). "eine_position":
+# die Positionen werden IMMER aus der USt-Aufstellung gebildet -- nie aus
+# gelesenen Einzelpositionen (weder Vorlage noch KI noch E-Rechnung).
+
+def _positionsmodus(supplier: Supplier | None) -> str:
+    return supplier.positionsmodus if supplier is not None else POSITIONSMODUS_EINZELN
+
+
+def _positionsmodus_vorbereiten(res: "Result", supplier: Supplier | None,
+                                manuell_korrigiert: bool = False) -> None:
+    """Vor ``rechnen.rechne``: im Modus 'eine_position' nie gelesene
+    Einzelpositionen verwenden -- die USt-Aufstellung wird dann aus den
+    Kopf-Feldern hergeleitet, nicht aus (in diesem Modus gar nicht erst
+    gelesenen bzw. u.U. veralteten) Positionszeilen. Eine manuelle
+    Korrektur der Positionstabelle fuer GENAU diese Rechnung gewinnt
+    trotzdem immer (wie jede andere Korrektur im Programm)."""
+    if not manuell_korrigiert and _positionsmodus(supplier) == POSITIONSMODUS_EINE_POSITION:
+        res.line_items = []
+
+
+def _positionsmodus_abschliessen(res: "Result", supplier: Supplier | None,
+                                 manuell_korrigiert: bool = False) -> None:
+    """Nach ``rechnen.rechne``: im Modus 'eine_position' die Positionen aus
+    der (jetzt vollstaendigen) USt-Aufstellung bilden -- eine Zeile je
+    Steuersatz, nie zusammengefasst (``positionen.aus_summen``,
+    Entscheidung Aaron 10.10.2026, Punkt 1)."""
+    if manuell_korrigiert or _positionsmodus(supplier) != POSITIONSMODUS_EINE_POSITION:
+        return
+    waehrung_fr = res.fields.get("waehrung")
+    currency = waehrung_fr.value if waehrung_fr and waehrung_fr.value else None
+    res.line_items = positionen.aus_summen(res.tax_breakdown, supplier.positionsbezeichnung,
+                                           currency)
+
+
+# Dezenter Vorschlag (nie automatisch umstellen, Normalfall bleibt
+# "einzeln"): ab wann gilt ein Beleg als "lang genug", um auf die anderen
+# Modi hinzuweisen.
+_LANGER_BELEG_SEITEN = 5
+_LANGER_BELEG_POSITIONEN = 20
+_LANGER_BELEG_HINWEIS = ('Langer Beleg -- evtl. Positionsmodus "eine Position je Steuersatz" '
+                         'oder "Zusammenfassung"? (Lieferanten-Reiter bzw. beim Pruefen oben '
+                         'bei "Positionsdaten")')
+
+
+def _positionsmodus_hinweis(res: "Result", supplier: Supplier | None) -> None:
+    """Nur ein Hinweis fuer den Menschen (Teil B) -- wenn der Lieferant den
+    Positionsmodus noch nie bewusst gesetzt hat (``positionsmodus_gesetzt``)
+    UND der Beleg sehr lang ist bzw. sehr viele Positionen hat. Niemals
+    automatisch umstellen."""
+    if supplier is not None and supplier.positionsmodus_gesetzt:
+        return
+    if (res.seiten >= _LANGER_BELEG_SEITEN
+            or len(res.line_items) >= _LANGER_BELEG_POSITIONEN):
+        if _LANGER_BELEG_HINWEIS not in res.hinweise:
+            res.hinweise.append(_LANGER_BELEG_HINWEIS)
+
+
+def _qualitaet(res: Result, store: Store) -> None:
+    """Nachlauf fuer jedes Ergebnis (Aaron 10.10.2026), blockiert nichts:
+    Leistungsdatum per Textregel, gelbe Hinweise aus dem Lieferanten-
+    Gedaechtnis/Datum (plausi.py) und die Pflichtangaben-Gruppe
+    (pflicht.py)."""
+    text, res._pruef_text = res._pruef_text, ""
+    if res.aborted:
+        return
+    if res.fields:
+        pflicht.apply_leistungsdatum(res.fields, text)
+    neu = plausi.hinweise(res.fields, res.line_items, res.supplier_id, store, res.sha256)
+    res.pflichtangaben = pflicht.pruefen(res, text, store)
+    if (h := pflicht.hinweis_text(res.pflichtangaben)):
+        neu.append(h)
+    for h in neu:
+        if h not in res.hinweise:
+            res.hinweise.append(h)
+
+
 def process(path: str | Path, store: Store, use_llm: bool = True,
-           create_draft_supplier: bool = False) -> Result:
+            create_draft_supplier: bool = False,
+            variante: str | None = None) -> Result:
+    """Eine Rechnung verarbeiten (``_process``) und danach die Qualitaets-
+    Hinweise anhaengen (Lieferanten-Gedaechtnis, Datum) -- an einer Stelle
+    statt an jedem der vielen Ausgaenge von ``_process``.
+
+    ``variante``: ``None`` (Standard) nimmt ``config.ki_variante()``
+    (``RECHNUNG_KI_VARIANTE``, Aaron 12.10.2026) -- so schaltet die echte
+    Verarbeitung (Postfach/Web-UI) ohne Code-Aenderung zwischen A und B,
+    sobald B gemessen und freigegeben ist; ein expliziter Wert (Testsatz)
+    ueberschreibt das."""
+    from .config import ki_variante
+
+    res = _process(path, store, use_llm=use_llm, create_draft_supplier=create_draft_supplier,
+                   variante=variante if variante is not None else ki_variante())
+    try:
+        _qualitaet(res, store)
+    except Exception as e:  # noqa: BLE001 -- reine Hinweise duerfen nie die Verarbeitung kippen
+        res.hinweise.append(f"Qualitaetshinweise nicht verfuegbar ({type(e).__name__}: {e})")
+    return res
+
+
+def _process(path: str | Path, store: Store, use_llm: bool = True,
+             create_draft_supplier: bool = False,
+             variante: str = semantic.VARIANTE_A) -> Result:
     """``create_draft_supplier`` (Standard ``False``): legt bei einem nicht
     erkannten Lieferanten einen Entwurf an (``Supplier.bestaetigt=False``,
     Entscheidung Aaron 09.10.2026) -- nur in der echten Verarbeitung
     (``scan_folder``/CLI ``rechnung scan``/Web-UI ``/api/scan``), NIE im
     Trockenlauf/Vorschau (``/api/invoice``-Anzeige, ``messen``,
     ``vorlernen``) -- deshalb ein expliziter Parameter statt eines
-    Seiteneffekts, den jeder Aufrufer woertlich entscheiden muss."""
+    Seiteneffekts, den jeder Aufrufer woertlich entscheiden muss.
+
+    ``variante``: Extraktionsvariante fuer den KI-Teil (Testsatz-Vergleich
+    A/B/C, Aaron 10.10.2026) -- unbekannt/nicht gebaut = Fehler, bevor
+    irgendetwas gelesen wird."""
+    variante = semantic.pruefe_variante(variante)
     path = Path(path)
     timer = StageTimer()
     # Passwortgeschuetztes PDF: nichts lesbar, nichts zu raten -> Mensch.
@@ -1102,13 +1487,23 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
         _apply_hold(res)
         res.stufenzeiten = timer.times
         return res
-    res = Result(file=str(path), sha256=doc.sha256, seiten=len(doc.pages))
+    res = Result(file=str(path), sha256=doc.sha256, seiten=len(doc.pages), _pruef_text=doc.text)
 
     # Swiss QR-Rechnung (Postfach-Baustein 7): nur rendern/dekodieren, wenn
     # der Text ueberhaupt danach aussieht (Label "Zahlteil"/"QR-IBAN" etc.)
     # -- teures Seiten-Rendern nicht bei jeder gewoehnlichen Rechnung.
     qr_obj = swissqr.read(path) if swissqr.likely(doc.text) else None
     res.qr = qr_obj.to_dict() if qr_obj else None
+
+    # Nicht-Rechnung aussortieren (keine_rechnung.py, Entscheidung Aaron
+    # 14.10.2026): rein woertliche Regel, laeuft vor Lieferant/Vorlage/KI --
+    # fuer ein Dokument ohne jedes Beleg-Merkmal lohnt sich das ohnehin nicht.
+    kr = keine_rechnung.pruefe_pipeline(doc, qr_obj)
+    if kr is not None:
+        res.keine_rechnung = kr
+        res.status = KEINE_RECHNUNG
+        res.stufenzeiten = timer.times
+        return res
 
     # Andere beschriftete Anhaenge derselben Mail (anlagen.py, Postfach-
     # Baustein 8), falls beim Postfach-Abholen welche an diesen Beleg
@@ -1137,26 +1532,48 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
     # dazu passende Kandidatenmenge des Index mitgegeben).
     with timer.stage("lieferant"):
         addr_check = _billing_check(doc.text, store, res)
-        has_addr = bool(store.addresses())
+        _mailbox_mandant_check(res, store)
+        adressen = store.addresses()
+        has_addr = bool(adressen)
+        empfaenger = _empfaenger_namen(adressen)
         match, why = identify_with_reason(
             doc, store.suppliers(), index=store.supplier_index(res.billing_address_id),
             address_id=res.billing_address_id, has_addresses=has_addr,
-            address_name=res.billing_address_name or "")
+            address_name=res.billing_address_name or "",
+            einzelkandidat_namensschwelle=_namenserkennung(), empfaenger=empfaenger)
         if not match and create_draft_supplier:
             match = _auto_draft_pdf(res, doc, store, use_llm, timer)
     if not match:
         res.hold_reasons.insert(0, f"Lieferant: {why}")
-        _finish_untemplated(res, doc, None, store, use_llm, [addr_check], timer, qr_obj)
+        _finish_untemplated(res, doc, None, store, use_llm, [addr_check], timer, qr_obj,
+                            variante)
         _ocr_adjust(res, o)
         _apply_hold(res)
+        _positionsmodus_hinweis(res, None)
         res.stufenzeiten = timer.times
         return res
 
     supplier, score = match
     res.supplier_id = supplier.id
     res.supplier_name = supplier.name
-    res.supplier_external_id = supplier.external_id or None
+    _setze_lieferantennummer(res, supplier, land_aus_beleg_text(supplier, doc.text))
     res.match_score = score
+    if score < 0.5:
+        # Nur der Name hat gepasst (identify.py, Namens-Erkennung): der
+        # Mensch soll das beim Bestaetigen sehen. USt-IdNr/IBAN werden dabei
+        # NICHT automatisch an den Lieferanten uebernommen (Stammdaten pflegt
+        # ein Mensch im Reiter Lieferanten) -- bis dahin bleibt es bei der
+        # Erkennung ueber den Namen.
+        res.hinweise.append(NAME_HINWEIS)
+    if not supplier.bestaetigt and _namenserkennung() is not None:
+        # Entwurf "Unbekannt (DE...)" ueber USt-IdNr/IBAN getroffen, aber der
+        # Name GENAU EINES bestaetigten Lieferanten (Excel-Import ohne
+        # Kennungen) steht auf der Rechnung: dem Menschen sagen, welcher
+        # gemeint ist. Stammdaten entscheidet weiter der Mensch.
+        treffer = _namenstreffer([s for s in store.suppliers() if s.bestaetigt],
+                                 norm(doc.text), empfaenger)
+        if len(treffer) == 1:
+            res.hinweise.append(ENTWURF_HINWEIS.format(name=treffer[0].name))
     if not supplier.bestaetigt:
         # Entwurf (frisch angelegt oder ein vorhandener, noch nicht
         # bestaetigter) -- die Extraktion laeuft normal weiter, die Rechnung
@@ -1175,11 +1592,13 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
     if tpl is None:
         res.status = NO_TEMPLATE
         _inject_library_fields(res.fields, supplier)
-        _finish_untemplated(res, doc, supplier, store, use_llm, [addr_check], timer, qr_obj)
+        _finish_untemplated(res, doc, supplier, store, use_llm, [addr_check], timer, qr_obj,
+                            variante)
         if create_draft_supplier:
             _enrich_draft(res, supplier, store)
         _ocr_adjust(res, o)
         _apply_hold(res)
+        _positionsmodus_hinweis(res, supplier)
         res.stufenzeiten = timer.times
         return res
 
@@ -1230,7 +1649,13 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
     waehrung.apply(res.fields, doc.text, res.hinweise)
     swissqr.apply(res.fields, qr_obj, res.hinweise)
 
-    if tpl.line_items and o is not None and o.partial:
+    modus = _positionsmodus(supplier)
+    if modus == POSITIONSMODUS_EINE_POSITION:
+        # Positionen werden IMMER aus der USt-Aufstellung gebildet -- eine
+        # dafuer angelernte Vorlagen-Positionstabelle wird (sollte es
+        # ausnahmsweise eine geben) in diesem Modus nicht angewendet.
+        pass
+    elif tpl.line_items and o is not None and o.partial:
         # Langer Scan, Positionsseiten noch ohne Texterkennung: keine halbe
         # Tabelle lesen (die Positionssumme waere falsch rot) -- die Positionen
         # kommen, sobald complete_pending den Rest erkannt hat.
@@ -1240,8 +1665,20 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
         with timer.stage("vorlage"):
             res.line_items = positionen.normalize_columns(apply_line_items(doc, tpl.line_items))
         _suggest_categories(res.line_items, tpl, store)
+    elif o is None or not o.partial:
+        # Vorlage ohne Positionstabelle (beim Lernen "nicht reproduzierbar",
+        # Normalfall nach der ersten Rechnung): dieselbe Erkennung wie ohne
+        # Vorlage versuchen, statt dauerhaft ohne Positionen zu bleiben
+        # (Befund Aaron 05.11.2026). Zweiter Versuch mit Netto/Brutto unten.
+        tbl_items, tbl_herkunft = _tabelle_rangfolge(doc, supplier, store, None, None, doc.text, None)
+        if tbl_items:
+            res.line_items = positionen.normalize_columns(tbl_items)
+            if tbl_herkunft:
+                res.hinweise.append(tbl_herkunft)
     machine_items = res.line_items
     _apply_line_item_correction(res, corrections)
+    manuell_korrigiert = POSITIONEN_KEY in corrections
+    _positionsmodus_vorbereiten(res, supplier, manuell_korrigiert)
 
     _gegencheck(res, doc, tpl, store, timer, use_llm)
 
@@ -1249,6 +1686,22 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
         rk = rechnen.rechne(res.fields, res.line_items, doc.text)
         res.fields, res.line_items, res.tax_breakdown = rk.fields, rk.line_items, rk.tax_breakdown
         res.hinweise.extend(g for g in rk.gruende if g not in res.hinweise)
+        if (not res.line_items and not tpl.line_items and not manuell_korrigiert
+                and modus != POSITIONSMODUS_EINE_POSITION and (o is None or not o.partial)):
+            # wie ohne Vorlage: Tabelle, die nur an der fehlenden Summenpruefung
+            # scheiterte, mit jetzt bekanntem Netto/Brutto noch einmal pruefen
+            netto_fr, brutto_fr = res.fields.get("netto"), res.fields.get("brutto")
+            retry, retry_herkunft = _tabelle_rangfolge(
+                doc, supplier, store, _to_amount(netto_fr.value) if netto_fr else None,
+                _to_amount(brutto_fr.value) if brutto_fr else None, doc.text, None)
+            if retry:
+                rk2 = rechnen.rechne(res.fields, positionen.normalize_columns(retry), doc.text)
+                res.fields, res.line_items, res.tax_breakdown = (
+                    rk2.fields, rk2.line_items, rk2.tax_breakdown)
+                res.hinweise.extend(g for g in rk2.gruende if g not in res.hinweise)
+                if retry_herkunft and retry_herkunft not in res.hinweise:
+                    res.hinweise.append(retry_herkunft)
+        _positionsmodus_abschliessen(res, supplier, manuell_korrigiert)
 
         res.checks = _all_checks(res.fields, supplier, store, res.line_items, doc, [addr_check],
                                  qr_obj)
@@ -1269,6 +1722,7 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
     res.status = AUTO if (tpl.secured and checks_ok and conf_ok) else REVIEW
     _ocr_adjust(res, o)
     _apply_hold(res)
+    _positionsmodus_hinweis(res, supplier)
     res.stufenzeiten = timer.times
     return res
 
@@ -1348,6 +1802,9 @@ def dispatch(res: Result, store: Store) -> dict:
 
     if res.sha256 and store.seen_sha(res.sha256):
         out = {"aktion": "bereits_uebernommen"}
+    elif res.status == KEINE_RECHNUNG:
+        rec = keine_rechnung.ablegen_pipeline(store, res)
+        out = {"aktion": "keine_rechnung", "grund": res.keine_rechnung, "abgelegt": rec}
     elif gruende := human.gruende(res):
         human.ablegen(store, res, gruende)
         out = {"aktion": "mensch", "gruende": gruende}
@@ -1382,7 +1839,8 @@ def _fv(fields: dict, key: str):
 
 
 def finalize(res: Result, store: Store, *, operator: str | None = None,
-             to_jobrouter: bool = True, autonomous: bool = False) -> dict:
+             to_jobrouter: bool = True, autonomous: bool = False,
+             als_dummy: bool = False) -> dict:
     """Eine geprüfte Rechnung in die Bücher übernehmen.
 
     1. Original unverändert archivieren (``data/archive/<sha>.pdf|.xml`` – GoBD;
@@ -1401,6 +1859,11 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
     sind nur noch Konfidenz-Signale, keine Freigabe fürs automatische
     Durchlaufen; ohne Bestätigung wird nichts archiviert, geloggt oder an
     JobRouter eingereiht.
+
+    ``als_dummy=True`` (Senden ohne bestaetigten Lieferanten, dummy.py): im
+    JobRouter-Datensatz steht der Dummy-Lieferant, die erkannten echten Daten
+    gehen als ``erkannter_lieferant`` mit. Journal/Audit behalten den internen
+    Entwurf (Dubletten, Lernen).
 
     Einzige Ausnahme: ``autonomous=True`` im Betriebsmodus ``autonom``
     (modus.py, SPEC §7v) UND die Rechnung ist sicher (``human.gruende``
@@ -1422,6 +1885,19 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
     op = operator or _operator()
     payload = res.to_dict()
     payload["freigabe"] = freigabe
+    # Unveraenderliche Stammdaten aus der Bibliothek mitgeben (stammdaten.py)
+    from . import stammdaten
+    payload["stammdaten"] = stammdaten.fuer_rechnung(store, res)
+    if als_dummy:
+        from . import dummy
+        dsup = dummy.sicherstellen(store)
+        erkannt = dummy.erkannter_lieferant(store, res)
+        payload["lieferant_ist_dummy"] = True
+        payload["erkannter_lieferant"] = erkannt
+        payload["bemerkung"] = dummy.bemerkung(erkannt)
+        payload["supplier_id"], payload["supplier_name"] = dsup.id, dsup.name
+        payload["supplier_external_id"] = dsup.external_id or None
+        payload["stammdaten"]["lieferant"] = stammdaten.lieferant(dsup)
     already = store.seen_sha_template(res.sha256, res.template_id)
 
     store.archive_pdf(res.file, res.sha256)
@@ -1435,6 +1911,7 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
             "billing_address_name": res.billing_address_name,
             "status": res.status,
             "freigabe": freigabe,
+            "als_dummy": als_dummy,
             "sammel": res.sammel,
             "rechnungsnummer": _fv(res.fields, "rechnungsnummer"),
             "rechnungsdatum": _fv(res.fields, "rechnungsdatum"),
@@ -1470,7 +1947,9 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
     queued = None
     if to_jobrouter:
         cfg = _jr_cfg()
-        if (not cfg.allow_status) or res.status in cfg.allow_status:
+        # Vom Menschen gepruefte und freigegebene Rechnung ("Senden", Aaron
+        # 11.10.2026) geht unabhaengig vom Konfidenz-Status raus.
+        if freigabe == "mensch" or (not cfg.allow_status) or res.status in cfg.allow_status:
             q = jobrouter.enqueue(store.root, payload)
             queued = str(q) if q else None
     return {"finalized": True, "already": already, "queued": queued,
@@ -1606,3 +2085,33 @@ def discard_supplier(store: Store, supplier_id: str, operator: str = "") -> None
     op = operator or _op()
     store.audit("lieferant_verworfen", {"id": supplier_id, "name": sup.name}, op)
     eventlog.record_supplier(store, supplier_id, sup.name, "verworfen", op)
+
+
+# ---- Positionsmodus setzen (Training-UI, Gruppe "Positionsdaten" bzw.
+# Reiter "Lieferanten") -- Teil B, Entscheidung Aaron 10.10.2026 ----------
+def set_positionsmodus(store: Store, supplier_id: str, modus: str,
+                       bezeichnung: str = "", operator: str = "") -> Supplier:
+    """Positionsmodus eines Lieferanten setzen -- wie in Abbyy die
+    Entscheidung der bearbeitenden Person beim Pruefen einer Rechnung
+    (keine Stammdaten-Rechte noetig). Gilt danach fuer alle Rechnungen
+    dieses Lieferanten, bleibt aber jederzeit aenderbar. ``bezeichnung``
+    wird nur bei 'eine_position' gespeichert (sonst verworfen, damit ein
+    spaeterer Wechsel zurueck zu 'eine_position' nicht eine laengst
+    irrelevante alte Bezeichnung wieder auftauchen laesst)."""
+    from .config import operator as _op
+
+    if modus not in POSITIONSMODI:
+        raise ValueError(f"Unbekannter Positionsmodus {modus!r} (erlaubt: {', '.join(POSITIONSMODI)})")
+    sup = store.supplier(supplier_id)
+    if sup is None:
+        raise ValueError(f"Lieferant {supplier_id!r} nicht gefunden")
+    sup.positionsmodus = modus
+    sup.positionsbezeichnung = bezeichnung.strip() if modus == POSITIONSMODUS_EINE_POSITION else ""
+    sup.positionsmodus_gesetzt = True
+    store.save_supplier(sup)
+    op = operator or _op()
+    store.audit("lieferant_positionsmodus", {
+        "id": supplier_id, "name": sup.name, "modus": modus,
+        "bezeichnung": sup.positionsbezeichnung,
+    }, op)
+    return sup

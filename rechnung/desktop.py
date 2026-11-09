@@ -43,6 +43,15 @@ def run(store: Store, samples: Path, port: int = 8000,
     from .web.server import create_app
 
     app = create_app(store, Path(samples))
+    # Zwischenspeicher fuer den Excel-Import (Befund Aaron 16.10.2026: eingelesene
+    # Listen waren nach dem Schliessen weg). Faellt er aus, startet das Programm
+    # trotzdem -- die Excel-Seite arbeitet dann wie bisher ohne Zwischenstand.
+    try:
+        from .stammdaten_entwurf import registrieren as entwurf_registrieren
+
+        entwurf_registrieren(app, store)
+    except Exception as e:  # noqa: BLE001
+        print(f"Hinweis: Zwischenspeicher fuer den Excel-Import nicht verfuegbar ({e})")
     # Belegt ein alter, haengengebliebener Prozess den Port, wuerde sich das
     # Fenster sonst still mit DESSEN (altem) Stand verbinden -- Befund Aaron
     # 09.10.2026: Update installiert, Oberflaeche trotzdem alt. Dann lieber
@@ -62,8 +71,14 @@ def run(store: Store, samples: Path, port: int = 8000,
         raise SystemExit(f"Programm-Server startete nicht (Port {port}).")
 
     # maximiert: 1360x900 ist auf einem Laptop mit Skalierung groesser als der Bildschirm
+    # text_select=True (Korrektur 16.10.2026 -- Befund Aaron: Text liess sich nicht
+    # markieren/kopieren): pywebview blendet Textmarkierung standardmaessig per
+    # eigenem CSS komplett aus (webview/js/customize.js, "user-select: none"),
+    # UNABHAENGIG vom debug-Modus -- der erste Versuch mit debug=True war daher der
+    # falsche Hebel und hat nur ungewollt das DevTools-Fenster beim Start mitgeoeffnet.
+    # Zurueckgenommen, stattdessen der dafuer vorgesehene Schalter.
     webview.create_window(title, f"http://127.0.0.1:{port}", width=1360, height=900,
-                          maximized=True)
+                          maximized=True, text_select=True)
     webview.start()
 
     server.should_exit = True

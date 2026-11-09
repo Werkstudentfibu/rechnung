@@ -14,8 +14,15 @@ for _k in [k for k in os.environ if k.startswith("RECHNUNG_")]:
 # Die bestehenden Tests pruefen den vollen Feldumfang; das Ausblenden einzelner
 # Felder (Standard im Einsatz) testet tests/test_felder_aus.py gezielt.
 os.environ["RECHNUNG_FELDER_AUS"] = ""
+# Die bestehenden Tests pruefen das schnelle Standardverhalten; den Modus
+# "gruendlich" (Standard im Einsatz) testet tests/test_gruendlich.py gezielt.
+os.environ["RECHNUNG_GRUENDLICH"] = "0"
 # Keine Hintergrund-Vorverarbeitung in Tests (nebenlaeufige KI-Mocks)
 os.environ["RECHNUNG_VORVERARBEITUNG"] = "0"
+# Keine echte Postfach-Abholung im Hintergrund (abholung.fuer_app laeuft in
+# jeder App; ein Anstoss nach einem Postfach-Import wuerde sonst echte IMAP-
+# Server anfragen). Tests mit Abholer geben die Minuten selbst vor.
+os.environ["RECHNUNG_IMAP_POLL_MINUTES"] = "0"
 
 import pytest
 from reportlab.lib.pagesizes import A4

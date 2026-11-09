@@ -40,3 +40,7 @@ packages = ["rechnung"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Eigener Temp-Ordner im Klon statt %TEMP%\pytest-of-<user>: auf dem Laptop
+# war dort "pytest-current" nicht mehr lesbar (WinError 5) -- jeder Testlauf
+# beim Selbst-Update scheiterte und rollte das Update zurueck (02.11.2026).
+addopts = "--basetemp=.pytest-tmp"

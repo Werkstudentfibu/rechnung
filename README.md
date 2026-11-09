@@ -37,6 +37,8 @@ rechnung messen <ordner> [--json]    # Stufenzeiten je Rechnung messen (Trockenl
 rechnung vorlernen <ordner>          # Altbestand gruppieren, Vorlagen-Vorschlaege anlegen
 rechnung vorlernen                   # Vorlernen-Gruppen auflisten
 rechnung vorlernen --bestaetigen GRUPPE --operator NAME   # Vorlage einer Gruppe aktivieren
+rechnung testsatz [--json] [--lieferant X] [--variante A] [--ohne-ki]   # bestaetigte Rechnungen neu lesen + messen
+rechnung fehlerstatistik [--json]          # welche Felder bei welchen Lieferanten wie oft korrigiert werden
 ```
 
 `app` und `web` sind dieselbe Oberfläche (gleicher FastAPI-Code) – `app`
@@ -215,6 +217,23 @@ mit Audit-/Ereigniseintrag. Ein unbestätigter Entwurf verdrängt nie einen
 bereits bestätigten Lieferanten; zeigen USt-IdNr/IBAN auf einen bestätigten
 UND einen unbestätigten Lieferanten, ist das ein Widerspruch → Mensch.
 
+**Entwurf in bestehenden Lieferanten übernehmen** (Aaron, 09.11.2026): die
+Lieferanten aus dem Excel-Import haben weder USt-IdNr noch IBAN, deshalb legt
+jede ihrer Rechnungen einen Entwurf „Unbekannt (DE…)“ an – „bestätigen“ ergäbe
+einen zweiten Lieferanten neben dem Excel-Eintrag (Dublette). Dritter Knopf
+„In bestehenden Lieferanten übernehmen…“ (Prüfmaske Abschnitt Lieferant und
+Reiter „Lieferanten“, `POST /api/suppliers/{entwurf_id}/uebernehmen` mit
+`ziel_id`, Modul `entwurf_uebernahme.py`): USt-IdNr/IBAN/Domain/Fingerprint,
+Bank/BIC, Anschrift des Entwurfs wandern in den gewählten bestätigten
+Lieferanten (Listen vereinigt, vorhandene Werte des Ziels bleiben), seine
+Vorlagen hängen danach am Ziel, der Entwurf wird gelöscht und alles, was seine
+`supplier_id` gespeichert hat (`processed.jsonl`, `events.jsonl`,
+`shadow.jsonl`, `lehrer.jsonl`, `menschlich/*.grund.json`, `vorlernen/*.json`),
+zeigt auf das Ziel; Audit-Eintrag `lieferant_uebernommen` mit Operator. Steht
+der Name eines bestehenden Lieferanten auf der Rechnung (Hinweis
+„Lieferanten-Entwurf: …“), ist dieser in der Auswahl vorbelegt – entschieden
+wird trotzdem nur per Klick, nie automatisch.
+
 Im Training-UI zeigt der Reiter **„Menschliche Bearbeitung“** die Liste mit
 diesen Gründen (`GET /api/menschlich`, CLI `rechnung menschlich`). Klick auf
 eine Zeile öffnet die Rechnung; nach Korrektur und **Bestätigung** verlässt
@@ -223,6 +242,60 @@ sie den Ordner (Begleitdatei mit Bearbeiter und korrigierten Feldern unter
 Vorlage/Variante, und Ablage wie Erledigung stehen im Fehlerprotokoll
 (`events.jsonl`, Fehlerbericht-Abschnitt „An Mensch gegeben“). Die Originale
 im Eingangsordner bleiben unverändert.
+
+## Ordner „Keine Rechnung“ (Entscheidung Aaron 14.10.2026)
+
+Dokumente, die keine Rechnungen sind (Lieferschein, Auftragsbestätigung,
+Angebot, AGB, Newsletter, Werbung, Kontoauszug, Vertrag, Mail ganz ohne
+Anhang/Rechnungs-Hinweis …), landen in einem eigenen Ordner
+(`RECHNUNG_KEINE_RECHNUNG`, Standard `data/keine-rechnung/`) statt gemischt
+mit echten Problemrechnungen bei „Menschliche Bearbeitung“ – dort liegen
+seitdem nur noch Rechnungen, an denen ein Mensch etwas tun muss. Es gilt
+derselbe Grundsatz wie oben: nur wörtliche, nachvollziehbare Regeln, keine
+KI-Entscheidung; im Zweifel bleibt alles beim Alten. Schalter
+`RECHNUNG_KEINE_RECHNUNG_ORDNER=0` stellt exakt das frühere Verhalten wieder
+her.
+
+Aussortiert wird im Postfach eine Mail ganz ohne Anhang und ohne
+Rechnungs-Hinweis im Text, oder eine Mail, deren Anhänge **alle** eindeutig
+als Nicht-Beleg beschriftet sind und kein einziger unklarer/Beleg-Anhang
+dabei ist. In der Pipeline wird ein Dokument nur aussortiert, wenn der Titel
+auf Seite 1 eine bekannte Nicht-Beleg-Beschriftung trägt, keine Belegart im
+Titel steht, kein Schweizer QR-Zahlteil vorliegt und weder eine
+Rechnungsnummer hinter einem Rechnungs-Label noch ein Betrag hinter einem
+Summen-Label im Text gefunden wurde.
+
+Nie still: Datei + Begleitdatei `<datei>.grund.json` (Grund, erkannte
+Beschriftung, bei Mails Absender/Betreff, Zeitpunkt), Ereignis im
+Ereignisprotokoll, Zähler im Tagesbericht. Geht nicht an JobRouter.
+
+Reiter „Keine Rechnung“ im Training-UI (`GET /api/keine-rechnung`): Liste
+mit Vorschau. Knopf **„Doch eine Rechnung“** – falls die Regel falsch lag,
+geht die Datei zurück in den Eingang und wird normal verarbeitet (zählt im
+Tagesbericht als Fehlsortierung). Knopf **„Keine Rechnung“** in der
+Prüfmaske einer offenen Rechnung – ein Mensch sortiert von Hand aus
+(Bestätigungsdialog).
+
+Nachtrag (Aaron 14.10.2026, 18:14): In diesem einen Ordner darf endgültig
+**gelöscht** werden (Knopf je Eintrag plus Mehrfachauswahl, mit
+Bestätigungsdialog) – das Postfach (IONOS/IMAP) wird dabei nicht angefasst.
+Protokoll bleibt trotzdem: Ereignis/Audit mit Dateiname, sha256, Grund,
+Bearbeiter, Zeitpunkt (ohne Inhalt); Zähler im Tagesbericht. Löschen ist
+strikt auf Dateien begrenzt, die tatsächlich im Ordner „Keine Rechnung“
+liegen (kein Pfad-Traversal über die API) – eine Datei mit demselben sha256
+im Archiv/als verarbeitete Rechnung bleibt unberührt.
+
+## Excel-Stammdaten-Import: DE/CH-Firmen werden verschmolzen (16.10.2026)
+
+Steht dieselbe Firma (gleicher Name) im Kreditor-Deutschland- **und** im
+Kreditor-Schweiz-Blatt, wird sie beim Import ohne Rückfrage zu **einem**
+Lieferanten mit den IBANs/UIDs beider Seiten. Beide ABBYY-Lieferantennummern
+bleiben erhalten; an JobRouter geht je Beleg die zum Land der Rechnung
+passende (Land aus UID/IBAN des Belegs). Ist das Land nicht erkennbar, bleibt
+der Beleg beim Menschen. Die Vorschau zählt diese Firmen extra
+(„N automatisch verschmolzen“), sodass nicht mehr jede einzeln geprüft werden
+muss. Dubletten innerhalb eines Landes und UID-/IBAN-Treffer bleiben Fragen.
+Details: SPEC-v1.md §7ae.
 
 ## Texterkennung für Scans (OCR)
 
@@ -520,6 +593,146 @@ als "errechnet" gekennzeichnet, oder fehlt mit Grund. Details siehe
   Kopf-CSV hat eine Spalte `herkunft`, die Positionen-/USt-CSV eine
   kompakte Herkunft-Spalte je Zeile; der JobRouter-Payload trägt ein
   eigenes `herkunft`-Objekt je Feld sowie je Position/USt-Zeile.
+
+## Beträge aus dem Kontext herleiten + Positionsmodus je Lieferant (10.10.2026)
+
+Befund Aaron 09.10.2026: das kleine lokale Modell (`qwen2.5:1.5b`, CPU) liest
+Beträge, versteht aber nicht sicher, welcher Brutto/Netto ist, wenn es nicht
+wörtlich dasteht (z.B. "Total inkl. MWST" ohne separates "Netto"-Label).
+
+- **Beträge aus dem Kontext** (`summen.py`, eigenes Modul, keine KI): sammelt
+  alle Geldbeträge im Volltext mit Kontextwörtern (de/en/fr/it: "Total",
+  "inkl.", "Rechnungsbetrag", "Netto", "MWST"/"USt"/"TVA"/"IVA", ...), sucht
+  ein rechnerisch stimmiges Tripel Netto/USt/Brutto bzw. Steuerzeilen je Satz
+  (Mischsätze) und bewertet die Kandidaten über Schlüsselwörter, Lage im Text
+  und den Schweizer QR-Zahlteil-Betrag (stärkstes Signal, falls vorhanden).
+  Nur ein eindeutiger Sieger (Mindestabstand zum Zweitbesten) wird
+  übernommen -- sonst bleibt alles leer (kein Raten). Eingebaut in
+  `rechnen.rechne()`: läuft nur, wenn die gelesenen Kopf-Beträge NICHT
+  aufgehen oder fehlen; ein bereits korrekt gelesenes Feld bleibt immer
+  unangetastet, auch wenn ein Geschwisterfeld fehlt. Eine menschliche
+  Korrektur und der QR-Zahlteil-Betrag gewinnen immer.
+- **Positionsmodus je Lieferant** (Entscheidung Aaron 10.10.2026,
+  `Supplier.positionsmodus`): wie in Abbyy FlexiCapture legt die bearbeitende
+  Person beim Prüfen einer Rechnung fest, wie die Positionstabelle dieses
+  Lieferanten gelesen wird -- Normalfall `einzeln` (unverändert). Nur wenige
+  Lieferanten brauchen:
+  - `zusammenfassung`: die Übersichtstabelle am Rechnungsende gilt als
+    Positionstabelle (über den vorhandenen Anlern-Mechanismus
+    `learn.learn_line_items`); ohne Vorlage bekommt die KI gezielt nur die
+    Schlussseiten statt der ganzen (ggf. langen) Rechnung.
+  - `eine_position` (mit `Supplier.positionsbezeichnung`, z.B. "Strom"): die
+    Positionen werden IMMER aus der USt-Aufstellung gebildet -- eine Zeile je
+    Steuersatz, nie zusammengefasst; die KI liest in diesem Modus gar keine
+    Einzelpositionen (Zeitersparnis bei 10+ Seiten).
+
+  Verschiedene MwSt-Sätze werden in KEINEM Modus zusammengefasst. Setzen
+  über `POST /api/suppliers/{id}/positionsmodus` (Audit-Eintrag, gilt danach
+  für alle Rechnungen dieses Lieferanten, jederzeit änderbar) bzw. in der
+  Prüfmaske bei "Positionsdaten" oder im Reiter "Lieferanten". Ohne bekannten
+  Lieferanten gilt die Auswahl erst für diese Rechnung und wird beim
+  Anlegen/Bestätigen mitgespeichert. Ist ein Beleg sehr lang (≥5 Seiten oder
+  ≥20 Positionen) und der Modus für diesen Lieferanten noch nie bewusst
+  gesetzt, erscheint ein dezenter Hinweis -- nie eine automatische Umstellung.
+
+## Qualität (Entscheidung Aaron 10.10.2026: „alle 5 Punkte“)
+
+Neuer Reiter **„Qualität“** im Training-UI; alles lokal, nichts geht ins Netz.
+
+### 1. Testsatz aus bestätigten Rechnungen (Goldstandard)
+
+Jede im Training-UI bestätigte Rechnung ist ein Testfall: beim Bestätigen
+wird das Original unverändert nach `data/archive/<sha256>.*` gelegt und die
+bestätigten Werte (Felder, Positionen, USt-Aufstellung) nach
+`data/testsatz/<sha256>.json`. Vor dem 10.10.2026 bestätigte Rechnungen
+werden aus `processed.jsonl` + Archiv hergeleitet (nur Kopf-Felder).
+
+`rechnung testsatz` liest alle Testfälle im Trockenlauf neu (Zeitgrenze wie
+konfiguriert; keine Entwürfe, kein Ereignis/Audit/Export, **ohne** die
+gespeicherten Korrekturen) und misst je Feld richtig/falsch/fehlt, Positionen
+(Zeilen gefunden/korrekt) und Zeit je Rechnung (Median/P90). Verglichen wird
+normalisiert (Beträge ±0,01, Datum ISO, Rechnungsnummer ohne Leerzeichen).
+Stammdaten aus der Bibliothek zählen nicht als gelesener Wert; dafür gibt es
+das Pseudo-Feld `lieferant` (richtiger Lieferant erkannt). Bericht:
+`data/berichte/testsatz_<datum>_<zeit>.json` mit Vergleich zum letzten Lauf
+gleichen Filters („Schlechter geworden bei: …“). Im Reiter „Qualität“: letzte
+Auswertung + Knopf „Testsatz jetzt prüfen“ (Hintergrund, mit Fortschritt).
+
+`--variante A|B|C`: Stelle für den geplanten Vergleich A (eine KI-Anfrage,
+heute) / B (Blöcke) / C (Überblick + Blöcke). Gebaut ist nur A; B/C melden
+„vorgesehen, aber noch nicht gebaut“, alles andere ist ein Fehler
+(`semantic.pruefe_variante`, durchgereicht bis `pipeline._llm_full`).
+
+**Selbst-Update-Schutz:** nach grünen Tests liest der neue Stand den
+Testsatz (ab 5 Testfällen). Sinkt die Gesamt-Trefferquote gegenüber dem
+letzten gespeicherten Lauf um mehr als 2 Prozentpunkte → zurückgerollt mit
+Grund. `RECHNUNG_UPDATE_TESTSATZ=0` schaltet ab; Standard sind nur Testfälle
+ohne KI (Vorlage/E-Rechnung), `=voll` nimmt alle.
+
+### 2. Lieferanten-Gedächtnis + Plausibilität (inkl. Datum)
+
+`plausi.py` leitet je Lieferant aus den bestätigten Rechnungen (dieselben
+Soll-Werte wie der Testsatz) ein Profil ab -- übliche Steuersätze, Währung,
+Brutto-Spanne (Median/min/max), Muster der Rechnungsnummer (Gerüst aus
+Buchstaben-/Ziffernblöcken, Präfix, Stellen je Block, fortlaufend?),
+Zahlungsziel. Aktiv ab 3 bestätigten Rechnungen; die Rechnung selbst zählt
+nie zu ihrem eigenen Profil. Anzeige im Reiter „Qualität“.
+
+| Prüfung | Ergebnis |
+|---|---|
+| Brutto > 3× Maximum / < ⅓ Minimum | Hinweis |
+| Brutto > 10× Maximum / < 1/10 Minimum (Komma/Stelle) | **rot** `betrag-ueblich` |
+| Rechnungsnummer passt nicht zum Muster (O statt 0, Stelle fehlt, anderes Präfix) | **rot** `rechnungsnummer-muster` |
+| Rechnungsnummer ≤ einer bestätigten bei fortlaufendem Muster | Hinweis |
+| Steuersatz/Währung, die der Lieferant nie verwendet | Hinweis |
+| Rechnungsdatum > 1 Tag in der Zukunft (mit Verdacht „Jahreszahl-Dreher 2062 statt 2026“) | **rot** `rechnungsdatum-plausibel` (vorher 14 Tage Toleranz) |
+| Rechnungsdatum älter als 1 Jahr | Hinweis (älter als 10 Jahre weiterhin rot) |
+| Fälligkeit vor Rechnungsdatum | **rot** `faelligkeit-plausibel` |
+
+Rote Prüfungen schicken die Rechnung wie alle anderen roten Prüfungen zum
+Menschen (auch im Schattenbetrieb); in der Prüfmaske steht das betroffene
+Feld rot mit Grund darunter, oben eine Box „Prüfungen rot“. Gutschriften
+werden bei der Betragsspanne nicht bewertet.
+
+### 3. Pflichtangaben nach § 14 Abs. 4 UStG (Hinweis-Prüfung)
+
+`pflicht.py` prüft per Text und Feldern (keine KI) die Pflichtangaben und
+zeigt sie in der Prüfmaske als eigene, gelbe Gruppe „Pflichtangaben (…)“ --
+**nur Hinweis**, kein Rückstellgrund. Fehlt etwas, steht zusätzlich ein
+begründeter Hinweis in `hinweise` (geht mit nach JobRouter), z.B.
+„Pflichtangaben (§ 14 Abs. 4 UStG) fehlt: Zeitpunkt/Zeitraum der Leistung“.
+
+- **§ 14 Abs. 4 UStG**: Name/Anschrift Leistender und Empfänger, Steuernummer
+  oder USt-IdNr des Leistenden, Ausstellungsdatum, Rechnungsnummer,
+  Menge/Art (Positionen oder Bezeichnung), Leistungsdatum/-zeitraum (oder
+  Hinweis „Leistungsdatum = Rechnungsdatum“), Entgelt je Steuersatz,
+  Steuersatz + Steuerbetrag bzw. Hinweis auf Steuerbefreiung/Reverse Charge.
+- **Kleinbetragsrechnung** (≤ 250 € brutto, § 33 UStDV): nur Leistender,
+  Datum, Menge/Art, Entgelt+Steuer in einer Summe, Steuersatz.
+- **Schweiz** (CHF oder UID mit „MWST“, Art. 26 MWSTG, vereinfacht): Name/Ort
+  Leistungserbringer mit MWST-Nummer, Empfänger (entfällt bis CHF 400),
+  Leistungsdatum (fehlt es, gilt das Rechnungsdatum), Art/Umfang, Entgelt,
+  Steuersatz.
+
+Neues Feld **`leistungsdatum`** (Datum, optional) in „Sonstige Daten“ der
+Prüfmaske: lernbar wie jedes Feld, ohne Vorlage per Textregel hinter einem
+eindeutigen Label („Leistungsdatum:“, „Lieferdatum“, …) -- nie per KI
+(`template.NIE_KI`, der KI-Prompt bleibt unverändert). Die Erkennung ist
+textbasiert und vereinfacht (z.B. Anschriften über PLZ/Ort) und kann irren.
+
+### 5. Fehlerstatistik je Lieferant und Feld
+
+`eventlog.fehlerstatistik()` (CLI `rechnung fehlerstatistik`, Reiter
+„Qualität“, Nachtlauf-Bericht unter `fehlerstatistik`) baut auf denselben
+Korrektur-Ereignissen auf wie der Fehlerbericht, zählt aber je Lieferant ×
+Feld den **Anteil der Rechnungen**, an denen das Feld korrigiert wurde
+(mehrere Klicks an einer Rechnung zählen einmal) -- gesamt, letzte 4 Wochen
+und davor, mit Trend. Darüber die Liste „lohnendste Verbesserung“ (ab 2
+korrigierten Rechnungen und ≥ 50 %), z.B. „Lieferant X: rechnungsnummer in 6
+von 8 Rechnungen korrigiert → Vorlage anlernen“ (mit Vorlage: „nachtrainieren
+(Anker prüfen)“, Positionen: „Positionstabelle anlernen bzw. Positionsmodus
+prüfen“, IBAN/USt-IdNr/…: „Stammdaten pflegen“). Der Nachtlauf druckt die
+fünf lohnendsten Punkte mit aus.
 
 ## Härtung (v1.3)
 

@@ -1161,7 +1161,17 @@ automatisch durch, was ein Mensch nicht bestaetigt hat.
    `addresses=[erkannte Rechnungsadresse]`, leer bei keiner erkannten
    Adresse -- ein Entwurf ohne Adresse gilt dann ueber `identify.kandidaten`
    nur fuer Rechnungen ohne erkannte Adresse, nie global. Id: Slug aus dem
-   Namen, sonst `neu-<USt-IdNr/IBAN>`, kollisionsfrei (`_unique_supplier_id`).
+   Namen, sonst `neu-<USt-IdNr/IBAN>`, kollisionsfrei (`_unique_supplier_id`);
+   ohne beide Kennungen `neu` und Platzhalter "Unbekannt" (keine harte
+   Kennung, bindet ueber den Index nie weitere Rechnungen). Als USt-IdNr
+   gilt dabei nur ein echtes Format (`textnorm.find_ustids`, 09.11.2026:
+   Laenderpraefix + landesspezifische Struktur fuer EU/XI, CHE mit
+   Pruefziffer; nie etwas, das wie ein BIC aussieht oder hinter "BIC"/
+   "SWIFT" steht). Vorher galten BICs wie `COKSDE33XXX` als USt-IdNr und
+   ein Entwurf "Unbekannt (COKSDE33XXX)" buendelte Rechnungen verschiedener
+   Lieferanten derselben Sparkasse; solche Entwuerfe verwirft man im
+   Programm unter Lieferanten -> Entwurf -> "Entwurf verwerfen"
+   (`POST /api/suppliers/<id>/verwerfen`).
    Keine Duplikate: ein vorhandener unbestaetigter Entwurf mit derselben
    Kennung unter derselben Adresse wird gefunden (sowohl ueber den normalen
    Index-Abgleich als auch zusaetzlich `_find_draft_by_identifiers` als
@@ -1208,6 +1218,281 @@ automatisch durch, was ein Mensch nicht bestaetigt hat.
    Lieferanten (harter Index-Treffer auf beide), bleibt es wie bei jedem
    Mehrfachtreffer "mehrdeutig" -> Mensch -- keiner der beiden gewinnt
    stillschweigend.
+
+6. **Entwurf in bestehenden Lieferanten uebernehmen** (Entscheidung Aaron,
+   09.11.2026, Modul `entwurf_uebernahme.py`): die 11.219 Lieferanten aus dem
+   Excel-Import (`stammdaten_import.py`) haben weder USt-IdNr noch IBAN --
+   jede ihrer Rechnungen legt also einen Entwurf "Unbekannt (DE...)" an, und
+   "bestaetigen" ergaebe einen zweiten Lieferanten neben dem Excel-Eintrag
+   (Dublette). `POST /api/suppliers/{entwurf_id}/uebernehmen` (`ziel_id`,
+   Oberflaeche: Knopf "In bestehenden Lieferanten uebernehmen…" in der
+   Pruefmaske und im Reiter "Lieferanten", Auswahl nur ueber bestaetigte
+   Lieferanten) uebernimmt den Entwurf in das Ziel:
+   `entwurf_uebernahme.zusammenfuehren` vereinigt die Listen (USt-IdNrn,
+   IBANs, Domains, Fingerprint, Rechnungsadressen -- leer beim Ziel bleibt
+   "alle"), fuellt leere Einzelwerte (Bank, BIC, BLZ, Konto, Glaeubiger-ID,
+   Kontakt, Zahlungsziel, Steuersatz, Notizen, feste Werte) und uebernimmt
+   die Anschrift nur, wenn das Ziel keine hat; Name, Lieferantennummer,
+   Waehrung, Positionsmodus des Ziels bleiben immer. Vorlagen des Entwurfs
+   werden auf `<ziel>__<variante>` umgehaengt (belegt: naechste Version wie
+   `learn._next_template_id`). Der Entwurf wird geloescht; alles, was seine
+   `supplier_id` gespeichert hat, zeigt danach auf das Ziel
+   (`Store.lieferant_umhaengen`: `processed.jsonl` -- damit die
+   Dublettenpruefung `seen_invoice` die Rechnungen beim Ziel kennt --,
+   `events.jsonl`, `shadow.jsonl`, `lehrer.jsonl`; dazu
+   `menschlich/*.grund.json` und `vorlernen/*.json`). `audit.jsonl` bleibt
+   append-only; `liste-cache.json` veraltet ueber `_Kontext.stand` von
+   selbst, der Server wirft die Eintraege des Entwurfs zusaetzlich sofort
+   weg (`Listencache.vergessen`). Audit `lieferant_uebernommen` (Operator,
+   Entwurf, Ziel, uebernommene Werte, umgehaengte Eintraege) und Ereignis
+   `lieferant`/`uebernommen`. Verweigert (409): Entwurf schon bestaetigt,
+   Ziel selbst ein Entwurf, beide gleich, Dummy; 404: unbekannte Id.
+   Sicherheitsregel: nie automatisch -- der Hinweis `ENTWURF_HINWEIS`
+   (Name eines bestehenden Lieferanten steht auf der Rechnung) belegt in der
+   Oberflaeche nur die Auswahl vor; kein Modul ausser dem Endpunkt ruft die
+   Uebernahme auf (Test `test_pipeline_ruft_uebernehmen_nie_selbst`).
+
+§7ac **Beträge aus dem Kontext herleiten** (Befund Aaron 09.10.2026, Modul
+`summen.py`): das kleine lokale Modell liest Beträge, versteht aber nicht
+sicher, welcher Brutto/Netto ist, wenn es nicht wörtlich dasteht ("Total
+inkl. MWST" ohne separates "Netto"-Label). `summen.summen_aus_kontext`
+sammelt alle Geldbeträge im Volltext mit Kontextwörtern (de/en/fr/it) und
+ihrer Position, bildet Kandidaten-Tripel (netto, ust, brutto) bzw.
+Steuerzeilen je Satz (Mischsätze, wiederverwendet `textnorm.
+parse_tax_summary`) und prüft sie auf rechnerische Stimmigkeit (Brutto =
+Netto + USt ± Rundungstoleranz, Satz gültig für die Währung,
+`identify.nearest_valid_rate`). Bewertet wird über Schlüsselwörter (stark:
+"Total"/"Rechnungsbetrag"/"Netto"/"MWST" usw., schwach: "Zwischensumme" --
+Rabatt/Versand/Skonto zählen nie als Netto/Brutto/USt), Lage im Text
+(Endbetrag meist zuletzt) und den Schweizer QR-Zahlteil-Betrag (stärkstes
+Signal, falls vorhanden). Nur bei einem eindeutigen Sieger (Mindestabstand
+`_MARGIN` zum Zweitbesten, zwei rechnerisch gleichwertige Kandidaten gelten
+nicht als Widerspruch) wird etwas übernommen -- sonst bleibt
+`SummenErgebnis` leer und `hinweis` nennt den Grund (kein Raten).
+
+Eingebaut in `rechnen.rechne()` (vor `_ergaenze_kopf`, `rechnen.
+_kopf_konsistent`): läuft nur, wenn die gelesenen Kopf-Beträge NICHT
+aufgehen (Netto=Brutto trotz Steuer, Summe geht nicht auf, Satz ungültig)
+oder zu wenige bekannt sind. `rechnen._uebernehme_summen` ersetzt dabei ein
+bereits gelesenes Feld NUR, wenn eine nachweisliche Widerspruch-Kombination
+vorliegt -- fehlt nur ein Geschwisterfeld, bleibt ein bereits korrektes
+gelesenes Feld unangetastet (sonst würde ein zufällig textlich passender
+"errechneter" Wert beim Anlernen fälschlich mitgelernt, siehe `learn.
+confirmed_values`, die Quelle `errechnet` jetzt grundsätzlich ausschließt).
+Eine manuelle Korrektur und der Schweizer QR-Zahlteil-Betrag
+(`FieldResult.source == "qr"`) gewinnen immer (`_SUMMEN_GESPERRTE_QUELLEN`).
+Herkunft im UI wie "errechnet" (gelbes "Vorschlag"-Feld).
+
+§7ad **Positionsmodus je Lieferant** (Entscheidung Aaron 10.10.2026):
+1. Verschiedene MwSt-Sätze werden in KEINEM Modus zusammengefasst -- immer
+   eine Positionszeile je Steuersatz.
+2. Der Modus (`Supplier.positionsmodus`, Standard `"einzeln"`; altes
+   `suppliers.json` ohne das Feld lädt als `"einzeln"`) hängt am
+   Lieferanten, nicht an der einzelnen Rechnung, und bleibt stabil.
+   Normalfall "einzeln" (unverändertes Verhalten); nur wenige Lieferanten
+   brauchen `"zusammenfassung"` oder `"eine_position"`.
+3. Festgelegt wird er -- wie in Abbyy FlexiCapture die Entscheidung der
+   bearbeitenden Person -- beim Prüfen einer Rechnung (keine
+   Stammdaten-Rechte nötig): `pipeline.set_positionsmodus`/
+   `POST /api/suppliers/{id}/positionsmodus` (Audit-Eintrag mit Operator,
+   markiert `Supplier.positionsmodus_gesetzt`). Ohne bekannten Lieferanten
+   gilt die Auswahl nur für diese Rechnung (`STATE.supplier` im UI) und wird
+   beim Anlegen/Bestätigen mitgespeichert (`POST /api/suppliers` übernimmt
+   `positionsmodus`/`positionsbezeichnung` NUR beim allerersten Anlegen,
+   ein bestehender Lieferant ändert seinen Modus ausschließlich über den
+   eigenen Weg).
+
+   Modi:
+   - `"einzeln"`: wie bisher (Vorlagen-/KI-Positionen).
+   - `"zusammenfassung"`: die Übersichtstabelle am Rechnungsende gilt als
+     Positionstabelle -- dafür ist am bestehenden Anlern-Mechanismus
+     (`learn.learn_line_items`/`LineItemSpec`) nichts zu ändern, sobald eine
+     Vorlage dafür gelernt ist, wendet sie sich wie jede andere an. Ohne
+     Vorlage bekommt die KI (`pipeline._llm_full`) gezielt nur die letzten
+     `_ZUSAMMENFASSUNG_SCHLUSSSEITEN` Seiten (`pipeline._schlussseiten_text`)
+     statt der ganzen (ggf. langen) Rechnung -- spart Laptop-Zeit.
+   - `"eine_position"` (mit `Supplier.positionsbezeichnung`, z.B. "Strom"):
+     die Positionen werden IMMER aus der USt-Aufstellung gebildet
+     (`positionen.aus_summen`, eine Zeile je Steuersatz, nie
+     zusammengefasst) -- nie aus gelesenen Einzelpositionen (weder Vorlage
+     noch KI noch E-Rechnung). `pipeline._positionsmodus_vorbereiten`
+     verwirft dafür vor `rechnen.rechne` etwaig gelesene Positionen (die
+     USt-Aufstellung entsteht dann aus den Kopf-Feldern/Teil A), `pipeline.
+     _positionsmodus_abschliessen` baut danach die Zeile(n). Die KI wird in
+     diesem Modus gar nicht erst nach Positionen gefragt (`semantic.
+     extract_full(..., want_line_items=False)`). Eine manuelle Korrektur der
+     Positionstabelle für GENAU diese Rechnung gewinnt trotzdem immer.
+
+   Positionen in den Modi 2/3 tragen `_herkunft` je Spalte (Modus 3:
+   `positionen.HERKUNFT_EINE_POSITION`) wie bei `rechnen.py` (`errechnet`/
+   `kopf`) -- damit laufen `positionen-summe`/`steuersatz-positionen`
+   korrekt, und das UI zeigt sie kursiv/gelb wie einen "Vorschlag".
+
+4. **UI** (Abbyy-Maske, Gruppe "Positionsdaten"): Auswahl "einzeln /
+   Zusammenfassung / eine Position je Steuersatz" + Feld "Bezeichnung" (nur
+   bei `eine_position`). Bei bekanntem (bestätigtem) Lieferanten speichert
+   eine Änderung sofort am Lieferanten und lädt die Rechnung neu; ohne
+   bekannten Lieferanten nur in `STATE.supplier` (geht beim Anlegen/
+   Bestätigen mit). Reiter "Lieferanten": eigene Box je Lieferant mit
+   eigenem "Positionsmodus speichern"-Knopf (eigener API-Weg, nicht das
+   allgemeine Stammdaten-Speichern). Ist ein Beleg sehr lang (`_LANGER_
+   BELEG_SEITEN` Seiten oder `_LANGER_BELEG_POSITIONEN` Positionen) UND der
+   Modus für diesen Lieferanten noch nie bewusst gesetzt
+   (`positionsmodus_gesetzt`), erscheint ein dezenter Hinweis
+   (`pipeline._positionsmodus_hinweis`, `res.hinweise`) -- nie eine
+   automatische Umstellung.
+
+   Export (JobRouter-Payload): Positionen gehen wie angezeigt (vorhandene
+   `lineItems`-Logik) -- keine weitere Änderung nötig.
+
+## 7ac. Qualität: Testsatz, Lieferanten-Gedächtnis, Pflichtangaben, E-Rechnung, Fehlerstatistik (2026-10-10)
+
+Entscheidung Aaron 10.10.2026 ("alle 5 Punkte"). Reiter "Qualität" im UI.
+
+1. **Testsatz** (`testsatz.py`): bestätigte Rechnung = Testfall (Original im
+   Archiv, Soll-Werte `data/testsatz/<sha>.json`, geschrieben beim Bestätigen
+   im UI; ältere aus `processed.jsonl` hergeleitet, autonom übernommene
+   zählen nicht). Trockenlauf über `guard.Guard(target=testsatz.TARGET)` mit
+   `_TrockenStore` (Korrekturen ausgeblendet), `protokoll=False` (kein Audit).
+   Vergleich normalisiert, Bericht `data/berichte/testsatz_*.json`, Vergleich
+   mit letztem Lauf gleichen Filters. Extraktionsvariante A/B/C als Parameter
+   von `pipeline.process` (nur A gebaut). Selbst-Update: nach den Tests
+   Testsatz mit dem neuen Stand (Kindprozess, `--kein-bericht --ausgabe`),
+   Rückgang > 2 Prozentpunkte → zurückrollen; neuer Bezug wird erst nach
+   bestandenem Vergleich gespeichert. `RECHNUNG_UPDATE_TESTSATZ=0|voll`.
+
+2. **Lieferanten-Gedächtnis** (`plausi.py`): Profil aus `testsatz.bestaetigte`
+   je Lieferant (ab 3 Rechnungen, eigene sha ausgenommen, gecacht über
+   Dateistand von `data/testsatz/`, `processed.jsonl`, `confirmations.jsonl`).
+   Rote Checks `betrag-ueblich` (Faktor 10), `rechnungsnummer-muster`,
+   `faelligkeit-plausibel` in `pipeline._all_checks` bzw. E-Rechnungs-
+   `checks_for` (wirken damit auf `human.gruende` und `shadow.decide`);
+   Hinweise (Faktor 3, fortlaufend, Satz, Währung, Datum > 1 Jahr) über
+   `pipeline._qualitaet` (Wrapper um `_process`). `validate.check_date`:
+   Zukunftstoleranz 1 Tag statt 14, Jahreszahl-Dreher im Grund. UI: rote
+   Felder mit Grund (`human.rote_felder`, `/api/invoice` → `rote_felder`).
+
+3. **Pflichtangaben** (`pflicht.py`): `Result.pflichtangaben = {regelwerk,
+   punkte[{name, ok, detail}], fehlt}` im Nachlauf `pipeline._qualitaet` (Text
+   über `Result._pruef_text`, danach geleert); Regelwerk § 14 Abs. 4 UStG,
+   § 33 UStDV (≤ 250 € brutto, EUR) oder Art. 26 MWSTG (CHF/UID MWST). Nur
+   Hinweis (`res.hinweise` + Gruppe in der Maske), kein Check, kein
+   Rückstellgrund. Feld `leistungsdatum` (date, optional) in
+   `STANDARD_FIELDS`, in `NIE_KI` (nicht im KI-Schema), Textregel
+   `pflicht.apply_leistungsdatum` nur bei eindeutigem Fund.
+
+4. ~~E-Rechnungs-Kandidaten/Anschreiben~~ -- entfernt (Aaron 10.10.2026: Umstellung der
+   Lieferanten auf E-Rechnung entscheidet nicht er und ist nicht Aufgabe des Programms).
+
+5. **Fehlerstatistik** (`eventlog.fehlerstatistik`): je (Lieferant, Feld)
+   die Menge korrigierter sha256 / Rechnungen des Lieferanten (bestätigte
+   plus korrigierte, damit ≤ 100 %), Zeitpunkt je Rechnung = Bestätigung bzw.
+   frühestes Ereignis, Trend letzte 28 Tage vs. davor. "Lohnend": ≥ 2
+   Rechnungen und Anteil ≥ 0,5, Empfehlung je Feldart. Im Nachtlauf-Bericht
+   (`fehlerstatistik`) und in `rechnung nacht` (Top 5).
+
+## 7ad. Nicht-Rechnungen aussortieren (Entscheidung Aaron 14.10.2026, Nachtrag 18:14)
+
+`rechnung/keine_rechnung.py`. Vorgabe: "Dokumente, die keine Rechnungen
+sind, werden in einen Ordner aussortiert" -- bis dahin landeten sie
+gemischt mit echten Problemrechnungen in "Menschliche Bearbeitung"; dort
+sollen nur noch Rechnungen liegen, an denen ein Mensch etwas tun muss.
+Grundsatz wie bei §7u: **nur woertliche, nachvollziehbare Regeln, keine
+KI-Entscheidung**; eine echte Rechnung darf nie hier landen -- im Zweifel
+bleibt alles wie bisher bei "Menschliche Bearbeitung" (Fehlalarm-Freiheit
+vor Abdeckung). Schalter `RECHNUNG_KEINE_RECHNUNG_ORDNER=0` (`aktiv()`)
+schaltet exakt auf das alte Verhalten zurueck. Ordner `RECHNUNG_KEINE_RECHNUNG`,
+Standard `<data>/keine-rechnung/` -- ein normaler Dateiordner wie
+`menschlich/`.
+
+Zwei Quellen:
+
+- **Postfach** (`ingest.analyse_mail`/`handle_mail`): `MailOutcome.keine_rechnung`
+  wird gesetzt bei einer Mail ganz ohne Anhang und ohne Rechnungs-Hinweis im
+  Text (Grund `MAIL_OHNE_ANHANG`; **nicht** bei `MAIL_TEXT_RECHNUNG`/
+  `MAIL_NUR_LINK` -- die koennten eine Rechnung sein), oder bei einer Mail,
+  deren Anhaenge ALLE eindeutig als Nicht-Beleg beschriftet sind
+  (`belegart.ANLAGEN`, erweitert um Newsletter, Werbung, Kontoauszug,
+  Vertrag) und kein einziger unzuordenbarer/Beleg-Anhang dabei ist (sonst
+  bleibt die ganze Mail bei "Menschliche Bearbeitung" -- ein unklarer Anhang
+  koennte eine Rechnung sein). Anlagen, die neben einem echten Beleg in
+  derselben Mail stecken, bleiben wie in §Postfach-Baustein 8 am Beleg.
+- **Pipeline** (`pipeline._process`, `keine_rechnung.pruefe_pipeline`, vor
+  Lieferant/Vorlage/KI): ALLE Bedingungen muessen zutreffen -- Titelbereich
+  Seite 1 traegt eine bekannte Nicht-Beleg-Beschriftung
+  (`belegart.anlage_aus_titel`), KEINE Belegart im Titel
+  (`belegart.aus_titel`), kein Schweizer QR-Zahlteil, und weder eine
+  Rechnungsnummer hinter einem Rechnungs-Label noch ein Bruttobetrag hinter
+  einem Summen-Label (`summen.summen_aus_kontext`) im ganzen Text gefunden.
+  Neuer `Result.status = KEINE_RECHNUNG`. Jeder Zweifel -> `None`, normaler
+  Weg.
+
+Ablegen (`ablegen_pipeline`/`ablegen_datei`, aufgerufen aus
+`pipeline.dispatch` bzw. `ingest.handle_mail`): Datei (bei der Pipeline aus
+dem Eingang verschoben, nicht kopiert -- es ist keine Rechnung) + Begleitdatei
+`<datei>.grund.json` (sha256, Grund, erkannte Beschriftung, bei Mails
+Absender/Betreff/Message-ID, Zeitpunkt), Audit + Ereignis
+(`eventlog.TYPE_KEINE_RECHNUNG`, Aktion `KR_AUSSORTIERT`) im
+Ereignisprotokoll. Geht nicht an JobRouter. Tagesbericht
+(`nightly.tagesbericht`): `nicht_rechnung_aussortiert` + `nicht_rechnung_liste`.
+
+Bedienung (Web-UI, Reiter "Keine Rechnung", `GET /api/keine-rechnung`):
+Liste (Datei, Grund, Absender/Betreff, Zeitpunkt), Vorschau
+(`GET /api/keine-rechnung/datei`). Knopf **"Doch eine Rechnung"**
+(`POST /api/keine-rechnung/zurueck`, `zurueck_in_eingang`) -- die Regel lag
+falsch: Datei zurueck in den Eingang, wird normal verarbeitet, Ereignis
+`KR_ZURUECKGEHOLT`, zaehlt im Tagesbericht als `fehlsortierungen`. Knopf
+**"Keine Rechnung"** in der Pruefmaske einer offenen Rechnung
+(`POST /api/keine-rechnung/von-hand`, `von_hand_aussortieren`, mit
+Bestaetigungsdialog im UI) -- Mensch sortiert von Hand aus, verlaesst
+`menschlich/`, landet hier mit Grund "von Hand aussortiert (<Bearbeiter>)".
+
+Nachtrag (Aaron 14.10.2026, 18:14): "Das reicht im Programm ... aber man
+soll sie loeschen koennen." Knopf **"Loeschen"** je Eintrag plus
+Mehrfachauswahl "Ausgewaehlte loeschen" (`POST /api/keine-rechnung/loeschen`,
+`loeschen`), eigener Bestaetigungsdialog im UI mit Dateiliste. Entfernt Datei
++ Begleitdatei + Beilagen endgueltig -- das ersetzt "nie loeschen" aus §7u
+NUR fuer diesen Ordner, nirgends sonst; das Postfach (IONOS/IMAP) wird dabei
+nicht angefasst. Protokoll bleibt trotzdem: Ereignis/Audit
+`KR_GELOESCHT`/`keine_rechnung_geloescht` mit Dateiname, sha256, Grund,
+Bearbeiter, Zeitpunkt (ohne Inhalt); Tagesbericht `nicht_rechnung_geloescht`.
+Sicherheitsnetz `keine_rechnung._sicherer_pfad`: loeschen nur fuer Dateien,
+die tatsaechlich in diesem Ordner liegen (kein Path-Traversal ueber die API);
+eine Datei mit demselben sha256 im Archiv/als verarbeitete Rechnung bleibt
+unberuehrt.
+
+Bekannte Grenzen: ein unzuordenbarer Postfach-Anhang bleibt bewusst bei
+"Menschliche Bearbeitung" (koennte eine Rechnung sein); die Beschriftungsliste
+(`belegart.ANLAGEN`) ist nicht vollstaendig -- unbekannte Formulierungen
+landen weiterhin normal bei "Menschliche Bearbeitung", nicht faelschlich hier.
+
+## 7ae. Stammdaten-Import aus Excel: DE/CH-Dubletten verschmelzen (Entscheidung Aaron 16.10.2026)
+
+Der Excel-Import (`rechnung/stammdaten_import.py`, Reiter „Stammdaten“) fragt
+bei jeder Unsicherheit nach, statt zu raten. Eine Ausnahme ist entschieden:
+**dieselbe Firma einmal im Kreditor-DE- und einmal im Kreditor-CH-Blatt**
+(ABBYY brauchte die Trennung, wir nicht) wird ohne Rückfrage zu **einem**
+Lieferanten.
+
+- Bedingung: Treffer nur über den normalisierten **Namen**, genau eine
+  DE- und eine CH-Zeile, keine gemeinsame UID/IBAN. Interne Id =
+  `kreditor-<normalisierter Name>`.
+- IBANs und UIDs werden vereinigt. Die erste Anschrift bleibt Hauptanschrift,
+  die zweite steht einmalig in den Notizen („Anschrift CH: …“) – verschiedene
+  Anschriften sind bei zwei Ländern der Normalfall und **kein** Widerspruch.
+- **Lieferantennummer (`external_id`)**: ABBYY kann DE und CH verschiedene
+  Nummern gegeben haben. `Supplier.external_ids` hält sie je Land
+  (`{"DE": "…", "CH": "…"}`); `external_id` bleibt als Rückfall (DE-Nummer).
+  Bei der Rechnung wählt `external_id_fuer(land)` die passende Nummer; das Land
+  kommt aus den UIDs/IBANs des Lieferanten, die im Beleg stehen (bei E-Rechnung
+  aus dem XML). Ist das Land nicht erkennbar, wird **nicht geraten**: keine
+  Nummer, der Beleg bleibt mit Hinweis beim Menschen. Lieferanten mit nur einer
+  Nummer verhalten sich unverändert.
+- Weiterhin Rückfrage: Dublette innerhalb eines Landes, Treffer über UID/IBAN,
+  Gruppen mit mehr als einer DE- oder CH-Zeile.
+- Die Vorschau zeigt „N Firmen automatisch verschmolzen“, die Zeilen tragen
+  ein Kennzeichen „verschmolzen mit …“; nach dem Übernehmen steht die Anzahl
+  im Ergebnis.
 
 ## 8. Offene Punkte für v1.1
 

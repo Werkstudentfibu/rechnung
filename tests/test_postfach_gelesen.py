@@ -46,3 +46,44 @@ def test_gleicher_anhang_nicht_doppelt(env, monkeypatch):
     res = _run(fake, cfg, store, inbox, monkeypatch)
     assert res.mails == 2 and len(res.saved) == 1
     assert len(list(inbox.iterdir())) == 1
+
+
+class FakeImapSinceDatum(FakeImap):
+    """SINCE liefert nur, was nach dem angefragten Datum liegt."""
+    def __init__(self, mails, alter_tage):
+        super().__init__(mails)
+        self.alter_tage = alter_tage
+
+    def search(self, _charset, crit):
+        if crit.startswith("SINCE"):
+            import time
+            seit = time.mktime(time.strptime(crit.split()[1], "%d-%b-%Y"))
+            treffer = [n for n in self.mails
+                       if time.time() - self.alter_tage[n] * 86400 >= seit]
+            return "OK", [b" ".join(treffer)]
+        return super().search(_charset, crit)
+
+
+def test_lesefenster_einstellbar(env, monkeypatch):
+    """Aaron 05.11.2026: ~100 offene Rechnungen, laengst gelesen und aelter
+    als 7 Tage -- mit RECHNUNG_IMAP_TAGE=60 kommen sie an."""
+    cfg, store, inbox = env
+
+    def neu():
+        f = FakeImapSinceDatum({b"1": _pdf_mail("RE-alt.pdf", b"%PDF-1.4 alt", "Rechnung alt")},
+                               {b"1": 30})
+        f.flags[b"1"].add("\\Seen")
+        return f
+    monkeypatch.delenv("RECHNUNG_IMAP_TAGE", raising=False)
+    assert _run(neu(), cfg, store, inbox, monkeypatch).mails == 0
+    monkeypatch.setenv("RECHNUNG_IMAP_TAGE", "60")
+    res = _run(neu(), cfg, store, inbox, monkeypatch)
+    assert res.mails == 1 and (inbox / "RE-alt.pdf").exists()
+
+
+def test_lesefenster_unsinn_faellt_auf_7(monkeypatch):
+    from rechnung.config import imap_lesefenster_tage
+    monkeypatch.setenv("RECHNUNG_IMAP_TAGE", "viele")
+    assert imap_lesefenster_tage() == 7
+    monkeypatch.setenv("RECHNUNG_IMAP_TAGE", "0")
+    assert imap_lesefenster_tage() == 1

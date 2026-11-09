@@ -9,9 +9,11 @@ import shutil
 import time
 from pathlib import Path
 
+from . import spaltenwoerter as spaltenwoerter_mod
 from .billing import BillingAddress
 from .identify import Supplier
 from .positionen import ordered_columns
+from .postfach import Postfach
 from .template import Template
 from .textnorm import norm
 
@@ -112,16 +114,30 @@ class Store:
         self._archive = self.root / "archive"
         self._corrections = self.root / "corrections"
         self._categories = self.root / "categories.json"
+        self._spaltenwoerter = self.root / "spaltenwoerter.json"
         self._confirmations_log = self.root / "confirmations.jsonl"
         self._shadow = self.root / "shadow.jsonl"
         self._events = self.root / "events.jsonl"
+        self._postfaecher = self.root / "postfaecher.json"
+        self._dateien_mandant = self.root / "dateien_mandant.json"
         self._processed_cache: list[dict] | None = None
         self._supplier_index_cache: dict | None = None
         self._supplier_index_sig: tuple | None = None
 
     # ---- Lieferanten --------------------------------------------------
-    def suppliers(self) -> list[Supplier]:
+    def _alle_lieferanten(self) -> list[Supplier]:
         return [Supplier.from_dict(d) for d in _read_json_safe(self._suppliers, [])]
+
+    def suppliers(self) -> list[Supplier]:
+        """Echte Lieferanten -- der Dummy-Lieferant (dummy.py) ist bewusst
+        nicht dabei, damit Erkennung, Lernen und Import ihn nie sehen."""
+        return [s for s in self._alle_lieferanten() if not s.dummy]
+
+    def dummy_lieferant(self) -> Supplier | None:
+        return next((s for s in self._alle_lieferanten() if s.dummy), None)
+
+    def _save_dummy(self, s: Supplier) -> None:
+        self._schreibe_lieferanten([x for x in self._alle_lieferanten() if not x.dummy] + [s])
 
     def supplier_index(self, address_id: str | None = None) -> dict:
         """USt-IdNr/IBAN -> Lieferanten-IDs (identify.build_identifier_index),
@@ -152,24 +168,31 @@ class Store:
             self._supplier_index_cache[key] = build_identifier_index(cands)
         return self._supplier_index_cache[key]
 
-    def save_supplier(self, s: Supplier) -> None:
-        rows = {x.id: x for x in self.suppliers()}
-        rows[s.id] = s
+    def _schreibe_lieferanten(self, rows: list[Supplier]) -> None:
         _atomic_write(
             self._suppliers,
-            json.dumps([x.to_dict() for x in rows.values()], indent=2, ensure_ascii=False),
+            json.dumps([x.to_dict() for x in rows], indent=2, ensure_ascii=False),
         )
         self._supplier_index_cache = None
+
+    def save_supplier(self, s: Supplier) -> None:
+        from .dummy import ist_dummy_id
+
+        if s.dummy or ist_dummy_id(s.id):
+            raise ValueError("Der Dummy-Lieferant ist reserviert und wird nicht gespeichert/gelernt")
+        rows = {x.id: x for x in self._alle_lieferanten()}
+        rows[s.id] = s
+        self._schreibe_lieferanten(list(rows.values()))
 
     def supplier(self, supplier_id: str) -> Supplier | None:
         return next((s for s in self.suppliers() if s.id == supplier_id), None)
 
     def delete_supplier(self, supplier_id: str) -> None:
-        rows = [x for x in self.suppliers() if x.id != supplier_id]
-        _atomic_write(
-            self._suppliers, json.dumps([x.to_dict() for x in rows], indent=2, ensure_ascii=False)
-        )
-        self._supplier_index_cache = None
+        from .dummy import ist_dummy_id
+
+        if ist_dummy_id(supplier_id):
+            return   # der Dummy bleibt immer
+        self._schreibe_lieferanten([x for x in self._alle_lieferanten() if x.id != supplier_id])
         for t in self.templates_for(supplier_id):
             self.delete_template(t.id)
 
@@ -199,6 +222,50 @@ class Store:
             self._addresses, json.dumps([x.to_dict() for x in rows], indent=2, ensure_ascii=False)
         )
         self._supplier_index_cache = None
+
+    # ---- Postfaecher (Excel-Stammdaten-Import, Entscheidung Aaron
+    # 15.10.2026: ~50 IONOS-Postfaecher, je Mandant eines) -----------
+    # Passwoerter liegen bewusst NICHT hier, sondern in secrets.py.
+    def postfaecher(self) -> list[Postfach]:
+        return [Postfach.from_dict(d) for d in _read_json_safe(self._postfaecher, [])]
+
+    def postfach(self, postfach_id: str) -> Postfach | None:
+        return next((p for p in self.postfaecher() if p.id == postfach_id), None)
+
+    def save_postfach(self, p: Postfach) -> None:
+        rows = {x.id: x for x in self.postfaecher()}
+        rows[p.id] = p
+        _atomic_write(
+            self._postfaecher,
+            json.dumps([x.to_dict() for x in rows.values()], indent=2, ensure_ascii=False),
+        )
+
+    def delete_postfach(self, postfach_id: str) -> None:
+        rows = [x for x in self.postfaecher() if x.id != postfach_id]
+        _atomic_write(
+            self._postfaecher, json.dumps([x.to_dict() for x in rows], indent=2, ensure_ascii=False)
+        )
+
+    # ---- Mandant je abgeholter Datei (sha256 -> BillingAddress.id) --
+    # Geschrieben beim Postfach-Abholen (ingest.handle_mail), damit die
+    # Pipeline weiss, aus welchem Postfach (= welcher Mandant) eine Rechnung
+    # kam -- starker Hinweis fuer den Geschaeftsbereich, siehe pipeline.py.
+    def _dateien_mandant_map(self) -> dict:
+        return _read_json_safe(self._dateien_mandant, {})
+
+    def datei_mandant(self, sha: str) -> str | None:
+        if not sha:
+            return None
+        return self._dateien_mandant_map().get(sha)
+
+    def set_datei_mandant(self, sha: str, address_id: str) -> None:
+        if not sha or not address_id:
+            return
+        m = self._dateien_mandant_map()
+        if m.get(sha) == address_id:
+            return
+        m[sha] = address_id
+        _atomic_write(self._dateien_mandant, json.dumps(m, indent=2, ensure_ascii=False))
 
     # ---- Templates --------------------------------------------------
     def _tpl_path(self, tid: str) -> Path:
@@ -295,11 +362,59 @@ class Store:
         p = self._corrections / f"{sha}.json"
         return _read_json_safe(p, {}).get("fields", {})
 
+    def confirmed_fields(self, sha: str) -> dict:
+        """Felder, deren angezeigter Wert der Mensch ausdruecklich als
+        richtig bestaetigt hat (ohne ihn zu aendern): Feld -> Wert. Liegt
+        neben den Korrekturen, ist aber KEINE Korrektur -- ``corrections``
+        und damit Quelle ``manual``/Fehlerzaehlung bleiben unberuehrt."""
+        p = self._corrections / f"{sha}.json"
+        return dict(_read_json_safe(p, {}).get("confirmed", {}))
+
+    def save_confirmed_field(self, sha: str, field: str, value, operator: str = "") -> None:
+        self._corrections.mkdir(parents=True, exist_ok=True)
+        p = self._corrections / f"{sha}.json"
+        cur = _read_json_safe(p, {"sha256": sha, "fields": {}})
+        cur.setdefault("confirmed", {})[field] = value
+        cur["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        _atomic_write(p, json.dumps(cur, indent=2, ensure_ascii=False))
+        self.audit("confirm_field", {"sha256": sha, "field": field, "value": value}, operator)
+
+    def zeilen(self, sha: str) -> dict:
+        """Zeilenstatus der Positionstabelle: ``{"bestaetigt": [fp...],
+        "korrigiert": [fp...]}`` (Fingerabdruecke, siehe
+        ``positionen.zeilen_fingerabdruck``)."""
+        z = _read_json_safe(self._corrections / f"{sha}.json", {}).get("zeilen", {})
+        return {"bestaetigt": list(z.get("bestaetigt", [])), "korrigiert": list(z.get("korrigiert", []))}
+
+    def save_zeilen(self, sha: str, bestaetigt: list[str], korrigiert: list[str],
+                    operator: str = "") -> tuple[list[str], list[str]]:
+        """Zeilen als bestaetigt/korrigiert vormerken -> (neu bestaetigte,
+        neu korrigierte) Fingerabdruecke (nur die, die vorher nicht schon so
+        vermerkt waren -- Grundlage, jedes Ereignis nur EINMAL zu zaehlen).
+        Eine Zeile ist nie beides: Korrigieren nimmt die Bestaetigung weg und
+        umgekehrt."""
+        self._corrections.mkdir(parents=True, exist_ok=True)
+        p = self._corrections / f"{sha}.json"
+        cur = _read_json_safe(p, {"sha256": sha, "fields": {}})
+        z = cur.setdefault("zeilen", {"bestaetigt": [], "korrigiert": []})
+        best, korr = list(z.get("bestaetigt", [])), list(z.get("korrigiert", []))
+        neu_b = [f for f in dict.fromkeys(bestaetigt) if f not in best]
+        neu_k = [f for f in dict.fromkeys(korrigiert) if f not in korr]
+        best = [f for f in best if f not in korrigiert] + neu_b
+        korr = [f for f in korr if f not in bestaetigt] + neu_k
+        z["bestaetigt"], z["korrigiert"] = best, korr
+        cur["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        _atomic_write(p, json.dumps(cur, indent=2, ensure_ascii=False))
+        self.audit("zeilen", {"sha256": sha, "bestaetigt": len(neu_b), "korrigiert": len(neu_k)}, operator)
+        return neu_b, neu_k
+
     def save_correction(self, sha: str, field: str, value, operator: str = "") -> None:
         self._corrections.mkdir(parents=True, exist_ok=True)
         p = self._corrections / f"{sha}.json"
         cur = _read_json_safe(p, {"sha256": sha, "fields": {}})
         cur["fields"][field] = value
+        # eine spaetere Korrektur hebt die ausdrueckliche Bestaetigung auf
+        cur.get("confirmed", {}).pop(field, None)
         cur["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         _atomic_write(p, json.dumps(cur, indent=2, ensure_ascii=False))
         self.audit("correct", {"sha256": sha, "field": field, "value": value}, operator)
@@ -354,6 +469,41 @@ class Store:
     def events(self) -> list[dict]:
         return _read_jsonl_safe(self._events)
 
+    # ---- Lieferant in den Protokollen umhaengen (entwurf_uebernahme.py) ----
+    def lieferant_umhaengen(self, alt_id: str, neu_id: str, neu_name: str) -> dict[str, int]:
+        """Alle Eintraege mit ``supplier_id == alt_id`` in ``processed.jsonl``,
+        ``events.jsonl``, ``shadow.jsonl`` und ``lehrer.jsonl`` auf ``neu_id``/
+        ``neu_name`` umschreiben -> Anzahl je Datei. Einzige Stelle, die diese
+        append-only-Protokolle nachtraeglich aendert -- bewusst nur fuer die
+        Uebernahme eines Lieferanten-Entwurfs in einen bestehenden Lieferanten
+        (ein Entwurf ``Unbekannt (DE...)`` war nie ein eigener Lieferant, seine
+        Rechnungen gehoeren fachlich zum Ziel, z.B. fuer die Dublettenpruefung
+        ueber ``seen_invoice``). ``audit.jsonl`` bleibt unberuehrt (GoBD)."""
+        zaehler: dict[str, int] = {}
+        for pfad, id_key, name_key in (
+            (self._processed, "supplier_id", "supplier_name"),
+            (self._events, "supplier_id", "supplier_name"),
+            (self._shadow, "supplier_id", "supplier_name"),
+            (self.root / "lehrer.jsonl", "lieferant", None),
+        ):
+            n = 0
+            if not pfad.exists():
+                zaehler[pfad.name] = 0
+                continue
+            zeilen = _read_jsonl_safe(pfad)
+            for rec in zeilen:
+                if rec.get(id_key) == alt_id:
+                    rec[id_key] = neu_id if name_key else neu_name
+                    if name_key:
+                        rec[name_key] = neu_name
+                    n += 1
+            if n:
+                _atomic_write(pfad, "".join(json.dumps(r, ensure_ascii=False) + "\n"
+                                            for r in zeilen))
+            zaehler[pfad.name] = n
+        self._processed_cache = None
+        return zaehler
+
     # ---- Kategorie-Lerntabelle (Positionstext -> Kategorie) ---------
     # Gilt lieferantenuebergreifend: einmal gelernte Zuordnungen ("Porto" ->
     # "Buerobedarf") schlagen bei jedem Lieferanten wieder vor. Ueber das
@@ -377,6 +527,22 @@ class Store:
             removed = rows.pop(key)
             _atomic_write(self._categories, json.dumps(rows, indent=2, ensure_ascii=False))
             self.audit("category-delete", {"key": key, **removed}, operator)
+
+    # ---- Spaltenwoerterbuch (SPEC Baustein 5, Aaron 12.10.2026) -----
+    # Lieferantenuebergreifend: Kopfwort (norm()) -> {Zielspalte -> Anzahl
+    # Bestaetigungen}. Siehe ``spaltenwoerter.py`` fuer die Entscheidungs-
+    # regel (ab 2 Bestaetigungen, nie gegen einen Widerspruch).
+    def spaltenwoerter(self) -> dict[str, dict[str, int]]:
+        return _read_json_safe(self._spaltenwoerter, {})
+
+    def spaltenwort_lernen(self, text: str, ziel_spalte: str | None,
+                           operator: str = "") -> None:
+        bisher = self.spaltenwoerter()
+        neu = spaltenwoerter_mod.lernen(bisher, text, ziel_spalte)
+        if neu is bisher:
+            return
+        _atomic_write(self._spaltenwoerter, json.dumps(neu, indent=2, ensure_ascii=False))
+        self.audit("spaltenwort-lernen", {"text": text, "ziel": ziel_spalte}, operator)
 
     def write_output(self, name: str, data: dict) -> Path:
         p = self.root / "out" / f"{name}.json"

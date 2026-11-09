@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Rechnung – Training & Bibliothek</title>
+<link rel="icon" href="data:,">
 <style>
   * { box-sizing: border-box; }
   body { margin: 0; font: 14px/1.45 system-ui, sans-serif; color: #1a1a1a; }
@@ -37,15 +38,44 @@
   .w:hover { background: rgba(28,117,80,.18); }
   .w.anchor { background: rgba(255,165,0,.4); border-color: orange; }
   .w.value { background: rgba(28,117,80,.35); }
+  .w.ziel { background: rgba(47,111,208,.35); }
+  .rahmen-auswahl { position: fixed; border: 2px dashed #2f6fd0; background: rgba(47,111,208,.08);
+                    pointer-events: none; z-index: 50; }
+  .af.ziel-sel .ab-in { outline: 2px solid #2f6fd0; }
   .w.licol { background: rgba(70,130,220,.35); border-color: #2f6fd0; }
   .w.listop { background: rgba(200,40,40,.30); border-color: #b22; }
+  /* Baustein 2 (Aaron 12.10.2026): Rahmen um die Tabelle je Seite, bleibt
+     sichtbar; einzelne Tabellenzelle als Rahmen-Ziel ausgewaehlt. */
+  .tabrahmen-box { position: absolute; border: 2px solid #9b59b6; background: rgba(155,89,182,.08);
+                   pointer-events: none; }
+  .tabrahmen-box .tr-label { position: absolute; top: -1px; right: -1px; background: #9b59b6; color: #fff;
+                             font-size: 11px; padding: 0 6px; border-radius: 0 0 0 6px; }
+  .tr-seiten { margin: 4px 0; display: flex; flex-wrap: wrap; gap: 4px; }
+  .tr-seite { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border-radius: 8px;
+              background: #eee; font-size: 12px; cursor: pointer; }
+  .tr-seite.ok { background: #e6d9f0; border: 1px solid #9b59b6; }
+  .li-cell-ziel, .tax-cell-ziel { outline: 2px solid #2f6fd0; }
+  /* Baustein 3 (Aaron 12.10.2026): Vorschlag fuer die uebrigen Spalten
+     derselben Zeile -- gelb, ein Klick uebernimmt ihn. */
+  .li-vorschlag { display: inline-block; margin-left: 2px; padding: 0 4px; border-radius: 4px;
+                  background: #ffe9a8; border: 1px solid #d9b94a; cursor: pointer; font-size: 11px; }
+  .li-vorschlag:hover { background: #ffdd70; }
 
   .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #ddd; }
+  .badge.wird_gelesen { background: #e8e8e8; color: #555; }
   .badge.auto { background: #c9ecd6; } .badge.review { background: #ffe5b4; }
   .badge.unknown_supplier, .badge.no_template { background: #f7d3d3; }
   .badge.zurueckgestellt { background: #f5222d; color: #fff; }
   .holdbox { background: #fff1f0; border: 1px solid #ffa39e; color: #a8071a; padding: 6px 8px;
              margin: 6px 0; border-radius: 4px; font-size: 13px; }
+  /* Lieferanten-Bibliothek-Status (Aaron 06.11.2026, Befund "erkennt
+     garnichts"): klar sichtbarer Hinweis direkt am Lieferantenfeld, ob und
+     warum die Bibliothek getroffen/nicht getroffen hat -- nicht nur der
+     knappe Score-Hinweis in .hint. */
+  .lief-status { padding: 6px 8px; margin: 4px 0 8px; border-radius: 4px; font-size: 13px; }
+  .lief-status.ok { background: #d9f2d9; border: 1px solid #389e0d; color: #205006; }
+  .lief-status.warn { background: #fffbe6; border: 1px solid #d4b106; color: #614700; }
+  .lief-status.bad { background: #fff1f0; border: 1px solid #ffa39e; color: #a8071a; }
   .badge.scan_no_textlayer { background: #e0d3f7; }
   .badge.library { background: #d3e4f7; }
   .badge.manual { background: #e8d3f7; border: 1px solid #b37feb; color: #531dab; }
@@ -55,7 +85,7 @@
      .val-input style="font-style:italic" bzw. die Positions-/USt-Tabellen). */
   .badge.herkunft-errechnet { background: #fff3b0; border: 1px solid #d4b106; color: #614700; }
   .badge.herkunft-kopf { background: #e6f4ff; border: 1px solid #91caff; color: #0958d9; }
-  .errechnet, .kopf { font-style: italic; }
+  .errechnet, .kopf, .eine_position { font-style: italic; }
 
   table { border-collapse: collapse; width: 100%; }
   td, th { border: 1px solid #e0e0e0; padding: 4px 6px; text-align: left; font-size: 13px; vertical-align: top; }
@@ -103,13 +133,49 @@
   .ab-body { padding: 4px 10px 8px; }
   .ab-sect { margin: 10px 0; }
   .ab-h { font-weight: 600; margin-bottom: 2px; }
-  .af { margin: 3px 0; min-width: 0; }
+  .af { margin: 3px 0; min-width: 0; position: relative; }
+  /* Kopier-Knopf je Feld (Uebertragen nach Abbyy/JobRouter, 11.10.2026) */
+  .af .cp { position: absolute; right: 3px; top: 17px; padding: 0 5px; font-size: 13px; line-height: 20px;
+            background: transparent; border: none; color: #777; cursor: pointer; }
+  .af .cp:hover { color: #1c7550; }
+  .af .cp.ok { color: #1c7550; font-weight: bold; }
+  .af .ab-in { padding-right: 46px; }
+  .af .mk-btn { position: absolute; right: 24px; top: 17px; padding: 0 5px; font-size: 14px; line-height: 20px;
+                background: transparent; border: none; color: #2f6fd0; cursor: pointer; }
+  /* Bestaetigen-Knopf je Feld (Aaron 05.11.2026: je Feld nur zwei Knoepfe) */
+  .af .ok-btn { position: absolute; right: 3px; top: 17px; padding: 0 5px; font-size: 14px; line-height: 20px;
+                background: transparent; border: none; color: #777; cursor: pointer; }
+  .af .ok-btn:hover { color: #1c7550; }
+  .af .ok-btn.ok { color: #1c7550; font-weight: bold; }
+  .actionbar details { margin-top: 6px; }
+  .actionbar details > summary { cursor: pointer; font-size: 12px; color: #555; }
+  .actionbar details > div { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .af .ab-in.val-input { padding-right: 46px; }
+  button.senden { background: #1c7550; color: #fff; font-weight: 600; padding: 6px 18px; }
   .af label { display: block; font-size: 12px; color: #444; margin-bottom: 1px; }
   .ab-in { width: 100%; box-sizing: border-box; border: 1px solid #a9a9a9; background: #fff;
            padding: 3px 6px; font: inherit; }
   .ab-in.gut { background: #d9f2d9; }
   .ab-in.vorschlag { background: #fff6d5; }
   .ab-in.unsicher { background: #f9d6d6; }
+  /* Unsichere Felder deutlich (Tab springt von einem zum naechsten) */
+  .af.uns { box-shadow: -4px 0 0 #cf1322; padding-left: 4px; }
+  .af.uns.kuenstlich { box-shadow: -4px 0 0 #d48806; }
+  .af.uns > label::before { content: '⚠ '; color: #cf1322; }
+  .af.uns.kuenstlich > label::before { color: #d48806; }
+  .af.uns .ab-in { border: 2px solid #cf1322; }
+  .af.uns.kuenstlich .ab-in { border-color: #d48806; }
+  .af.sicher .ab-in { border-color: #b7d9b7; }
+  #uns-hinweis { font-size: 13px; padding: 4px 8px; margin: 2px 0 6px; background: #fff7e6; border: 1px solid #ffd591; border-radius: 4px; }
+  #uns-hinweis.ok { background: #f0faf0; border-color: #b7d9b7; }
+  /* Vorbereitung (Zustand je Rechnung, Zaehler) */
+  .list-kopf { padding: 8px 12px; border-bottom: 2px solid #1c7550; background: #f6faf8; position: sticky; top: 0; z-index: 2; }
+  .list-kopf .vb-zeile { font-weight: 600; }
+  .list-kopf select, .list-kopf label { font-size: 12px; margin-right: 8px; }
+  .badge.vb-bereit { background: #c9ecd6; } .badge.vb-vorbereitung { background: #d6e4ff; }
+  .badge.vb-wartet { background: #eee; color: #666; } .badge.vb-fehler { background: #f5222d; color: #fff; }
+  #list .row .vb-grund { font-size: 12px; color: #555; }
+  #list .row.nicht-bereit { opacity: .8; }
   .ab-in[readonly] { color: #222; }
   .af .raw { font: 12px/1.3 ui-monospace, Consolas, monospace; color: #555; padding: 1px 6px; }
   .af.sel .ab-in { outline: 2px solid #2f6fd0; }
@@ -131,7 +197,24 @@
   .ab-hit { padding: 5px 6px; border-bottom: 1px solid #eee; cursor: pointer; }
   .ab-hit:hover { background: #e3efe9; }
   .li-scroll { overflow-x: auto; }
-  table.ab-li { min-width: 520px; } table.ab-li th { font-weight: 500; font-size: 12px; text-align: left; background: #eee; }
+  /* Positionstabelle: Beschreibung bekommt den meisten Platz, Zahlen-Spalten
+     eine Mindestbreite, damit nichts abgeschnitten wird (Aaron 06.11.2026).
+     table-layout auto + Mindestbreiten je Spalte statt starrer Prozente,
+     weil die Zahl der Spalten (Zusatzspalten wie Kategorie) variiert;
+     horizontales Scrollen (.li-scroll) greift nur, wenn selbst die Minima
+     nicht mehr in den Bereich passen (z.B. ~1000px Fensterbreite). */
+  table.ab-li { width: 100%; table-layout: auto; }
+  table.ab-li th { font-weight: 500; font-size: 12px; text-align: left; background: #eee; }
+  table.ab-li td[data-col="beschreibung"], table.ab-li th[data-col="beschreibung"] { min-width: 180px; width: 36%; }
+  table.ab-li td[data-col="menge"], table.ab-li th[data-col="menge"] { min-width: 50px; }
+  table.ab-li td[data-col="mwst_satz"], table.ab-li th[data-col="mwst_satz"] { min-width: 50px; }
+  table.ab-li td[data-col="waehrung"], table.ab-li th[data-col="waehrung"] { min-width: 46px; }
+  table.ab-li td[data-col="einzelpreis_netto"], table.ab-li th[data-col="einzelpreis_netto"],
+  table.ab-li td[data-col="gesamt_netto"], table.ab-li th[data-col="gesamt_netto"] { min-width: 82px; }
+  table.ab-li td[data-col="kategorie"], table.ab-li th[data-col="kategorie"] { min-width: 100px; }
+  table.ab-li textarea.li-besch { width: 100%; min-height: 2.6em; resize: vertical; font: inherit;
+    border: 1px solid transparent; background: transparent; padding: 1px 3px; white-space: pre-wrap; word-break: break-word; }
+  table.ab-li textarea.li-besch:focus { border-color: #2f6fd0; background: #fff; outline: none; }
   .actionbar { position: sticky; bottom: 0; background: #fff; border-top: 2px solid #1c7550;
                padding: 8px 0; margin-top: 10px; z-index: 6; }
   td.abw { background: #fff1b8; outline: 1px solid #faad14; }
@@ -146,6 +229,12 @@
   .mk.row.ok { border-color: #389e0d; background: rgba(56,158,13,.08); }
   .mk.row.bad { border-color: #cf1322; background: rgba(207,19,34,.12); }
   .mk.row span { display: none; }
+  /* Zeilenstatus der Positionen (Aaron 05.11.2026): bestaetigt = gruen, vom Menschen geaendert = blau */
+  tr.zs-bestaetigt td { background: #f0faf0; } tr.zs-korrigiert td { background: #eef5ff; }
+  td.zs { white-space: nowrap; font-size: 12px; } td.zs .zs-ok { background: #d9f2d9; border: 1px solid #7bbf7b; border-radius: 4px; cursor: pointer; padding: 0 5px; }
+  td.zs .zs-ok.done { cursor: default; background: #52c41a; color: #fff; border-color: #389e0d; }
+  tr.li-summe td { font-weight: 600; border-top: 2px solid #bbb; } tr.li-summe.bad td { background: #fff1f0; color: #cf1322; }
+  tr.li-summe.ok td { color: #389e0d; }
   tr.ok td.st { color: #389e0d; } tr.bad td { background: #fff1f0; } tr.bad td.st { color: #cf1322; }
   td.st { white-space: nowrap; font-size: 12px; }
   .edit td input { width: 100%; border: 1px solid transparent; background: transparent; font: inherit; padding: 1px 3px; }
@@ -153,7 +242,21 @@
   .edit th input { width: 100%; font-weight: 600; border: 1px dashed #bbb; background: #fff; padding: 1px 3px; }
   .chk { display: inline-block; margin: 2px 6px 2px 0; font-size: 12px; }
   .chk.ok { color: #389e0d; } .chk.bad { color: #cf1322; } .chk.na { color: #888; }
+  .chk.warn { color: #ad6800; background: #fffbe6; padding: 0 4px; border-radius: 3px; }
+  /* Rechen-Pruefung als Ampel (Aaron 06.11.2026): nur noch passt/passt nicht */
+  .chk-ampel { font-weight: 600; padding: 4px 8px; border-radius: 4px; display: inline-block; }
+  .chk-ampel.ok { background: #e6f7e0; color: #389e0d; }
+  .chk-ampel.bad { background: #fff1f0; color: #cf1322; }
+  .chk-ampel.na { background: #f0f0f0; color: #888; }
+  .chk-details { margin-top: 6px; }
+  .chk-details > summary { cursor: pointer; font-size: 12px; color: #555; }
+  .chk-details > .chk { display: block; margin-top: 4px; }
   .li-col { display: inline-block; background: #eef4fb; border: 1px solid #cfe0f4; border-radius: 4px; padding: 2px 6px; margin: 2px; }
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+  .modal-box { background: #fff; border-radius: 8px; padding: 18px 22px; max-width: 480px; box-shadow: 0 4px 24px rgba(0,0,0,.25); }
+  .modal-box h3 { margin: 0 0 8px; color: #b22; }
+  .modal-box .files { margin: 8px 0; max-height: 160px; overflow: auto; font-size: 13px; background: #fafafa; border: 1px solid #eee; border-radius: 4px; padding: 6px 8px; }
+  .modal-box .actions { margin-top: 14px; text-align: right; }
 </style>
 </head>
 <body>
@@ -161,14 +264,18 @@
   <b>Rechnung</b>
   <button id="nav-scan" class="active" onclick="show('scan')">Rechnungen</button>
   <button id="nav-human" onclick="show('human')">Menschliche Bearbeitung <span id="human-count"></span></button>
+  <button id="nav-keine-rechnung" onclick="show('keine-rechnung')">Keine Rechnung <span id="keine-rechnung-count"></span></button>
   <button id="nav-suppliers" onclick="show('suppliers')">Lieferanten <span id="sup-unconfirmed-count"></span></button>
   <button id="nav-addresses" onclick="show('addresses')">Rechnungsadressen</button>
   <button id="nav-categories" onclick="show('categories')">Kategorien</button>
   <button id="nav-journal" onclick="show('journal')">Journal</button>
   <button id="nav-vorlernen" onclick="show('vorlernen')">Vorlernen</button>
+  <button id="nav-qualitaet" onclick="show('qualitaet')">Qualität</button>
+  <button id="nav-stammdaten" onclick="location.href='/static/stammdaten.html'">Excel-Import</button>
   <span id="stats" class="hint" style="color:#eaf5ef"></span>
   <button id="btn-postfach" style="display:none" onclick="postfachJetzt()"
           title="Postfach sofort auf neue Rechnungen prüfen">Postfach prüfen</button>
+  <button onclick="startklar()" title="Ist alles für den Betrieb eingerichtet?">Startklar?</button>
   <button id="btn-postfach-bericht" style="display:none" onclick="postfachBericht()"
           title="Was liegt im Postfach, und was macht das Programm mit jeder Mail?">Postfach-Übersicht</button>
   <span id="postfach" class="hint" style="color:#eaf5ef"></span>
@@ -194,12 +301,33 @@
     <div id="human-table"></div>
   </div>
 
+  <div id="v-keine-rechnung" class="view pane">
+    <h2>Keine Rechnung</h2>
+    <p class="hint">Dokumente, die das Programm anhand woertlicher Merkmale (Titel/Beschriftung,
+      kein Rechnungsnummer-/Summen-Label) als <b>keine Rechnung</b> erkannt hat -- Lieferscheine,
+      Angebote, AGB, Mails ganz ohne Rechnungsanhang ... (Ordner <code id="keine-rechnung-dir"></code>).
+      War die Regel falsch, „Doch eine Rechnung“ -- die Datei geht zurueck in den Eingang und wird
+      normal verarbeitet. Hier darf auch endgueltig geloescht werden (das Postfach selbst wird dabei
+      nie angefasst).</p>
+    <div id="keine-rechnung-table"></div>
+  </div>
+
   <div id="v-suppliers" class="view pane">
     <h2>Lieferanten</h2>
     <p class="hint">Pro Lieferant: Wiedererkennungs-Merkmale, Stammdaten (Anschrift, Bank …) und
       <b>feste Werte</b> – Felder, die das Programm nicht aus jeder Rechnung liest, sondern
       hier einträgt und auf der Rechnung nur gegenprüft.</p>
     <button class="ghost" onclick="editSupplier(null)">+ Neuer Lieferant</button>
+    <div class="box" style="margin:8px 0">
+      <h4>Abbyy-Listen einlesen</h4>
+      <div class="hint">CSV-Export aus ABBYY FlexiCapture. Erst die Geschäftsbereiche (BusinessUnits),
+        dann die Lieferanten (Vendors). Bestehende Einträge werden ergänzt, nichts wird gelöscht.</div>
+      <label class="ghost">Geschäftsbereiche (BusinessUnits) … <input type="file" accept=".csv,.txt" style="display:none"
+        onchange="abbyyEinlesen('geschaeftsbereiche', this)"></label>
+      <label class="ghost" style="margin-left:12px">Lieferanten (Vendors) … <input type="file" accept=".csv,.txt" style="display:none"
+        onchange="abbyyEinlesen('lieferanten', this)"></label>
+      <div id="abbyy-msg" class="hint"></div>
+    </div>
     <label class="hint"><input type="checkbox" id="sup-filter-unconfirmed" onchange="loadSuppliers()"> nur unbestätigte Entwürfe zeigen</label>
     <div id="sup-table"></div>
     <div id="sup-form"></div>
@@ -229,6 +357,51 @@
     <div id="journal-table"></div>
   </div>
 
+  <div id="v-qualitaet" class="view pane">
+    <h2>Qualität</h2>
+    <div class="box sect" id="q-testsatz-box">
+      <h4>Testsatz aus bestätigten Rechnungen</h4>
+      <p class="hint">Jede bestätigte Rechnung ist ein Testfall: das Programm liest sie im
+        Trockenlauf neu (ohne die gespeicherten Korrekturen, nichts wird gespeichert oder
+        weitergegeben) und vergleicht je Feld mit dem, was der Mensch bestätigt hat.</p>
+      <p><button id="q-testsatz-btn" onclick="testsatzStart()">Testsatz jetzt prüfen</button>
+        <span id="q-testsatz-status" class="hint"></span></p>
+      <div id="q-testsatz"></div>
+    </div>
+    <div class="box sect">
+      <h4>Lernfortschritt je Lieferant</h4>
+      <p class="hint">Wie weit das Programm je Lieferant ist: wie viele Rechnungen bestätigt, ob die
+        Vorlage gesichert ist, und wie oft zuletzt noch von Hand korrigiert werden musste
+        (Schattenbetrieb). Nur Anzeige – es wird nichts automatisch freigegeben.</p>
+      <div id="q-lernfortschritt"></div>
+    </div>
+    <div class="box sect">
+      <h4>Fehlerstatistik je Lieferant und Feld</h4>
+      <p class="hint">Anteil der Rechnungen eines Lieferanten, bei denen ein Feld von Hand
+        korrigiert wurde – gesamt, in den letzten 4 Wochen und davor. Oben die lohnendsten
+        Verbesserungen.</p>
+      <div id="q-fehler"></div>
+    </div>
+    <div class="box sect">
+      <h4>Lieferanten-Gedächtnis</h4>
+      <p class="hint">Aus den bestätigten Rechnungen je Lieferant abgeleitet (nicht von Hand
+        gepflegt), aktiv ab <span id="q-prof-min">3</span> Rechnungen: übliche Steuersätze,
+        Währung, Betragsspanne, Muster der Rechnungsnummer, Zahlungsziel. Weicht eine neue
+        Rechnung ab, wird das Feld rot (Lesefehler) bzw. ein Hinweis angezeigt.</p>
+      <div id="q-profile"></div>
+    </div>
+    <div class="box sect">
+      <h4>Lernbericht an Emmy</h4>
+      <p class="hint">Einmal am Tag per Mail an die Entwicklerin – <b>anonymisiert</b>: keine Namen, Beträge,
+        IBANs, Rechnungsnummern oder PDFs, nur welche Felder korrigiert wurden und welche Art Fehler es war.
+        Lieferanten erscheinen als Kürzel (z. B. L-3f2a1c); die Zuordnung steht nur hier.</p>
+      <div id="q-lernbericht" class="hint"></div>
+      <details><summary class="hint">Zuordnung Kürzel → Lieferant (bleibt auf diesem Rechner)</summary>
+        <div id="q-zuordnung"></div></details>
+      <button class="ghost" onclick="lernberichtSenden()">Lernbericht jetzt senden</button>
+    </div>
+  </div>
+
   <div id="v-vorlernen" class="view pane">
     <h2>Vorlernen aus Altbestand</h2>
     <p class="hint">Alte Rechnungen eines Ordners werden nach Lieferant und Layout gruppiert; je
@@ -252,6 +425,14 @@ const api = (u, opt) => fetch(u, opt).then(r => r.json());
 // automatisch aus den Lieferanten-Stammdaten (siehe Formularfelder oben),
 // sobald der Lieferant erkannt ist -- kein Duplikat als "fester Wert" noetig.
 const FIXED_FIELDS = ['bestellnummer', 'ust_satz'];
+// Positionsmodus je Lieferant (Teil B, Entscheidung Aaron 10.10.2026):
+// Normalfall "einzeln" -- nur wenige Lieferanten brauchen einen der beiden
+// anderen Modi (rechnung/identify.py POSITIONSMODI).
+const POSITIONSMODUS_LABEL = {
+  einzeln: 'einzeln',
+  zusammenfassung: 'Zusammenfassung',
+  eine_position: 'eine Position je Steuersatz',
+};
 const LI_TYPES = ['text', 'amount', 'number', 'date'];
 // Standard-Spaltennamen der Positionstabelle (SPEC Baustein 1,
 // rechnung/positionen.py STANDARD_COLUMNS) -- als Auswahlliste statt
@@ -261,6 +442,8 @@ const LI_TYPES = ['text', 'amount', 'number', 'date'];
 const LI_COLUMNS = ['pos', 'beschreibung', 'menge', 'einzelpreis_netto', 'gesamt_netto',
                     'mwst_satz', 'waehrung', 'einheit'];
 let STATE = null;
+// Bildlauf ueber Neuaufbauten derselben Rechnung hinweg (STATE wird dabei ersetzt)
+let RENDER_DATEI = null, SCROLL_MERKEN = null;
 let LIST_FILES = [];  // Reihenfolge der zuletzt geladenen Liste, fuer "naechste Rechnung"
 let SUP_ADDRESSES = [];  // Rechnungsadressen fuer die Checkboxen im Lieferanten-Formular
 
@@ -270,39 +453,142 @@ function show(v) {
   document.querySelectorAll('header button').forEach(e => e.classList.remove('active'));
   $('#nav-'+v).classList.add('active');
   if (v === 'human') loadHuman();
+  if (v === 'keine-rechnung') loadKeineRechnung();
   if (v === 'suppliers') loadSuppliers();
   if (v === 'addresses') loadAddresses();
   if (v === 'categories') loadCategories();
   if (v === 'journal') loadJournal();
   if (v === 'vorlernen') loadVorlernen();
+  if (v === 'qualitaet') loadQualitaet();
   if (v === 'scan') loadList();
 }
 const esc = s => (s == null ? '' : String(s)).replace(/[&<>"]/g, c =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const nz = v => (v === null || v === undefined || v === '') ? '' : v;
+// Die Liste (/api/scan) liefert "file" mal als vollen Pfad, die Rechnungsansicht
+// (/api/invoice, STATE.file) immer nur den Dateinamen -- fuer Vergleiche
+// (aktive Zeile, Bildlauf merken) deshalb immer ueber den Dateinamen gleichen,
+// sonst scheitert z.B. "dieselbe Rechnung erneut geoeffnet" am Pfad-Unterschied.
+const basename = s => (s || '').split(/[\\/]/).pop();
 
 /* ================= Rechnungen / Training ================= */
+// Sortierung der Liste (merkt sich der Browser): bereite zuerst / nach Lernwert
+const SORT = { lernwert: localStorage.getItem('sortLernwert') !== '0',
+               bereite: localStorage.getItem('bereiteZuerst') !== '0' };
+let VB = null;   // letzte Vorbereitungs-Uebersicht (Zaehler, ob die Vorbereitung laeuft)
+let LISTE_OFFEN = 0, LISTE_TIMER = null;   // Dateien, die der Server noch im Hintergrund neu liest
+function setSort() {
+  SORT.bereite = $('#vb-bereite').checked;
+  SORT.lernwert = $('#vb-sort').value === 'lernwert';
+  localStorage.setItem('bereiteZuerst', SORT.bereite ? '1' : '0');
+  localStorage.setItem('sortLernwert', SORT.lernwert ? '1' : '0');
+  loadList();
+}
+function vbText(v) {
+  if (!v) return '';
+  let t = `${v.bereit} bereit zur Prüfung, ${v.in_vorbereitung} in Vorbereitung`;
+  if (LISTE_OFFEN) t += ` · ${LISTE_OFFEN} werden gerade aktualisiert`;
+  if (v.wartet) t += `, ${v.wartet} warten`;
+  if (v.fehler) t += `, ${v.fehler} Fehler`;
+  if (!v.aktiv && !v.bereit && v.gesamt) t += ' (Vorbereitung im Hintergrund ist aus)';
+  return t;
+}
+function vbTitel(v) {
+  document.title = v && v.bereit ? `(${v.bereit} bereit) Rechnung – Training & Bibliothek`
+                                  : 'Rechnung – Training & Bibliothek';
+}
+function listKopf(v) {
+  const el = document.createElement('div'); el.className = 'list-kopf';
+  const g = v && v.gesichert;
+  el.innerHTML = `<div class="vb-zeile" id="vb-zeile">${esc(vbText(v))}</div>
+    ${g && g.prozent != null ? `<div class="hint">${g.prozent} % der wartenden Rechnungen kommen von Lieferanten mit gesicherter Vorlage</div>` : ''}
+    <label><input type="checkbox" id="vb-bereite" ${SORT.bereite ? 'checked' : ''} onchange="setSort()"> bereite zuerst</label>
+    <select id="vb-sort" onchange="setSort()" title="Lernwert: erste Rechnung eines neuen Lieferanten zuerst – danach lernt das Programm für alle weiteren dieses Lieferanten">
+      <option value="lernwert" ${SORT.lernwert ? 'selected' : ''}>nach Lernwert</option>
+      <option value="eingang" ${SORT.lernwert ? '' : 'selected'}>nach Eingang</option></select>`;
+  return el;
+}
 async function loadList() {
-  const d = await api('/api/scan');
+  const d = await api(`/api/scan?sortierung=${SORT.lernwert ? 'lernwert' : 'eingang'}&bereite_zuerst=${SORT.bereite}`);
+  VB = d.vorbereitung; vbTitel(VB);
+  LISTE_OFFEN = d.aktualisiert_im_hintergrund || 0;
+  // Der Server rechnet Neues/Veraltetes im Hintergrund nach: Liste kurz danach erneut holen
+  clearTimeout(LISTE_TIMER);
+  if (LISTE_OFFEN) LISTE_TIMER = setTimeout(() => {
+    if (!document.hidden && $('#v-scan').classList.contains('active')) loadList().catch(() => {});
+  }, 4000);
   const auto = d.results.filter(r => r.status === 'auto').length;
   $('#stats').textContent = `${d.results.length} PDF · ${auto} auto`;
   api('/api/menschlich').then(h =>
     $('#human-count').textContent = h.offen.length ? `(${h.offen.length})` : '');
+  api('/api/keine-rechnung').then(k =>
+    $('#keine-rechnung-count').textContent = k.offen.length ? `(${k.offen.length})` : '');
   loadModus();
   LIST_FILES = d.results.map(r => r.file);
   const list = $('#list'); list.innerHTML = '';
+  list.appendChild(listKopf(VB));
   for (const r of d.results) {
+    const vb = r.vorbereitung || {};
     const div = document.createElement('div');
-    div.className = 'row';
+    div.className = 'row' + (vb.zustand && vb.zustand !== 'bereit' ? ' nicht-bereit' : '');
     div.dataset.file = r.file;
+    div.dataset.zustand = vb.zustand || '';
+    const grund = vb.zustand === 'bereit' && vb.grund ? vb.grund
+      : vb.zustand === 'fehler' && vb.fehler ? vb.fehler : '';
     div.innerHTML = `<div>${esc(r.file.split(/[\\/]/).pop())}</div>
+      <span class="badge vb-${esc(vb.zustand)}" data-vb title="${esc(vb.text || '')}">${esc(vb.text || '')}</span>
       <span class="badge ${r.status}" title="${esc((r.hold_reasons || []).join('; '))}">${esc((d.status_labels || {})[r.status] || r.status)}</span>
       ${r.supplier_name ? ' ' + esc(r.supplier_name) : ''}
       ${r.billing_address_name ? ' → ' + esc(r.billing_address_name) : ''}
-      ${r.overall_confidence ? ` · conf ${r.overall_confidence}` : ''}`;
+      ${r.overall_confidence ? ` · conf ${r.overall_confidence}` : ''}
+      ${grund ? `<div class="vb-grund">${esc(grund)}</div>` : ''}`;
     div.onclick = () => openInvoice(r.file, div);
+    if (STATE && STATE.file === basename(r.file)) div.classList.add('active');
     list.appendChild(div);
   }
+}
+
+// Leichte Abfrage alle paar Sekunden: Zaehler, Badges und Fenstertitel
+// aktualisieren, ohne die Liste neu aufzubauen (stoert die Arbeit nicht).
+async function pollVorbereitung() {
+  if (document.hidden || !$('#v-scan').classList.contains('active')) return;
+  let v; try { v = await api('/api/vorbereitung'); } catch (e) { return; }
+  VB = Object.assign(VB || {}, v); vbTitel(VB);
+  const z = $('#vb-zeile'); if (z) z.textContent = vbText(VB);
+  const TXT = { bereit: 'bereit zur Prüfung', vorbereitung: 'wird vorbereitet', wartet: 'wartet', fehler: 'Fehler' };
+  document.querySelectorAll('#list .row').forEach(row => {
+    const name = row.dataset.file.split(/[\\/]/).pop();
+    const neu = (v.dateien || {})[name];
+    if (!neu || neu === row.dataset.zustand) return;
+    row.dataset.zustand = neu;
+    row.classList.toggle('nicht-bereit', neu !== 'bereit');
+    const b = row.querySelector('[data-vb]');
+    if (b) { b.className = 'badge vb-' + neu; b.textContent = TXT[neu]; }
+  });
+}
+setInterval(pollVorbereitung, 8000);
+
+// Nach dem Senden/Bestaetigen: zur naechsten BEREITEN Rechnung, nicht zur naechsten
+// beliebigen -- sonst wartet der Mensch wieder auf die Texterkennung.
+function naechsteBereite(alteListe, alt) {
+  const rows = [...document.querySelectorAll('#list .row')];
+  const bereit = rows.filter(r => r.dataset.zustand === 'bereit' && r.dataset.file !== alt);
+  if (bereit.length) {
+    if (SORT.lernwert) return bereit[0];
+    const idx = alteListe.indexOf(alt);
+    return bereit.find(r => alteListe.indexOf(r.dataset.file) > idx) || bereit[0];
+  }
+  // Vorbereitung im Hintergrund ist aus: wie frueher die naechste der Liste
+  if (VB && !VB.aktiv) {
+    const idx = alteListe.indexOf(alt);
+    const n = idx >= 0 ? alteListe[idx + 1] : null;
+    return n ? rows.find(r => r.dataset.file === n) || null : null;
+  }
+  return null;
+}
+function keineBereite() {
+  const n = VB ? VB.in_vorbereitung + VB.wartet : 0;
+  return 'Keine weitere Rechnung bereit' + (n ? ` – ${n} werden noch vorbereitet` : '') + '.';
 }
 
 let LADE_DATEI = null;
@@ -314,6 +600,11 @@ async function openInvoice(file, row) {
   // dem Laptop ggf. eine Weile; Fehler anzeigen statt still nichts zu tun
   // (Befund Aaron 09.10.2026: "es passiert gar nichts").
   const w = $('#work'); const t0 = Date.now();
+  // Dieselbe Rechnung neu laden (z.B. Positionsmodus geaendert): Bildlauf merken,
+  // renderInvoice stellt ihn wieder her (Aaron 06.11.2026).
+  SCROLL_MERKEN = (STATE && basename(file) === STATE.file && w.classList.contains('split')) ? {
+    pages: w.querySelector(':scope > .pages')?.scrollTop || 0,
+    panels: w.querySelector(':scope > .panels')?.scrollTop || 0, work: w.scrollTop } : null;
   w.className = '';
   w.innerHTML = `<p class="hint" style="padding:12px">„${esc(file)}“ wird gelesen (Texterkennung/KI) … <span id="lade-zeit">0</span> s</p>`;
   const tick = setInterval(() => { const el = $('#lade-zeit'); if (el) el.textContent = Math.round((Date.now() - t0) / 1000); }, 1000);
@@ -347,9 +638,20 @@ function applyInvoiceData(d) {
     match: d.match,
     detectedAddress: d.detected_address || null,
     holdReasons: d.hold_reasons || [], statusLabel: d.status_label || '',
+    hinweise: d.hinweise || [],
+    // rote Pruefungen (Plausibilitaet, Datum, Lieferanten-Gedaechtnis, ...)
+    checks: d.checks || [], roteFelder: d.rote_felder || {}, kiAbweichungen: d.ki_abweichungen || {},
+    // Dezenter Positionsmodus-Vorschlag bei langem Beleg (Teil B) -- eigens
+    // herausgefiltert, damit er gezielt bei "Positionsdaten" erscheint statt
+    // nur in der allgemeinen Hinweis-Liste.
+    langerBelegHinweis: (d.hinweise || []).find(h => h.startsWith('Langer Beleg')) || null,
     llmRejected: d.llm_rejected || {},
     kiPositionen: d.ki_positionen,
+    bestaetigt: {},   // Felder, die der Mensch per ✓ bestätigt hat (nur diese Ansicht)
+    positionenGrund: d.positionen_grund || '',
     lineItems: (d.line_items || []).map(it => ({ ...it })),
+    // je Position: 'offen' | 'bestaetigt' | 'korrigiert' (Aaron 05.11.2026)
+    zeilenStatus: (d.zeilen_status || []).slice(),
     // Herkunft je Zeile aus der vollstaendig ergaenzten Aufstellung
     // (``tax_breakdown``, SPEC Baustein 2/3) in die editierbaren Zeilen
     // einmischen -- nach Satz zugeordnet, da beide Listen dieselben Zeilen
@@ -371,6 +673,20 @@ function applyInvoiceData(d) {
     tabDirty: { positionen: false, ust: false },
     similar: d.similar_suppliers || [],
     li: { active: false, page: 0, columns: [], stop_words: [], selCol: null },
+    // Baustein 2 (Aaron 12.10.2026): Tabelle per Rahmen markieren --
+    // ``boxes``: ein Rahmen je Seite (PDF-Punkte), ``columns``/``mapping``
+    // die zuletzt vom Server erkannte Spaltenaufteilung bzw. die davon
+    // (ggf. vom Menschen geaenderte) Zielspalten-Zuordnung.
+    tabRahmen: { active: false, boxes: [], columns: [], mapping: null },
+    // Einzelne Positions-Zelle als Rahmen-Ziel ausgewaehlt (wie ein
+    // Kopffeld, STATE.zielInput) -- {ri, col} oder null.
+    zielLiCell: null,
+    // Dasselbe fuer eine Zelle der USt-Aufstellung ("Weitere Beträge") --
+    // {ri, satz, k} oder null (Aaron 06.11.2026).
+    zielTaxCell: null,
+    // Baustein 3: Vorschlag fuer die uebrigen Spalten derselben Zeile nach
+    // dem Fuellen EINER Zelle per Rahmen -- {ri, vorschlag} oder null.
+    liVorschlag: null,
   };
   // vorhandene Positionsspalten übernehmen
   if (d.template_line_items) {
@@ -495,9 +811,41 @@ function gruppe(titel, html, zu = false) {
 }
 
 /* Stammdaten-Feld (Geschäftsbereich/Lieferant): Beschriftung über dem Feld */
+// Klick kopiert den angezeigten Wert (deutsches Format, wie in Abbyy
+// einzutragen) -- bis JobRouter angebunden ist, werden die Werte parallel
+// von Hand uebertragen (Aaron 11.10.2026, ca. 60 Rechnungen/Tag).
+const FELD_KNOEPFE = (name, markieren) => `<button class="mk-btn" tabindex="-1"
+      title="Anderen Wert markieren: danach in der Rechnung das Wort anklicken oder einen Rahmen darum ziehen"
+      onclick="${markieren}">⌖</button><button class="ok-btn${(STATE.bestaetigt || {})[name] ? ' ok' : ''}" tabindex="-1"
+      title="Wert bestätigen: der Wert im Feld ist richtig (zählt fürs Anlernen als „richtig erkannt“)"
+      onclick="bestaetigeFeld(event, '${esc(name)}', this)">✓</button>`;
+/* ✓ am Feld: Wert stimmt. Unveraendert = "richtig erkannt" (keine Korrektur);
+   hat der Mensch den Text geaendert, ist es eine Korrektur wie bisher. */
+async function bestaetigeFeld(ev, name, btn) {
+  ev.stopPropagation(); ev.preventDefault();
+  const af = btn.closest('.af'); const inp = af && af.querySelector('input.ab-in');
+  if (!inp) return;
+  const msg = $('#msg');
+  if (!inp.value.trim()) { msg.textContent = `„${name}“ ist leer – erst den Wert in der Rechnung markieren oder eintippen.`; return; }
+  const fbox = !!af.dataset.field;
+  const cur = STATE.current[name] || {};
+  if (fbox) {
+    const def = STATE.defs[name] || { value_type: 'text' };
+    if (fmtWert(cur.value, def.value_type) !== inp.value) { await saveCorrection(name, inp.value); return; }
+  }
+  const r = await api('/api/feld-bestaetigen', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, field: name, value: inp.value,
+                           template_id: STATE.tid || null, quelle_vorher: fbox ? (cur.source || null) : null }) });
+  if (!r || !r.ok) { msg.textContent = `✗ Bestätigen fehlgeschlagen (${name})`; return; }
+  (STATE.bestaetigt = STATE.bestaetigt || {})[name] = true;
+  btn.classList.add('ok');
+  if (fbox) entwarne(inp);
+  msg.textContent = `✓ „${name}“ bestätigt: ${inp.value}`;
+}
 function abFeld(label, id, val, cls = '', ro = '', extra = '') {
-  return `<div class="af ${extra}"><label>${esc(label)}</label>
-    <input class="ab-in ${val ? cls : ''}" id="${id}" value="${esc(val || '')}" ${ro}></div>`;
+  return `<div class="af ${extra}" data-input="${id}" onclick="zielInput('${id}', this)"><label>${esc(label)}</label>
+    <input class="ab-in ${val ? cls : ''}" id="${id}" value="${esc(val || '')}" ${ro}>${FELD_KNOEPFE(id, `event.stopPropagation(); zielInput('${id}', this.closest('.af')); $('#msg').textContent = 'Jetzt in der Rechnung den richtigen Wert anklicken oder einen Rahmen darum ziehen.'`)}</div>`;
 }
 
 /* Rechnungsfeld: wie Abbyy grün = sicher erkannt, rot = unsicher; darunter der
@@ -516,15 +864,26 @@ function fBox(name, label, cls = '') {
   const cur = STATE.current[name] || {};
   const val = fmtWert(cur.value, def.value_type);
   const da = cur.source && cur.source !== 'missing' && val !== '';
-  const st = !da ? '' : (cur.source === 'manual' || cur.confidence == null || cur.confidence >= 0.7) ? 'gut' : 'unsicher';
+  const rot = (STATE.roteFelder || {})[name] || [];
+  // Gegencheck (gruendlicher Modus): KI liest etwas anderes als die Vorlage -> unsicher
+  const kiAbw = (STATE.kiAbweichungen || {})[name];
+  const st = (rot.length || kiAbw) ? 'unsicher'
+    : !da ? '' : (cur.source === 'manual' || cur.confidence == null || cur.confidence >= 0.7) ? 'gut' : 'unsicher';
   const raw = da && cur.raw && String(cur.raw).trim() !== val && cur.source !== 'manual'
     ? `<div class="raw" title="gelesen (${esc(cur.source)})">${esc(String(cur.raw).slice(0, 60))}</div>` : '';
-  return `<div class="af ${cls}" data-field="${esc(name)}" onclick="selectField('${esc(name)}', this)">
-    <label>${esc(label)}${def.required ? ' *' : ''}</label>
-    <input class="ab-in val-input ${st}" data-field="${esc(name)}" value="${esc(val)}"
+  // Unsicher = rot (niedrige Konfidenz / rote Pruefung) oder KI-Vorschlag oder
+  // leeres Pflichtfeld. Tab springt nur zwischen diesen (siehe Tab-Handler).
+  const ki = da && cur.source === 'llm' && st !== 'unsicher';
+  const fehlt = !da && def.required;
+  const geprueft = !!(STATE.bestaetigt || {})[name];
+  const uns = !geprueft && (st === 'unsicher' || ki || fehlt);
+  const unsCls = uns ? ' uns' + (st === 'unsicher' ? '' : ' kuenstlich') : (da ? ' sicher' : '');
+  return `<div class="af ${cls}${unsCls}" data-field="${esc(name)}" onclick="selectField('${esc(name)}', this)">
+    <label>${esc(label)}${def.required ? ' *' : ''}${ki ? ' <span class="hint">(KI-Vorschlag)</span>' : ''}${fehlt ? ' <span class="hint">(fehlt)</span>' : ''}</label>
+    <input class="ab-in val-input ${st}" data-field="${esc(name)}" ${uns ? 'data-unsicher="1"' : ''} value="${esc(val)}"
            title="${esc(name)}${cur.source ? ' · ' + esc(cur.source) : ''}${cur.confidence ? ' · ' + cur.confidence : ''}"
-           onchange="saveCorrection('${esc(name)}', this.value)">
-    ${raw}<div class="ass"></div></div>`;
+           onchange="saveCorrection('${esc(name)}', this.value); entwarne(this)">${FELD_KNOEPFE(name, `korrigieren(event, '${esc(name)}', this)`)}
+    ${raw}${rot.map(g => `<div class="chk bad">✗ ${esc(g)}</div>`).join('')}${kiAbw ? `<div class="chk bad" title="Unabhängige KI-Lesung weicht von der Vorlage ab – bitte prüfen">⚠ KI liest: ${esc(fmtWert(kiAbw.ki, def.value_type))}</div>` : ''}<div class="ass"></div></div>`;
 }
 
 /* Anschrift-Zeilen <-> Straße/PLZ/Ort/Land */
@@ -654,8 +1013,48 @@ async function lieferantSpeichern(bestaetigen) {
   $('#msg').textContent = `Lieferant „${name || id}“ ${bestaetigen ? 'bestätigt' : 'angelegt'}.`;
 }
 
+// Lieferanten-Bibliothek-Status fuer die Bearbeitungsansicht (Aaron
+// 06.11.2026, Befund "erkennt garnichts -- und wenn, weiss ich nicht ob die
+// Bibliothek getroffen hat"): fasst zusammen, was /api/invoice an Match-/
+// Lieferanten-/Rueckstellinformation schon mitliefert (d.match, d.supplier,
+// hold_reasons), zu EINEM klaren Status statt dem knappen ".hint"-Text.
+// Eigene Funktion statt den Fall in renderInvoice() zu verschachteln -- hier
+// unabhaengig testbar/lesbar, und beruehrt keine Stelle, an der parallel
+// andere Worker (pdfium-sperre/ui-aufraeumen) an derselben Datei arbeiten.
+function liefBibliothekStatus(d, holdReasons) {
+  const supO = d.supplier || null;
+  const isDraft = !!(supO && supO.bestaetigt === false);
+  if (supO && !isDraft) {
+    const score = d.match && d.match.score != null ? d.match.score : null;
+    return { cls: 'ok', icon: '✓',
+      text: `Lieferant aus Bibliothek erkannt${score != null ? ` (Score ${score})` : ''}`,
+      detail: 'IBAN, USt-IdNr und Adresse dieses Feldes stammen aus den gepflegten Stammdaten des Lieferanten.' };
+  }
+  if (supO && isDraft) {
+    return { cls: 'warn', icon: '⚠',
+      text: 'Lieferant in der Bibliothek gefunden, aber noch nicht bestätigt',
+      detail: 'Stammdaten im Reiter „Lieferanten“ prüfen und bestätigen – erst danach gelten sie als gesichert.' };
+  }
+  // Kein Treffer: den tatsaechlichen Grund aus hold_reasons nehmen statt
+  // generisch "nicht erkannt" zu zeigen (identify_with_reason/pipeline.py
+  // schreibt ihn als erstes Element, Praefix "Lieferant: ").
+  const grundRoh = (holdReasons || []).find(h => /^Lieferant:/.test(h));
+  const grund = grundRoh ? grundRoh.replace(/^Lieferant:\s*/, '') : 'kein Lieferant aus der Bibliothek passt';
+  return { cls: 'bad', icon: '⚠', text: 'Kein Lieferant aus der Bibliothek erkannt', detail: grund };
+}
+
 function renderInvoice(d) {
-  const work = $('#work'); work.innerHTML = ''; work.classList.add('split');
+  const work = $('#work');
+  // Neuaufbau derselben Rechnung (Wert bestaetigt/markiert, Zeile geaendert):
+  // Bildlaufposition beider Spalten behalten statt nach oben zu springen
+  // (Aaron 06.11.2026). Andere Rechnung -> oben anfangen.
+  const scrollVorher = SCROLL_MERKEN || (RENDER_DATEI === STATE.file ? {
+    pages: work.querySelector(':scope > .pages')?.scrollTop || 0,
+    panels: work.querySelector(':scope > .panels')?.scrollTop || 0,
+    work: work.scrollTop } : null);
+  SCROLL_MERKEN = null;
+  RENDER_DATEI = STATE.file;
+  work.innerHTML = ''; work.classList.add('split');
   // Rechnung links, Werte rechts -- jede Spalte scrollt fuer sich, damit auf dem
   // Laptop-Bildschirm Werte und Rechnung gleichzeitig zu sehen sind.
   const w = document.createElement('div'); w.className = 'panels';
@@ -696,9 +1095,36 @@ function renderInvoice(d) {
     h.innerHTML = `<b>${esc(holdLabel || 'zurückgestellt – menschlich bearbeiten')}</b><br>${holdReasons.map(esc).join('<br>')}`;
     fbox.appendChild(h);
   }
+  // Hinweise (blockieren nichts, z.B. Skonto gestaffelt, Gegencheck
+  // uebersprungen) -- der "Langer Beleg"-Vorschlag steht gezielt bei
+  // "Positionsdaten" (renderPositionsmodusAuswahl), hier nicht doppelt.
+  // Pflichtangaben komplett aus der Oberflaeche entfernt (Aaron 06.11.2026) --
+  // Hinweis bleibt im Hintergrund (kein Rueckstellgrund, Export), nur nicht sichtbar.
+  const sonstigeHinweise = (d.hinweise || STATE.hinweise || []).filter(h =>
+    !h.startsWith('Langer Beleg') && !h.startsWith('Pflichtangaben ('));
+  if (sonstigeHinweise.length) {
+    const h = document.createElement('div'); h.className = 'box';
+    h.innerHTML = `<div class="hint">${sonstigeHinweise.map(esc).join('<br>')}</div>`;
+    fbox.appendChild(h);
+  }
+  // Rote Pruefungen mit Grund (Plausibilitaet/Datum/Lieferanten-Gedaechtnis,
+  // Aaron 10.10.2026) -- die betroffenen Felder stehen zusaetzlich rot.
+  const rote = (d.checks || STATE.checks || []).filter(c => c.ok === false);
+  if (rote.length) {
+    const h = document.createElement('div'); h.className = 'box';
+    h.innerHTML = '<h4>Prüfungen rot</h4>' + rote.map(c =>
+      `<div class="chk bad">✗ ${esc(c.name)}${c.detail ? ': ' + esc(c.detail) : ''}</div>`).join('');
+    fbox.appendChild(h);
+  }
 
   // ===== Prüfmaske wie Abbyy FlexiCapture "European Invoice" (Vorlage Aaron, 09.10.2026) =====
   const isDraft = !!(d.supplier && d.supplier.bestaetigt === false);
+  // Kein bestätigter Lieferant -> "Senden" nimmt den Dummy-Lieferanten (Aaron 17.10.2026)
+  if (!d.supplier || d.supplier.bestaetigt === false) {
+    fbox.insertAdjacentHTML('beforeend', `<div class="box" id="dummy-hinweis"><div class="hint" style="font-weight:600">
+      Lieferant unbekannt → wird als „${esc(d.dummy_name || 'Dummy Lieferant')}“ gesendet.
+      Die erkannten Daten gehen als Bemerkung mit. Wer es besser weiß: oben einen echten Lieferanten wählen.</div></div>`);
+  }
   const kiL = d.ki_lieferant || {};
   const kiE = d.ki_empfaenger || {};
   const addrObj = (STATE.addresses || []).find(a => a.id === variant) || null;
@@ -731,6 +1157,14 @@ function renderInvoice(d) {
     ${!addrObj && gaVorschlag ? `<button onclick="geschaeftsbereichAnlegen()">✓ Als Geschäftsbereich anlegen</button>` : ''}`);
   fbox.appendChild(ga);
 
+  // Lieferant-Bibliothek-Status (Aaron 06.11.2026, Befund "erkennt
+  // garnichts"): eigener, klar sichtbarer Block statt nur dem knappen
+  // ".hint"-Vermerk -- grün = erkannt+bestätigt (Stammdaten gelten), gelb =
+  // erkannt aber unbestätigter Entwurf, rot = kein Treffer (mit dem
+  // tatsächlichen Grund aus hold_reasons/identify_with_reason, nicht nur
+  // generisch "nicht erkannt").
+  const liefStatus = liefBibliothekStatus(d, holdReasons);
+
   // Lieferant
   const supO = d.supplier || null;
   const lA = supO && (supO.address_lines || []).length ? splitAdresse(supO.address_lines)
@@ -744,7 +1178,7 @@ function renderInvoice(d) {
   const li = gruppe('Lieferant', `
     <div class="ab-row"><button class="ghost mini" onclick="suchen('lieferant')">Suchen...</button>
       <label class="inl">ID</label><input class="ab-in ${lCls}" id="sid" value="${esc(lId)}" ${supO ? 'readonly' : ''} placeholder="neu: wird beim Anlegen vergeben"></div>
-    ${isDraft ? '<div class="hint"><span class="badge zurueckgestellt">unbestätigt</span> Unbekannter Lieferant – aus dieser Rechnung angelegt, bitte prüfen.</div>' : ''}
+    <div class="lief-status ${liefStatus.cls}"><b>${liefStatus.icon} ${esc(liefStatus.text)}</b><br>${esc(liefStatus.detail)}</div>
     ${abFeld('Name', 'sname', lName, lCls, lRO)}
     <div class="ab-row2">${abFeld('Umsatzsteuer ID', 'ls-ust', lUst, lCls, lRO)}${abFeld('Steuernummer', 'ls-stnr', supO ? (supO.creditor_id || kiL.creditor_id || '') : (kiL.creditor_id || ''), lCls, lRO)}</div>
     ${abFeld('Straße', 'ls-strasse', lA.strasse, lCls, lRO)}
@@ -754,7 +1188,9 @@ function renderInvoice(d) {
     <div class="hint">${supO && !isDraft ? (d.match && d.match.score != null ? `erkannt (${d.match.score})` : 'gewählt') + ' – Stammdaten ändern im Reiter „Lieferanten“'
       : (lName || lIban || lUst) ? 'Von der Rechnung gelesen (teils KI) – bitte prüfen.' : 'Kein Lieferant erkannt – über „Suchen...“ wählen.'}</div>
     ${isDraft ? `<button onclick="lieferantSpeichern(true)">✓ Lieferant bestätigen</button>
-                 <button class="danger" onclick="discardDraftSupplier()">Entwurf verwerfen</button>`
+                 <button class="ghost" onclick="uebernehmenDialog(STATE.supplier, 'rechnung')">In bestehenden Lieferanten übernehmen…</button>
+                 <button class="danger" onclick="discardDraftSupplier()">Entwurf verwerfen</button>
+                 ${entwurfHinweisName(STATE.hinweise) ? `<div class="hint">Hinweis: der Name des bestehenden Lieferanten „${esc(entwurfHinweisName(STATE.hinweise))}“ steht auf der Rechnung – vermutlich ist der Entwurf dieser Lieferant (dann „übernehmen“, nicht „bestätigen“, sonst entsteht ein zweiter Lieferant).</div>` : ''}`
       : !supO && (lName || lIban || lUst) ? `<button onclick="lieferantSpeichern(false)">✓ Als Lieferant anlegen</button>` : ''}`);
   fbox.appendChild(li);
   if ((STATE.similar || []).length) {
@@ -777,15 +1213,16 @@ function renderInvoice(d) {
   rd.innerHTML = `<div class="ab-h">Rechnungsdaten</div>
     <div class="ab-row2">${fBox('rechnungsnummer', 'Rechnungsnummer')}${fBox('rechnungsdatum', 'Rechnungsdatum')}</div>`;
   fbox.appendChild(rd);
-  fbox.appendChild(gruppe('Sonstige Daten',
-    `<div class="ab-row2">${fBox('faelligkeit', 'Fälligkeitsdatum')}${fBox('einkaeufer', 'Einkäufer')}</div>`));
+  // Block "Sonstige Daten" entfernt (Aaron 13.10.2026). Nur noch sichtbar, wenn eines der
+  // Felder per RECHNUNG_FELDER_AUS ausdruecklich wieder eingeschaltet ist.
+  const sonst = [['faelligkeit', 'Fälligkeitsdatum'], ['einkaeufer', 'Einkäufer'], ['leistungsdatum', 'Leistungsdatum']]
+    .filter(([n]) => STATE.defs[n]);
+  if (sonst.length) fbox.appendChild(gruppe('Sonstige Daten',
+    `<div class="ab-row2">${sonst.map(([n, l]) => fBox(n, l)).join('')}</div>`));
 
   // Beträge
-  const rc = ((STATE.current.reverse_charge || {}).value || '') === 'ja';
   const be = document.createElement('div'); be.className = 'ab-sect';
   be.innerHTML = `<div class="ab-h">Beträge</div>
-    <label class="ab-chk"><input type="checkbox" ${rc ? 'checked' : ''}
-      onchange="saveCorrection('reverse_charge', this.checked ? 'ja' : 'nein')"> Reversed Charge</label>
     <div class="ab-row2">${fBox('brutto', 'Bruttogesamtbetrag')}${fBox('waehrung', 'Währung', 'w-kurz')}</div>`;
   fbox.appendChild(be);
   const wb = gruppe('Weitere Beträge', '');
@@ -799,6 +1236,11 @@ function renderInvoice(d) {
 
   // Positionsdaten
   const pd = gruppe('Positionsdaten', '');
+  pd.querySelector('.ab-body').appendChild(renderPositionsmodusAuswahl(supO));
+  const trBtn = document.createElement('div');
+  trBtn.innerHTML = `<button class="ghost mini" onclick="toggleTabRahmen()">Tabelle im PDF markieren${STATE.tabRahmen.active ? ' – ausblenden' : ''}</button>`;
+  pd.querySelector('.ab-body').appendChild(trBtn);
+  if (STATE.tabRahmen.active) pd.querySelector('.ab-body').appendChild(renderTabRahmenPanel());
   if (STATE.li.active) pd.querySelector('.ab-body').appendChild(renderLiPanel());
   pd.querySelector('.ab-body').appendChild(renderLiPreviewBox(STATE.lineItems));
   fbox.appendChild(pd);
@@ -808,7 +1250,8 @@ function renderInvoice(d) {
 
   // übrige Felder (z.B. Kostenstelle, MwSt-Satz aus dem Kopf, eigene/gelernte Felder)
   const ABBYY_FELDER = new Set(['rechnungsnummer', 'rechnungsdatum', 'faelligkeit', 'einkaeufer',
-    'brutto', 'waehrung', 'netto', 'ust_betrag', 'zahlungsreferenz', 'ust_aufstellung', 'belegart']);
+    'brutto', 'waehrung', 'netto', 'ust_betrag', 'zahlungsreferenz', 'ust_aufstellung', 'belegart',
+    'reverse_charge']);   // Reverse Charge: nicht mehr in der Oberfläche (Aaron 05.11.2026), Datenmodell/Export unverändert
   const rest = Object.keys(STATE.defs).filter(n => !ABBYY_FELDER.has(n) && STATE.defs[n].value_type !== 'taxblock');
   if (rest.length) fbox.appendChild(gruppe('Weitere Felder',
     `<div class="ab-row2 wrap">${rest.map(n => fBox(n, FELD_LABEL[n] || n)).join('')}</div>`, true));
@@ -821,19 +1264,23 @@ function renderInvoice(d) {
 
   const bar = document.createElement('div'); bar.className = 'actionbar';
   bar.innerHTML = `
-    <button onclick="saveTemplate()">Template speichern</button>
-    ${canConfirm() ? `<button class="ghost" onclick="confirmTpl()">Extraktion bestätigen (b)</button>` : ''}
-    <button class="ghost" onclick="addCustomField()">+ eigenes Feld</button>
+    <button onclick="saveTemplate()" title="Aktuelle Zuordnung als Vorlage dieses Lieferanten speichern">Template speichern</button>
+    <button class="senden" onclick="sendeRechnung()" title="Prüfen, lernen, an JobRouter freigeben, nächste Rechnung (Taste b)">✓ Senden</button>
     <button class="ghost" onclick="toggleLi()">Positionstabelle ${STATE.li.active ? 'ausblenden' : 'anlernen'}</button>
-    <button class="ghost danger" onclick="ausEingangEntfernen()" title="Z.B. Testmail oder Spam – wird nicht gelöscht, sondern nach data\\entfernt verschoben">Aus Eingang entfernen</button>
-    <div class="hint">Feld anklicken, dann Wort im PDF anklicken = Position lernen · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = bestätigen + nächste' : ''}</div>
+    <details><summary>Weitere Aktionen</summary><div>
+      <button class="ghost" onclick="jobrouterVorschau()" title="Was beim Senden an JobRouter geht">JobRouter-Vorschau</button>
+      <button class="ghost" onclick="addCustomField()">+ eigenes Feld</button>
+      <button class="ghost danger" onclick="ausEingangEntfernen()" title="Z.B. Testmail oder Spam – wird nicht gelöscht, sondern nach data\\entfernt verschoben">Aus Eingang entfernen</button>
+      <button class="ghost danger" onclick="keineRechnungVonHand()" title="Diese Rechnung ist gar keine Rechnung (z.B. Lieferschein/Angebot) – von Hand in den Ordner 'Keine Rechnung' verschieben">Keine Rechnung</button>
+    </div></details>
+    <div class="hint">Je Feld: ⌖ = anderen Wert in der Rechnung markieren (Wort anklicken oder Rahmen ziehen, wird gelernt) · ✓ = Wert stimmt (zählt als „richtig erkannt“) · Shift+Klick = Anker (Label)${canConfirm() ? ' · Taste „b" = senden + nächste' : ''}</div>
     <div id="msg" class="hint"></div>`;
   fbox.appendChild(bar);
   w.appendChild(fbox);
 
   for (const pg of d.pages) {
     const wrap = document.createElement('div'); wrap.className = 'pdfwrap';
-    const img = new Image(); img.src = pg.image;
+    const img = new Image(); img.src = pg.image; img.draggable = false;
     wrap.appendChild(img);
     for (const wd of pg.words) {
       const el = document.createElement('div');
@@ -846,12 +1293,63 @@ function renderInvoice(d) {
       el.onclick = (ev) => clickWord(pg.index, wd.i, ev);
       wrap.appendChild(el);
     }
+    rahmenAuswahl(wrap, pg.index);
     pagesCol.appendChild(wrap);
-    img.onload = fitPages;
+    img.onload = () => { fitPages(); scrollZurueck(); };
   }
+  // Seitenbilder laden neu -> Hoehe stimmt erst nach onload, daher auch dort.
+  function scrollZurueck() {
+    if (!scrollVorher) return;
+    pagesCol.scrollTop = scrollVorher.pages;
+    w.scrollTop = scrollVorher.panels;
+    work.scrollTop = scrollVorher.work;
+  }
+  scrollZurueck();
   paintMarkierungen();
   paint();
+  paintTabRahmen();
+  unsicherHinweis();
 }
+
+/* ---- Pruefen im Rutsch: Tab springt von unsicherem zu unsicherem Feld ---- */
+// Vom Menschen geprueft/korrigiert: nicht mehr als unsicher fuehren
+function entwarne(inp) {
+  if (!inp.value.trim()) return;
+  delete inp.dataset.unsicher;
+  inp.classList.remove('unsicher', 'vorschlag'); inp.classList.add('gut');
+  const af = inp.closest('.af'); if (af) { af.classList.remove('uns', 'kuenstlich'); af.classList.add('sicher'); }
+  const h = $('#uns-hinweis'); if (h) { h.remove(); unsicherHinweis(); }
+}
+function unsicherHinweis() {
+  const f = $('#fields'); if (!f) return;
+  const n = f.querySelectorAll('input.val-input[data-unsicher="1"]').length;
+  const el = document.createElement('div'); el.id = 'uns-hinweis';
+  el.className = n ? '' : 'ok';
+  el.textContent = n ? `⚠ ${n} Feld${n === 1 ? '' : 'er'} prüfen (rot/orange) – Tab springt von einem zum nächsten; grüne Felder brauchen keinen Blick.`
+                     : '✓ Alles sicher erkannt – kurz ansehen und senden.';
+  f.insertBefore(el, f.firstChild);
+}
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Tab' || ev.ctrlKey || ev.altKey || ev.metaKey) return;
+  const f = $('#fields'); if (!f) return;
+  const a = document.activeElement;
+  const alle = [...f.querySelectorAll('input.val-input')];
+  const imFeld = a && alle.includes(a);
+  if (!imFeld && a !== document.body) return;       // Tab in anderen Masken bleibt wie er ist
+  const uns = alle.filter(i => i.dataset.unsicher === '1');
+  if (!uns.length) return;
+  const pos = imFeld ? alle.indexOf(a) : -1;
+  const ziel = ev.shiftKey ? uns.filter(i => alle.indexOf(i) < (pos < 0 ? alle.length : pos)).pop()
+                           : uns.find(i => alle.indexOf(i) > pos);
+  if (ziel) {
+    ev.preventDefault(); ziel.focus(); ziel.select();
+    ziel.scrollIntoView({ block: 'nearest' });
+    const af = ziel.closest('.af'); if (af && af.dataset.field) selectField(af.dataset.field, af);
+  } else if (!ev.shiftKey) {
+    const b = document.querySelector('button.senden');
+    if (b) { ev.preventDefault(); b.focus(); }       // alles geprueft -> Senden
+  }
+});
 
 /* -------- Vorschlaege im PDF umrahmen (Baustein 11b) -------- */
 // Rahmen je vorausgefuelltem Feld (KI/Vorlage/E-Rechnung) und je Tabellenzeile,
@@ -1062,6 +1560,97 @@ async function discardDraftSupplier() {
   applyInvoiceData(d2);
 }
 
+/* Entwurf in bestehenden Lieferanten uebernehmen (entwurf_uebernahme.py,
+   Entscheidung Aaron 09.11.2026): die Lieferanten aus dem Excel-Import haben
+   weder USt-IdNr noch IBAN, deshalb legt jede ihrer Rechnungen einen Entwurf
+   "Unbekannt (DE...)" an. "Bestaetigen" machte daraus einen ZWEITEN
+   Lieferanten (Dublette); hier wandern die Kennungen des Entwurfs stattdessen
+   in den bestehenden Lieferanten. Immer ein bewusster Klick des Menschen --
+   der Pipeline-Hinweis (Name eines bestehenden Lieferanten steht auf der
+   Rechnung) belegt nur die Auswahl vor, entscheidet aber nichts. */
+function entwurfHinweisName(hinweise) {
+  // pipeline.ENTWURF_HINWEIS: "Lieferanten-Entwurf: der Name des bestehenden
+  // Lieferanten 'X' steht auf der Rechnung -- vermutlich ist er gemeint"
+  for (const h of hinweise || []) {
+    const m = /^Lieferanten-Entwurf: der Name des bestehenden Lieferanten '(.+?)' steht auf der Rechnung/.exec(h || '');
+    if (m) return m[1];
+  }
+  return '';
+}
+
+async function uebernehmenDialog(entwurf, nachher) {
+  // nachher: 'rechnung' (Pruefmaske: Rechnung neu laden) | 'liste' (Reiter Lieferanten)
+  if (!entwurf || !entwurf.id || entwurf.bestaetigt !== false) return;
+  const liste = await api('/api/suppliers').then(r => Array.isArray(r) ? r : (r.suppliers || []));
+  const ziele = liste.filter(sp => sp.bestaetigt !== false && sp.id !== entwurf.id);
+  const hinweisName = nachher === 'rechnung' ? entwurfHinweisName(STATE && STATE.hinweise) : '';
+  const vorschlag = hinweisName
+    ? ziele.find(sp => (sp.name || '').trim().toLowerCase() === hinweisName.trim().toLowerCase()) || null
+    : null;
+  const dlg = document.createElement('div'); dlg.className = 'ab-dlg';
+  dlg.innerHTML = `<div class="ab-dlg-in">
+      <h4>Entwurf „${esc(entwurf.name || entwurf.id)}“ in bestehenden Lieferanten übernehmen</h4>
+      <div class="hint">USt-IdNr, IBAN, Domain, Bankdaten und Anschrift des Entwurfs wandern in den gewählten
+        Lieferanten (seine vorhandenen Werte bleiben). Der Entwurf wird gelöscht, seine Rechnungen
+        zählen danach zum gewählten Lieferanten. Nur bestätigte Lieferanten stehen zur Wahl.</div>
+      ${vorschlag ? `<div class="hint"><b>Vorschlag:</b> „${esc(vorschlag.name)}“ steht laut Hinweis auf der Rechnung – bitte prüfen.</div>` : ''}
+      <input id="ab-q" placeholder="Name, ID, Lieferantennr., USt-IdNr, Ort ..." autofocus>
+      <div id="ab-list"></div>
+      <button class="ghost" onclick="this.closest('.ab-dlg').remove()">Abbrechen</button></div>`;
+  document.body.appendChild(dlg);
+  const zeichne = () => {
+    const q = $('#ab-q').value.toLowerCase();
+    let hits = ziele.filter(x => JSON.stringify(x).toLowerCase().includes(q)).slice(0, 50);
+    // Vorschlag aus dem Hinweis immer oben (vorbelegt), auch ohne Suchtext
+    if (vorschlag && !q) hits = [vorschlag, ...hits.filter(x => x.id !== vorschlag.id)];
+    $('#ab-list').innerHTML = hits.length ? hits.map(x => `<div class="ab-hit" data-id="${esc(x.id)}" ${vorschlag && x.id === vorschlag.id ? 'style="background:#e3efe9"' : ''}>
+        <b>${esc(x.name || x.id)}</b> <span class="hint">${esc(x.id)}${x.external_id ? ' · Nr. ' + esc(x.external_id) : ''} · ${esc((x.address_lines || []).join(', '))}</span>
+        ${vorschlag && x.id === vorschlag.id ? '<span class="badge">Vorschlag aus Hinweis</span>' : ''}</div>`).join('')
+      : '<div class="hint">Nichts gefunden.</div>';
+    $('#ab-list').querySelectorAll('.ab-hit').forEach(el => el.onclick = () =>
+      uebernehmenAusfuehren(entwurf, ziele.find(x => x.id === el.dataset.id), dlg, nachher));
+  };
+  $('#ab-q').oninput = zeichne; zeichne(); $('#ab-q').focus();
+}
+
+async function uebernehmenAusfuehren(entwurf, ziel, dlg, nachher) {
+  if (!ziel) return;
+  if (!confirm(`Entwurf „${entwurf.name || entwurf.id}“ in „${ziel.name || ziel.id}“ (${ziel.id}) übernehmen?\n\n`
+               + `Der Entwurf wird gelöscht. USt-IdNr/IBAN/Bankdaten gehen in den bestehenden Lieferanten, `
+               + `seine Rechnungen zählen danach zu ihm. Das lässt sich nicht rückgängig machen.`)) return;
+  dlg.remove();
+  const r = await api('/api/suppliers/' + encodeURIComponent(entwurf.id) + '/uebernehmen', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ziel_id: ziel.id }),
+  });
+  // #msg gibt es nur in der Pruefmaske; im Reiter "Lieferanten" steht die
+  // Meldung ueber der (geleerten) Bearbeitungsmaske.
+  const meldung = text => {
+    const m = $('#msg');
+    if (m && nachher === 'rechnung') m.textContent = text;
+    else if ($('#sup-form')) $('#sup-form').innerHTML = `<div class="hint">${esc(text)}</div>`;
+    else alert(text);
+  };
+  if (!r || !r.ok) {
+    meldung('Übernahme fehlgeschlagen: ' + ((r && r.detail) || 'unbekannter Fehler'));
+    return;
+  }
+  const neu = Object.entries(r.uebernommen || {}).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : (typeof v === 'object' ? JSON.stringify(v) : v)}`);
+  if (nachher === 'rechnung' && STATE && STATE.file) {
+    const d2 = await api('/api/invoice?file=' + encodeURIComponent(STATE.file));
+    applyInvoiceData(d2);          // leert #msg -- Meldung deshalb erst danach
+  } else {
+    await loadSuppliers();         // leert #sup-form -- dito
+  }
+  meldung(`Entwurf in „${ziel.name || ziel.id}“ übernommen` + (neu.length ? ` (${neu.join('; ')}).` : ' (nichts Neues, Entwurf gelöscht).'));
+}
+
+async function uebernehmenSupplierRow(id) {
+  const rows = await api('/api/suppliers').then(r => Array.isArray(r) ? r : (r.suppliers || []));
+  const s = rows.find(x => x.id === id);
+  if (s) uebernehmenDialog(s, 'liste');
+}
+
 function renderSupplierInfoBox(sup) {
   // Reines Anzeige-Feld: diese Werte gehoeren zum Lieferanten (Reiter
   // "Lieferanten"), nicht zur Rechnung -- werden hier nur zur Kontrolle
@@ -1089,6 +1678,12 @@ function renderSupplierInfoBox(sup) {
 function selectField(name, tr) {
   STATE.li.selCol = null;
   STATE.selField = name;
+  STATE.zielInput = null;
+  STATE.zielLiCell = null;
+  STATE.zielTaxCell = null;
+  document.querySelectorAll('.li-cell-ziel, .tax-cell-ziel').forEach(x => x.classList.remove('li-cell-ziel', 'tax-cell-ziel'));
+  document.querySelectorAll('#fields .ziel-sel').forEach(x => x.classList.remove('ziel-sel'));
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
   document.querySelectorAll('#fields [data-field].sel, #fields tr.sel').forEach(x => x.classList.remove('sel'));
   tr.classList.add('sel');
   document.querySelectorAll('.mk[data-field]').forEach(e =>
@@ -1169,6 +1764,224 @@ function wordText(page, i) {
   const pg = STATE.pages[page]; const wd = pg && pg.words[i]; return wd ? wd.text : '?';
 }
 
+/* -------- Tabelle per Rahmen markieren (Baustein 2, Aaron 12.10.2026) ----
+   "Tabelle im PDF markieren": Rahmen um die ganze Tabelle (je Seite einer)
+   statt Kopfwoerter einzeln anzuklicken -- das Programm erkennt Spalten
+   ueber die Wortluecken (tabelle.markiere_tabelle) und schlaegt je Spalte
+   eine LI_STD-Zuordnung vor (Dropdown, sofort wirksam). */
+function toggleTabRahmen() {
+  STATE.tabRahmen.active = !STATE.tabRahmen.active;
+  if (!STATE.tabRahmen.active) Object.assign(STATE.tabRahmen, { boxes: [], columns: [], mapping: null });
+  renderCurrent();
+}
+function tabRahmenZuruecksetzen() {
+  Object.assign(STATE.tabRahmen, { boxes: [], columns: [], mapping: null });
+  renderCurrent();
+}
+function tabRahmenSeiteZeigen(i) {
+  const w = document.querySelectorAll('.pdfwrap')[i]; if (w) w.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function tabRahmenSeiteLoeschen(i) {
+  STATE.tabRahmen.boxes = STATE.tabRahmen.boxes.filter(b => b.page !== i);
+  if (!STATE.tabRahmen.boxes.length) {
+    Object.assign(STATE.tabRahmen, { columns: [], mapping: null });
+    renderCurrent();
+  } else {
+    renderCurrent();
+    tabRahmenAktualisieren();
+  }
+}
+function tabRahmenMappingGeaendert(i, value) {
+  STATE.tabRahmen.mapping[i] = value;
+  tabRahmenAktualisieren();
+}
+function renderTabRahmenPanel() {
+  const box = document.createElement('div'); box.className = 'box';
+  const cols = STATE.tabRahmen.columns;
+  const seiten = [...new Set(STATE.tabRahmen.boxes.map(b => b.page + 1))].sort((a, b) => a - b);
+  const ziele = [...LI_STD, ['pos', 'Pos.'], ['ignorieren', 'ignorieren']];
+  box.innerHTML = `<h4>Tabelle im PDF markieren</h4>
+    <div class="hint">In der Rechnung links einen Rahmen um die Tabelle ziehen (Kopfzeile bis letzte
+      Position). Bei mehrseitigen Tabellen auf jeder weiteren Seite ebenfalls einen Rahmen ziehen –
+      ein Rahmen ersetzt den vorigen auf derselben Seite. Esc bricht ab.</div>
+    <div class="hint">Eine Rechnung, je Seite ein Rahmen – die Spalten gelten für alle Seiten.
+      Seiten mit Rahmen sind lila; × löscht den Rahmen dieser Seite, ein neuer Rahmen ersetzt ihn.</div>
+    <div class="tr-seiten">${STATE.pages.map((_pg, i) => seiten.includes(i + 1)
+      ? `<span class="tr-seite ok" onclick="tabRahmenSeiteZeigen(${i})" title="Zur Seite springen">Seite ${i + 1} ✓
+           <button class="danger" style="padding:0 4px" title="Rahmen dieser Seite löschen"
+             onclick="event.stopPropagation();tabRahmenSeiteLoeschen(${i})">×</button></span>`
+      : `<span class="tr-seite" onclick="tabRahmenSeiteZeigen(${i})" title="Zur Seite springen – dort Rahmen ziehen">Seite ${i + 1} – kein Rahmen</span>`).join('')}
+      ${seiten.length ? `<button class="ghost mini" onclick="tabRahmenZuruecksetzen()">Alle Rahmen zurücksetzen</button>` : ''}</div>
+    ${cols.length ? `<div style="margin:6px 0">${cols.map((c, i) => `
+      <span class="li-col">${esc(c.header_text || ('Spalte ' + (i + 1)))}:
+        <select onchange="tabRahmenMappingGeaendert(${i}, this.value)">
+          ${ziele.map(([k, label]) => `<option value="${k}" ${STATE.tabRahmen.mapping[i] === k ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+        </select></span>`).join(' ')}</div>` : ''}`;
+  return box;
+}
+function tabRahmenBoxGezogen(wrap, page, r) {
+  const pg = STATE.pages[page]; const w = wrap.getBoundingClientRect();
+  const fx = pg.width / w.width, fy = pg.height / w.height;
+  const box = { page, x0: (r.left - w.left) * fx, top: (r.top - w.top) * fy,
+               x1: (r.right - w.left) * fx, bottom: (r.bottom - w.top) * fy };
+  STATE.tabRahmen.boxes = STATE.tabRahmen.boxes.filter(b => b.page !== page);
+  STATE.tabRahmen.boxes.push(box);
+  renderCurrent();     // Seitenliste im Panel aktualisieren (zeichnet Rahmen mit)
+  tabRahmenAktualisieren();
+}
+async function tabRahmenAktualisieren() {
+  if (!STATE.tabRahmen.boxes.length) return;
+  $('#msg').textContent = 'Lese die markierte Tabelle …';
+  const r = await api('/api/tabelle/markieren', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, boxes: STATE.tabRahmen.boxes, mapping: STATE.tabRahmen.mapping }),
+  });
+  if (!r.columns) { $('#msg').textContent = '✗ ' + (r.detail || 'Rahmen konnte nicht gelesen werden'); return; }
+  STATE.tabRahmen.columns = r.columns;
+  if (!STATE.tabRahmen.mapping || STATE.tabRahmen.mapping.length !== r.columns.length)
+    STATE.tabRahmen.mapping = r.columns.map(c => c.guess || 'ignorieren');
+  STATE.lineItems = r.items || [];
+  STATE.zeilenStatus = STATE.lineItems.map(() => 'offen');
+  STATE.tabDirty.positionen = true;
+  renderCurrent();
+  $('#msg').textContent = `Tabelle gelesen: ${r.items.length} Position(en) – Spalten-Zuordnung prüfen, ` +
+    'dann „Positionen übernehmen“.';
+}
+function paintTabRahmen() {
+  document.querySelectorAll('.tabrahmen-box').forEach(e => e.remove());
+  const wraps = document.querySelectorAll('.pdfwrap');
+  for (const b of STATE.tabRahmen.boxes) {
+    const pg = STATE.pages[b.page]; const wrap = wraps[b.page];
+    if (!pg || !wrap) continue;
+    const el = document.createElement('div'); el.className = 'tabrahmen-box';
+    el.style.left = (b.x0 * pg.scale) + 'px'; el.style.top = (b.top * pg.scale) + 'px';
+    el.style.width = ((b.x1 - b.x0) * pg.scale) + 'px'; el.style.height = ((b.bottom - b.top) * pg.scale) + 'px';
+    el.innerHTML = `<span class="tr-label">Tabelle · Seite ${b.page + 1}</span>`;
+    wrap.appendChild(el);
+  }
+}
+
+/* -------- Einzelne Tabellenzelle per Rahmen fuellen (Baustein 2) --------
+   Zelle anklicken waehlt sie wie ein Kopffeld aus; danach in der Rechnung
+   ein Wort anklicken (mehrere dazu/weg) oder einen Rahmen ziehen -- Text
+   kommt in die Zelle (Code/Optik wie beim Kopffeld-Rahmen-Ziehen). */
+function selLiZelle(ri, col) {
+  STATE.selField = null; STATE.zielInput = null; STATE.zielTaxCell = null;
+  STATE.zielLiCell = { ri, col, page: null, values: [] };
+  document.querySelectorAll('.li-cell-ziel, .tax-cell-ziel').forEach(e => e.classList.remove('li-cell-ziel', 'tax-cell-ziel'));
+  const el = document.getElementById(`li-cell-${ri}-${col}`);
+  if (el) el.classList.add('li-cell-ziel');
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+}
+/* -------- "Weitere Beträge" (USt-Aufstellung): Zelle per Wort/Rahmen fuellen
+   (Aaron 06.11.2026) -- gleiche Ziel-Logik wie bei den Positionszellen
+   (selLiZelle/liZelleWortToggle), nur dass das Ergebnis ueber taxSetSlot
+   normalisiert wird (wie Eingabe von Hand: taxSetSlot -> taxTouched ->
+   taxRedraw + „Beträge übernehmen"). `ri` ist -1 fuer einen Platzhalter-
+   Steuersatz, der noch keine eigene Zeile in STATE.taxRows hat. */
+function selTaxZelle(ri, satz, k) {
+  STATE.selField = null; STATE.zielInput = null; STATE.zielLiCell = null;
+  STATE.zielTaxCell = { ri, satz, k, page: null, values: [] };
+  document.querySelectorAll('.li-cell-ziel, .tax-cell-ziel').forEach(e => e.classList.remove('li-cell-ziel', 'tax-cell-ziel'));
+  const el = document.getElementById(`tax-cell-${ri >= 0 ? ri : 's' + satz}-${k}`);
+  if (el) el.classList.add('tax-cell-ziel');
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+}
+function paintZielTaxCell(page) {
+  const wraps = document.querySelectorAll('.pdfwrap');
+  const wds = wraps[page] && wraps[page].querySelectorAll('.w');
+  if (!wds) return;
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+  (STATE.zielTaxCell.values || []).forEach(i => wds[i] && wds[i].classList.add('ziel'));
+}
+function taxZelleUebernehmen(z, page) {
+  const text = woerterText(page, z.values).replace(/\n/g, ' ').trim();
+  taxSetSlot(z.ri, z.satz, z.k, text);
+  // Platzhalter kann durch taxSetSlot gerade zur echten Zeile geworden sein --
+  // Ziel-Zuordnung mitziehen, damit nach dem Neuzeichnen weiter markiert wird.
+  if (z.ri < 0) {
+    const num = x => parseFloat(String(x ?? '').replace(',', '.'));
+    const ri = STATE.taxRows.findIndex(r => num(r.satz) === z.satz);
+    if (ri >= 0) z.ri = ri;
+  }
+}
+function taxZelleWortToggle(page, i) {
+  const z = STATE.zielTaxCell;
+  if (z.page !== page) { z.page = page; z.values = []; }
+  z.values.includes(i) ? z.values = z.values.filter(x => x !== i) : z.values.push(i);
+  paintZielTaxCell(page);
+  taxZelleUebernehmen(z, page);
+}
+function taxZelleRahmen(page, indices) {
+  const z = STATE.zielTaxCell;
+  z.page = page; z.values = indices;
+  paintZielTaxCell(page);
+  taxZelleUebernehmen(z, page);
+}
+function paintZielLiCell(page) {
+  const wraps = document.querySelectorAll('.pdfwrap');
+  const wds = wraps[page] && wraps[page].querySelectorAll('.w');
+  if (!wds) return;
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+  (STATE.zielLiCell.values || []).forEach(i => wds[i] && wds[i].classList.add('ziel'));
+}
+function liZelleWortToggle(page, i) {
+  const z = STATE.zielLiCell;
+  if (z.page !== page) { z.page = page; z.values = []; }
+  z.values.includes(i) ? z.values = z.values.filter(x => x !== i) : z.values.push(i);
+  paintZielLiCell(page);
+  liSetCell(z.ri, z.col, woerterText(page, z.values).replace(/\n/g, ' ').trim());
+}
+function liZelleRahmen(page, indices) {
+  const z = STATE.zielLiCell;
+  z.page = page; z.values = indices;
+  paintZielLiCell(page);
+  const text = woerterText(page, indices).replace(/\n/g, ' ').trim();
+  liSetCell(z.ri, z.col, text);
+  liVorschlagHolen(page, indices, z.ri, z.col, text);
+  liNaechsteZelle(z.ri, z.col);
+}
+// SPEC Baustein 3 (Aaron 12.10.2026): "stehen sehr wahrscheinlich links und
+// rechts davon in der gleichen Zeile die restlichen Informationen zu diesem
+// Artikel" -- nach dem Fuellen EINER Zelle per Rahmen die uebrigen, noch
+// leeren Spalten derselben Zeile vorschlagen (gelb, mit einem Klick
+// uebernehmbar; nur wenn die Rechen-Pruefung/Baustein 4 nicht widerspricht).
+async function liVorschlagHolen(page, indices, ri, col, wert) {
+  const zeile = Object.fromEntries(Object.entries(STATE.lineItems[ri] || {})
+    .filter(([k]) => !k.startsWith('_')));
+  const r = await api('/api/tabelle/zeile_vorschlag', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, page, indices, ziel_spalte: col, wert, zeile }),
+  });
+  STATE.liVorschlag = (r && r.zulaessig && Object.keys(r.vorschlag || {}).length)
+    ? { ri, vorschlag: r.vorschlag } : null;
+  liRedraw();
+}
+function liVorschlagUebernehmen(ri, col) {
+  const v = STATE.liVorschlag;
+  if (!v || v.ri !== ri || !(col in v.vorschlag)) return;
+  liSetCell(ri, col, v.vorschlag[col]);
+  delete v.vorschlag[col];
+  if (!Object.keys(v.vorschlag).length) STATE.liVorschlag = null;
+  liRedraw();
+}
+// Nach dem Fuellen per Rahmen gleich zur naechsten leeren Zelle DERSELBEN
+// Zeile (SPEC: "automatisch zur naechsten leeren/roten Zelle der Zeile") --
+// "rot" haengt bei einer Positionszeile an der ganzen Zeile (Rechen-/
+// Pflichtpruefung je Zeile, nicht je Zelle), darum hier: naechste leere.
+function liNaechsteZelle(ri, col) {
+  const std = LI_STD.map(([k]) => k);
+  const extra = liCols(STATE.lineItems).filter(c => !std.includes(c) && c !== 'pos');
+  const cols = [...std, ...extra];
+  const it = STATE.lineItems[ri] || {};
+  const next = cols.slice(cols.indexOf(col) + 1).find(c => !it[c]);
+  if (!next) { STATE.zielLiCell = null; liRedraw(); return; }
+  selLiZelle(ri, next);
+  liRedraw();
+  const el = document.getElementById(`li-cell-${ri}-${next}`);
+  if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
 // Spalten, die nicht aus dem PDF gelesen sind, sondern Vorschlaege des
 // Programms (Kategorie) -- werden nicht als Tabellen-Korrektur gespeichert
 // (sonst koennte learn.py die Tabelle nie im PDF wiederfinden).
@@ -1184,6 +1997,62 @@ function stCell(st) {
   return `<td class="st" title="${esc(st.detail)}">${st.ok ? '✓' : '✗ ' + esc(st.detail)}</td>`;
 }
 function rowCls(st) { return st && st.ok === false ? 'bad' : st && st.ok ? 'ok' : ''; }
+
+// Positionsmodus-Auswahl in der Pruefmaske (Teil B, Entscheidung Aaron
+// 10.10.2026) -- wie in Abbyy entscheidet die bearbeitende Person beim
+// Pruefen, keine Stammdaten-Rechte noetig. Bei einem bekannten (bestaetigten)
+// Lieferanten speichert die Auswahl sofort am Lieferanten (eigener
+// API-Weg, Audit) und laedt die Rechnung neu; ohne bekannten Lieferanten
+// gilt sie nur fuer diese Rechnung (STATE.supplier) und geht beim
+// Anlegen/Bestaetigen mit (lieferantSpeichern spreadet ``...sup``).
+function renderPositionsmodusAuswahl(supO) {
+  const box = document.createElement('div'); box.id = 'positionsmodus-box';
+  const bekannt = !!(supO && supO.bestaetigt !== false);
+  const modus = bekannt ? (supO.positionsmodus || 'einzeln')
+    : ((STATE.supplier || {}).positionsmodus || 'einzeln');
+  const bez = bekannt ? (supO.positionsbezeichnung || '')
+    : ((STATE.supplier || {}).positionsbezeichnung || '');
+  box.innerHTML = `
+    <div class="ab-row2">
+      <div class="af"><label>Positionen</label>
+        <select id="inv-pm-modus" onchange="invPositionsmodusChanged(${bekannt ? `'${esc(supO.id)}'` : 'null'})">
+          ${Object.entries(POSITIONSMODUS_LABEL).map(([k, label]) =>
+            `<option value="${k}" ${k === modus ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+        </select></div>
+      <div class="af" id="inv-pm-bez-wrap" style="${modus === 'eine_position' ? '' : 'display:none'}">
+        <label>Bezeichnung</label>
+        <input id="inv-pm-bezeichnung" class="ab-in" value="${esc(bez)}" placeholder="z.B. Strom"
+               onchange="invPositionsmodusBezeichnungChanged(${bekannt ? `'${esc(supO.id)}'` : 'null'})"></div>
+    </div>
+    ${!bekannt ? '<div class="hint">Kein bekannter Lieferant -- gilt erst einmal nur für diese Rechnung, wird beim Anlegen/Bestätigen des Lieferanten mitgespeichert.</div>' : ''}
+    ${(STATE.langerBelegHinweis) ? `<div class="hint">${esc(STATE.langerBelegHinweis)}</div>` : ''}`;
+  return box;
+}
+function invPositionsmodusChanged(supplierId) {
+  const modus = $('#inv-pm-modus').value;
+  $('#inv-pm-bez-wrap').style.display = modus === 'eine_position' ? '' : 'none';
+  if (supplierId) {
+    api('/api/suppliers/' + encodeURIComponent(supplierId) + '/positionsmodus', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ modus, bezeichnung: $('#inv-pm-bezeichnung').value.trim() }),
+    }).then(() => openInvoice(STATE.file, null));
+    return;
+  }
+  STATE.supplier = { ...(STATE.supplier || {}), positionsmodus: modus,
+    positionsbezeichnung: modus === 'eine_position' ? $('#inv-pm-bezeichnung').value.trim() : '' };
+}
+function invPositionsmodusBezeichnungChanged(supplierId) {
+  const bezeichnung = $('#inv-pm-bezeichnung').value.trim();
+  if (supplierId) {
+    api('/api/suppliers/' + encodeURIComponent(supplierId) + '/positionsmodus', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ modus: $('#inv-pm-modus').value, bezeichnung }),
+    }).then(() => openInvoice(STATE.file, null));
+    return;
+  }
+  STATE.supplier = { ...(STATE.supplier || {}), positionsmodus: $('#inv-pm-modus').value,
+    positionsbezeichnung: bezeichnung };
+}
 
 // Spalten wie die Abbyy-Positionsdaten (Vorlage Aaron, 09.10.2026)
 const LI_STD = [['beschreibung', 'Description'], ['menge', 'Quantity'],
@@ -1202,26 +2071,53 @@ function renderLiPreviewBox(items) {
   const pr = (STATE.pruefung || {}).positionen || [];
   const fest = STATE.positionenFest;
   box.innerHTML = `
-    <div class="li-scroll"><table class="edit ab-li"><tr>${cols.map(c => `<th title="${esc(c)}">${esc(label(c))}</th>`).join('')}<th>Prüfung</th><th></th></tr>
-    ${items.map((it, ri) => `<tr class="${rowCls(pr[ri])}">${cols.map(c => {
+    <div class="li-scroll"><table class="edit ab-li"><tr><th title="Zeile bestätigen / Status">Zeile</th>${cols.map(c => `<th title="${esc(c)}" data-col="${esc(c)}">${esc(label(c))}</th>`).join('')}<th>Prüfung</th><th></th></tr>
+    ${items.map((it, ri) => `<tr class="${rowCls(pr[ri])} zs-${liStatus(ri)}">${zeilenStatusZelle(ri, fest)}${cols.map(c => {
         if (c === 'kategorie') {
           const conf = it.kategorie_konfidenz;
-          return `<td><input value="${esc(nz(it.kategorie))}" size="14" placeholder="Kategorie …"
+          return `<td data-col="kategorie"><input value="${esc(nz(it.kategorie))}" size="14" placeholder="Kategorie …"
                    onchange="saveCategoryCorrection('${esc((it._kategorie_text || '').replace(/'/g, "\\'"))}', this.value)">
             ${conf != null ? `<span class="hint">(${conf})</span>` : ''}</td>`;
         }
-        // Herkunft je Zelle (SPEC Baustein 3): errechnet/kopf kursiv
+        // Herkunft je Zelle (SPEC Baustein 3): errechnet/kopf kursiv;
+        // "eine_position" ebenso (Positionsmodus, Teil B) -- aus den Summen
+        // gebildet, kein Original-Lesewert.
         const h = (it._herkunft || {})[c];
-        const hcls = (h === 'errechnet' || h === 'kopf') ? h : '';
+        const hcls = (h === 'errechnet' || h === 'kopf' || h === 'eine_position') ? h : '';
         let v = it[c];
         if (typeof v === 'number' && c !== 'menge' && c !== 'mwst_satz') v = fmtWert(v, 'amount');
-        return `<td class="${typeof it[c] === 'number' ? 'num' : ''}"><input
-                  class="${hcls}" value="${esc(nz(v))}" ${h ? `title="${esc(h)}"` : ''} ${fest ? 'readonly' : ''}
-                  onchange="liSetCell(${ri}, '${esc(c)}', this.value)"></td>`;
+        const istZiel = STATE.zielLiCell && STATE.zielLiCell.ri === ri && STATE.zielLiCell.col === c;
+        // Baustein 3: Vorschlag aus derselben Zeile (gelb) fuer eine noch
+        // leere Zelle -- ein Klick uebernimmt ihn (``liVorschlagUebernehmen``).
+        const vLiVorschlag = (STATE.liVorschlag && STATE.liVorschlag.ri === ri && !v)
+          ? STATE.liVorschlag.vorschlag[c] : null;
+        const vorschlagHtml = vLiVorschlag != null
+          ? ` <span class="li-vorschlag" title="Vorschlag aus derselben Zeile – Klick übernimmt"
+                onclick="liVorschlagUebernehmen(${ri}, '${esc(c)}')">${esc(vLiVorschlag)}</span>` : '';
+        // Beschreibung bekommt ein mehrzeiliges, umbrechendes Feld statt
+        // eines einzeiligen <input> -- sonst schneidet lange Positionstexte
+        // ab (Aaron 06.11.2026). Tooltip zeigt den vollen Text zusätzlich.
+        if (c === 'beschreibung') {
+          return `<td data-col="beschreibung"><textarea id="li-cell-${ri}-${c}"
+                    class="li-besch ${hcls}${istZiel ? ' li-cell-ziel' : ''}" rows="2"
+                    title="${esc(h ? h + ': ' + String(nz(v)) : String(nz(v)))}" ${fest ? 'readonly' : ''}
+                    onclick="${fest ? '' : `selLiZelle(${ri}, '${c}')`}"
+                    onchange="liSetCell(${ri}, '${esc(c)}', this.value)">${esc(nz(v))}</textarea>${vorschlagHtml}</td>`;
+        }
+        return `<td class="${typeof it[c] === 'number' ? 'num' : ''}" data-col="${esc(c)}"><input id="li-cell-${ri}-${c}"
+                  class="${hcls}${istZiel ? ' li-cell-ziel' : ''}" value="${esc(nz(v))}"
+                  ${h ? `title="${esc(h)}"` : ''} ${fest ? 'readonly' : ''}
+                  onclick="${fest ? '' : `selLiZelle(${ri}, '${c}')`}"
+                  onchange="liSetCell(${ri}, '${esc(c)}', this.value)">${vorschlagHtml}</td>`;
       }).join('')}${stCell(pr[ri])}
-      <td>${fest ? '' : `<button class="danger" style="padding:0 4px" title="Zeile löschen" onclick="liDelRow(${ri})">×</button>`}</td></tr>`).join('')}
+      <td style="white-space:nowrap">${fest ? '' : `<button class="ghost mini" style="padding:0 4px" title="Zeile darüber einfügen" onclick="liInsertRow(${ri})">＋</button>
+        <button class="danger" style="padding:0 4px" title="Zeile löschen" onclick="liDelRow(${ri})">×</button>`}</td></tr>`).join('')}
+    ${items.length ? liSummenZeile(items, cols.length + 3) : ''}
     </table></div>
-    ${items.length ? '' : STATE.kiPositionen === false
+    ${items.length && !fest ? liStatusLeiste(items) : ''}
+    ${items.length ? '' : STATE.positionenGrund
+      ? `<div class="hint">Noch keine Position erkannt – Grund: ${esc(STATE.positionenGrund)}. Die Positionstabelle lässt sich über „Tabelle im PDF markieren“ anlernen.</div>`
+      : STATE.kiPositionen === false
       ? '<div class="hint">Noch keine Position erkannt – das Auslesen der Positionen per KI ist ausgeschaltet (<code>RECHNUNG_LLM_LINE_ITEMS=0</code> in rechnung.env). Einschalten oder die Positionstabelle für diesen Lieferanten anlernen.</div>'
       : '<div class="hint">Noch keine Position erkannt.</div>'}
     ${fest ? '' : `<div style="margin-top:4px">
@@ -1231,24 +2127,100 @@ function renderLiPreviewBox(items) {
     </div>`}`;
   return box;
 }
+/* -------- Zeilenstatus je Position (Aaron 05.11.2026) --------
+   ✓ = Zeile stimmt (zaehlt als Treffer, aendert nichts, macht die Rechnung NICHT
+   fertig); Zelle aendern / Zeile einfuegen = "korrigiert" (zaehlt als Korrektur,
+   nach "Positionen uebernehmen"). Der Server haelt den Status am Zeileninhalt. */
+function liStatus(ri) { return (STATE.zeilenStatus || [])[ri] || 'offen'; }
+function liStatusAbgleichen() {
+  const n = STATE.lineItems.length; const z = STATE.zeilenStatus || [];
+  while (z.length < n) z.push('offen');
+  z.length = n; STATE.zeilenStatus = z;
+}
+function zeilenStatusZelle(ri, fest) {
+  const st = liStatus(ri);
+  if (fest) return '<td class="zs"></td>';
+  if (st === 'bestaetigt') return `<td class="zs"><span class="zs-ok done" title="Zeile bestätigt">✓</span></td>`;
+  if (st === 'korrigiert') return `<td class="zs" title="vom Menschen geändert – mit „Positionen übernehmen“ speichern">✎ geändert</td>`;
+  return `<td class="zs"><button class="zs-ok" title="Zeile bestätigen: stimmt so" onclick="liZeileBestaetigen(${ri})">✓</button></td>`;
+}
+function liSaubereZeile(it) {
+  return Object.fromEntries(Object.entries(it).filter(([k]) => !k.startsWith('_') && !LI_NICHT_SPEICHERN.includes(k)));
+}
+async function liZeilenBestaetigen(indizes) {
+  liStatusAbgleichen();
+  const rows = indizes.map(ri => liSaubereZeile(STATE.lineItems[ri]));
+  if (!rows.length) return;
+  const r = await api('/api/zeilen-bestaetigen', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, rows, template_id: STATE.tid || null }),
+  });
+  if (!r.ok) { $('#msg').textContent = '✗ Zeile(n) konnten nicht bestätigt werden'; return; }
+  indizes.forEach(ri => { STATE.zeilenStatus[ri] = 'bestaetigt'; });
+  liRedraw();
+  $('#msg').textContent = rows.length === 1 ? 'Zeile bestätigt.' : `${rows.length} Zeilen bestätigt.`;
+}
+function liZeileBestaetigen(ri) { liZeilenBestaetigen([ri]); }
+function liAlleBestaetigen() {
+  liStatusAbgleichen();
+  liZeilenBestaetigen(STATE.lineItems.map((_, i) => i).filter(i => liStatus(i) === 'offen'));
+}
+function liStatusLeiste(items) {
+  liStatusAbgleichen();
+  const z = STATE.zeilenStatus;
+  const n = (s) => z.filter(x => x === s).length;
+  const offen = n('offen');
+  return `<div class="hint" style="margin-top:4px">${n('bestaetigt')} von ${items.length} Zeilen bestätigt,
+    ${n('korrigiert')} geändert, ${offen} offen
+    ${offen ? `<button class="ghost mini" onclick="liAlleBestaetigen()" title="Bestätigt alle noch offenen Zeilen – die Rechnung selbst wird dadurch nicht fertig">Alle offenen Zeilen bestätigen</button>` : ''}</div>`;
+}
+/* Summe der Positionen gegen Netto der Rechnung (Pruefung "positionen-summe",
+   validate.check_line_items_total) -- Abweichung deutlich markiert. */
+function liSummenZeile(items, spalten) {
+  const chk = (((STATE.pruefung || {}).checks) || []).find(c => c.name === 'positionen-summe');
+  const num = v => { const x = parseFloat(String(v ?? '').replace(/\./g, '').replace(',', '.')); return isNaN(x) ? parseFloat(v) : x; };
+  let sum = 0, n = 0;
+  for (const it of items) { const v = typeof it.gesamt_netto === 'number' ? it.gesamt_netto : num(it.gesamt_netto); if (!isNaN(v)) { sum += v; n++; } }
+  if (!n) return '';
+  const netto = ((STATE.current || {}).netto || {}).value;
+  const cls = chk && chk.ok === false ? 'bad' : chk && chk.ok ? 'ok' : '';
+  const diff = netto != null && !isNaN(Number(netto)) ? sum - Number(netto) : null;
+  return `<tr class="li-summe ${cls}"><td colspan="${spalten}">Σ Positionen ${fmtWert(sum, 'amount')}
+    ${netto != null ? `· Netto der Rechnung ${fmtWert(Number(netto), 'amount')}` : ''}
+    ${diff != null ? (Math.abs(diff) > 0.02 + 0.01 * n ? `· ✗ Abweichung ${fmtWert(diff, 'amount')}` : '· ✓ passt') : ''}
+    ${chk && chk.ok === false ? `<span class="hint"> (${esc(chk.detail)})</span>` : ''}</td></tr>`;
+}
 function liRedraw() {
   const old = $('#li-preview-box');
   if (old) old.replaceWith(renderLiPreviewBox(STATE.lineItems));
 }
 function liTouched() { STATE.tabDirty.positionen = true; liRedraw(); refreshPruefung(); }
 function liSetCell(ri, col, value) {
+  if (String(STATE.lineItems[ri][col] ?? '') === String(value ?? '')) return;
   STATE.lineItems[ri][col] = value;
+  liStatusAbgleichen(); STATE.zeilenStatus[ri] = 'korrigiert';
   // Mensch korrigiert die Zelle -> Herkunft "korrigiert" (SPEC Baustein 3),
   // auch schon vor dem Speichern sichtbar.
   const it = STATE.lineItems[ri];
   if (it._herkunft && col in it._herkunft) delete it._herkunft[col];
   liTouched();
 }
-function liDelRow(ri) { STATE.lineItems.splice(ri, 1); liTouched(); }
-function liAddRow() {
+function liDelRow(ri) {
+  STATE.liVorschlag = null; liStatusAbgleichen();
+  STATE.lineItems.splice(ri, 1); STATE.zeilenStatus.splice(ri, 1); liTouched();
+}
+function liLeereZeile() {
   const cols = liCols(STATE.lineItems).filter(c => !LI_NICHT_SPEICHERN.includes(c));
   const row = {}; (cols.length ? cols : LI_STD.map(([k]) => k)).forEach(c => row[c] = '');
-  STATE.lineItems.push(row); liTouched();
+  return row;
+}
+function liAddRow() {
+  liStatusAbgleichen();
+  STATE.lineItems.push(liLeereZeile()); STATE.zeilenStatus.push('korrigiert'); liTouched();
+}
+function liInsertRow(ri) {
+  STATE.liVorschlag = null; liStatusAbgleichen();
+  STATE.lineItems.splice(ri, 0, liLeereZeile()); STATE.zeilenStatus.splice(ri, 0, 'korrigiert'); liTouched();
 }
 function liAddCol() {
   const name = (prompt('Name der neuen Spalte (z.B. menge, einzelpreis, gesamt, mwst, rabatt):') || '')
@@ -1286,6 +2258,7 @@ async function refreshLiPreview() {
     items = r.items || [];
   }
   STATE.lineItems = items;
+  STATE.zeilenStatus = items.map(() => 'offen');
   liRedraw();
   refreshPruefung();
 }
@@ -1331,6 +2304,7 @@ function renderTaxPreview() {
   const pr = (STATE.pruefung || {}).ust || [];
   const cur = STATE.current.ust_aufstellung || {};
   const slots = taxSlots();
+  const z = STATE.zielTaxCell;
   const zelle = (sl, k, label) => {
     const r = sl.ri >= 0 ? STATE.taxRows[sl.ri] : null;
     let v = r ? r[k] : (k === 'satz' ? sl.satz : '');
@@ -1342,9 +2316,17 @@ function renderTaxPreview() {
       : (r._abgeleitet && !STATE.tabDirty.ust) ? 'vorschlag' : 'gut';
     const h = r && (r._herkunft || {})[k];
     const ro = sl.fest && k === 'satz' ? 'readonly tabindex="-1"' : '';
+    // Markierbar wie jedes andere Feld (Aaron 06.11.2026): ⌖ -> Ziel-Logik
+    // analog zu den Positionszellen (STATE.zielTaxCell/taxZelleWortToggle).
+    const istZiel = z && z.k === k && (sl.ri >= 0 ? z.ri === sl.ri : (z.ri < 0 && z.satz === sl.satz));
+    const id = `tax-cell-${sl.ri >= 0 ? sl.ri : 's' + sl.satz}-${k}`;
     return `<div class="af"><label>${esc(label)}</label>
-      <input class="ab-in ${st} ${(h === 'errechnet' || h === 'kopf') ? h : ''}" value="${esc(nz(v))}" ${ro}
-             ${h ? `title="${esc(h)}"` : ''} onchange="taxSetSlot(${sl.ri}, ${sl.satz ?? 'null'}, '${k}', this.value)"></div>`;
+      <input id="${id}" class="ab-in ${st} ${(h === 'errechnet' || h === 'kopf') ? h : ''}${istZiel ? ' tax-cell-ziel' : ''}"
+             value="${esc(nz(v))}" ${ro}
+             ${h ? `title="${esc(h)}"` : ''} onchange="taxSetSlot(${sl.ri}, ${sl.satz ?? 'null'}, '${k}', this.value)">
+      <button class="mk-btn" tabindex="-1" style="right:3px"
+        title="Anderen Wert markieren: danach in der Rechnung das Wort anklicken oder einen Rahmen darum ziehen"
+        onclick="event.stopPropagation(); selTaxZelle(${sl.ri}, ${sl.satz ?? 'null'}, '${k}'); $('#msg').textContent = 'Jetzt in der Rechnung den richtigen Wert anklicken oder einen Rahmen darum ziehen.'">⌖</button></div>`;
   };
   const satzZeile = (sl, n) => `<div class="ab-row3">${zelle(sl, 'netto', 'Nettobetrag ' + n)}${zelle(sl, 'ust', 'Steuerbetrag ' + n)}${zelle(sl, 'satz', 'Steuersatz ' + n)}</div>`;
   const weitere = slots.slice(3);
@@ -1399,10 +2381,19 @@ async function saveTabelle(art) {
   const quelleVorher = art === 'ust'
     ? ((STATE.current.ust_aufstellung || {}).source || null)
     : (STATE.positionenKorrigiert ? 'manual' : (STATE.tid ? 'template' : 'llm'));
+  // SPEC Baustein 5 (Aaron 12.10.2026): die per Rahmen-Markierung bestaetigte
+  // Spalten-Zuordnung (Kopfwort -> LI_STD-Spalte) wandert ins globale
+  // Spaltenwoerterbuch -- nur wenn dieses Tool tatsaechlich benutzt wurde.
+  const spaltenZuordnung = (art === 'positionen' && STATE.tabRahmen.columns.length)
+    ? STATE.tabRahmen.columns
+        .map((c, i) => ({ header_text: c.header_text, ziel: STATE.tabRahmen.mapping[i] }))
+        .filter(z => z.header_text && z.ziel && z.ziel !== 'ignorieren')
+    : undefined;
   const r = await api('/api/tabelle', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ file: STATE.file, art, rows, template_id: STATE.tid || null,
-                          quelle_vorher: quelleVorher }),
+                          quelle_vorher: quelleVorher, spalten_zuordnung: spaltenZuordnung,
+                          zeilen_status: art === 'positionen' ? (liStatusAbgleichen(), STATE.zeilenStatus) : undefined }),
   });
   if (!r.ok) { $('#msg').textContent = 'Fehler beim Speichern der Tabelle'; return; }
   // Neu laden: Markierungen/Pruefungen/Status kommen frisch vom Server
@@ -1432,13 +2423,24 @@ function refreshPruefung() {
   }, 250);
 }
 function renderPruefBox() {
+  // Baustein 11b, vereinfacht (Aaron 06.11.2026): nur noch eine Ampel
+  // grün/rot/grau statt der Liste aller Einzelpruefungen -- Details nur
+  // noch zum Aufklappen, standardmaessig zu. Die Pruefungen selbst
+  // (/api/pruefen, STATE.pruefung) sind unveraendert, nur die Anzeige.
   const box = document.createElement('div'); box.className = 'box'; box.id = 'pruef-box';
   const checks = (STATE.pruefung || {}).checks || [];
   const hatPos = (STATE.lineItems || []).length > 0;
-  box.innerHTML = `<h4>Rechen-Prüfungen</h4>
-    ${checks.map(c => `<span class="chk ${c.ok === true ? 'ok' : c.ok === false ? 'bad' : 'na'}"
-        title="${esc(c.detail)}">${c.ok === true ? '✓' : c.ok === false ? '✗' : '–'} ${esc(c.name)}${c.ok === false ? ': ' + esc(c.detail) : ''}</span>`).join('')}
-    ${hatPos ? '' : '<div class="hint">Hinweis: keine Positionstabelle erkannt – kein Fehler, die Positions-Prüfungen entfallen.</div>'}`;
+  const pruefbar = checks.filter(c => c.ok !== null);
+  const status = !pruefbar.length ? 'na' : pruefbar.every(c => c.ok) ? 'ok' : 'bad';
+  const ampelText = status === 'ok' ? '✓ Rechnung rechnet sich'
+    : status === 'bad' ? '✗ Beträge passen nicht zusammen' : '– nichts prüfbar';
+  box.innerHTML = `<h4>Rechen-Prüfung</h4>
+    <div class="chk-ampel ${status}">${ampelText}</div>
+    <details class="chk-details"><summary>Details</summary>
+      ${checks.map(c => `<span class="chk ${c.ok === true ? 'ok' : c.ok === false ? 'bad' : 'na'}"
+          title="${esc(c.detail)}">${c.ok === true ? '✓' : c.ok === false ? '✗' : '–'} ${esc(c.name)}${c.ok === false ? ': ' + esc(c.detail) : ''}</span>`).join('')}
+      ${hatPos ? '' : '<div class="hint">Hinweis: keine Positionstabelle erkannt – kein Fehler, die Positions-Prüfungen entfallen.</div>'}
+    </details>`;
   return box;
 }
 function paintPruefBox() {
@@ -1459,13 +2461,154 @@ function clickWord(page, i, ev) {
     paintLiCols(); paint(); refreshLiPreview();
     return;
   }
-  if (!STATE.selField) { $('#msg').textContent = 'erst Feld-Zeile oder Spalte wählen'; return; }
+  if (RAHMEN_KLICK_SPERRE) return;   // Klick am Ende einer Rahmen-Auswahl
+  if (STATE.zielLiCell) { liZelleWortToggle(page, i); return; }
+  if (STATE.zielTaxCell) { taxZelleWortToggle(page, i); return; }
+  if (STATE.zielInput) { zielWoerter(page, [i], false); return; }
+  if (!STATE.selField) { $('#msg').textContent = 'erst ein Feld anklicken, dann den Wert in der Rechnung markieren'; return; }
   const a = STATE.assign[STATE.selField] || { page, anchor: null, values: [] };
+  if (a.page !== page) a.values = [];
   a.page = page;
   if (ev.shiftKey) a.anchor = (a.anchor === i) ? null : i;  // erneutes Shift+Klick hebt den Anker wieder auf
   else a.values.includes(i) ? a.values = a.values.filter(x => x !== i) : a.values.push(i);
   STATE.assign[STATE.selField] = a;
   paint();
+  if (!ev.shiftKey) wertEintragen(STATE.selField, page, a.values);
+}
+
+/* ---- Markieren -> Wert ins gewaehlte Feld (Aaron 11.10.2026) ----------
+   Feld anklicken, dann in der Rechnung ein Wort anklicken (weitere Woerter
+   per Klick dazu/weg) oder mit gedrueckter Maus einen Rahmen um mehrere
+   Woerter ziehen. Der Text steht sofort im Feld; Rechnungsfelder werden
+   kurz danach gespeichert (lernt zugleich die Position fuer die Vorlage),
+   Lieferant/Geschaeftsbereich beim Klick auf deren Knopf. */
+let RAHMEN_KLICK_SPERRE = false;
+let WERT_TIMER = null;
+function woerterText(page, indices) {
+  const pg = STATE.pages[page]; if (!pg) return '';
+  const wds = indices.map(i => pg.words[i]).filter(Boolean)
+    .sort((a, b) => (Math.abs(a.top - b.top) > 3 ? a.top - b.top : a.x0 - b.x0));
+  // Zeilenwechsel erhalten (Anschrift), sonst Leerzeichen
+  let out = '', lastTop = null;
+  for (const w of wds) {
+    if (lastTop !== null) out += Math.abs(w.top - lastTop) > 3 ? '\n' : ' ';
+    out += w.text; lastTop = w.top;
+  }
+  return out;
+}
+function wertEintragen(field, page, indices) {
+  const text = woerterText(page, indices).replace(/\n/g, ' ');
+  const inp = document.querySelector(`#fields .af[data-field="${CSS.escape(field)}"] input`);
+  if (inp) inp.value = text;
+  clearTimeout(WERT_TIMER);
+  if (text) WERT_TIMER = setTimeout(() => saveCorrection(field, text), 900);
+}
+function zielInput(id, el) {
+  STATE.selField = null; STATE.zielInput = id; STATE.zielWoerter = { page: null, values: [] };
+  STATE.zielLiCell = null; STATE.zielTaxCell = null;
+  document.querySelectorAll('.li-cell-ziel, .tax-cell-ziel').forEach(x => x.classList.remove('li-cell-ziel', 'tax-cell-ziel'));
+  document.querySelectorAll('#fields .sel, #fields .ziel-sel').forEach(x => x.classList.remove('sel', 'ziel-sel'));
+  el.classList.add('ziel-sel');
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+}
+function zielWoerter(page, indices, ersetzen) {
+  const z = STATE.zielWoerter || { page: null, values: [] };
+  if (ersetzen || z.page !== page) { z.page = page; z.values = []; }
+  for (const i of indices) z.values.includes(i) ? z.values = z.values.filter(x => x !== i) : z.values.push(i);
+  STATE.zielWoerter = z;
+  const wds = document.querySelectorAll('.pdfwrap')[page].querySelectorAll('.w');
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+  z.values.forEach(i => wds[i] && wds[i].classList.add('ziel'));
+  const inp = document.getElementById(STATE.zielInput);
+  if (!inp) return;
+  const txt = woerterText(page, z.values);
+  inp.value = inp.tagName === 'TEXTAREA' ? txt : txt.replace(/\n/g, ' ');
+  inp.dispatchEvent(new Event('input', { bubbles: true }));
+}
+// Nach dem Markieren per Rahmen gleich zum naechsten leeren oder roten
+// Rechnungsfeld springen (Aaron 11.10.2026: weniger Klicks bei ~60/Tag).
+function naechstesFeld(nach) {
+  const alle = [...document.querySelectorAll('#fields .af[data-field]')];
+  const i = alle.findIndex(el => el.dataset.field === nach);
+  const kandidat = alle.slice(i + 1).find(el => {
+    const inp = el.querySelector('input');
+    return inp && (!inp.value.trim() || inp.classList.contains('unsicher'));
+  });
+  if (!kandidat) return;
+  selectField(kandidat.dataset.field, kandidat);
+  kandidat.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  const m = $('#msg'); if (m) m.textContent = `Weiter: „${kandidat.dataset.field}“ – Wert in der Rechnung markieren (oder anderes Feld wählen).`;
+}
+
+function korrigieren(ev, name, btn) {
+  ev.stopPropagation();
+  const af = btn.closest('.af');
+  selectField(name, af);
+  delete STATE.assign[name];   // neu markieren ersetzt die bisherige Stelle
+  paint();
+  const m = $('#msg'); if (m) m.textContent = `„${name}“ korrigieren: jetzt in der Rechnung den richtigen Wert anklicken oder einen Rahmen darum ziehen.`;
+}
+async function ausschnittLesen(wrap, page, r) {
+  const ziel = STATE.zielInput || STATE.selField;
+  if (!ziel) { $('#msg').textContent = 'erst ein Feld anklicken, dann den Wert in der Rechnung markieren'; return; }
+  const pg = STATE.pages[page]; const w = wrap.getBoundingClientRect();
+  const fx = pg.width / w.width, fy = pg.height / w.height;
+  const box = { x0: (r.left - w.left) * fx, y0: (r.top - w.top) * fy, x1: (r.right - w.left) * fx, y1: (r.bottom - w.top) * fy };
+  $('#msg').textContent = 'Lese den markierten Ausschnitt …';
+  const resp = await fetch('/api/ausschnitt-lesen', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, page, ...box }) });
+  const d = await resp.json().catch(() => ({}));
+  if (!resp.ok || !d.text) { $('#msg').textContent = '✗ ' + (d.detail || 'Im Ausschnitt nichts erkannt – Wert bitte eintippen.'); return; }
+  if (STATE.zielInput) {
+    const inp = document.getElementById(STATE.zielInput); if (inp) { inp.value = d.text; inp.dispatchEvent(new Event('input', { bubbles: true })); }
+  } else {
+    const inp = document.querySelector(`#fields .af[data-field="${CSS.escape(ziel)}"] input`);
+    if (inp) inp.value = d.text;
+    saveCorrection(ziel, d.text);
+  }
+  $('#msg').textContent = `Gelesen: ${d.text}`;
+}
+function rahmenAuswahl(wrap, page) {
+  let start = null, box = null;
+  wrap.addEventListener('mousedown', ev => {
+    if (ev.button !== 0) return;
+    ev.preventDefault();   // kein Bild-Ziehen/Textmarkieren des Browsers
+    start = { x: ev.clientX, y: ev.clientY }; box = null;
+  });
+  window.addEventListener('mousemove', ev => {
+    if (!start) return;
+    const dx = Math.abs(ev.clientX - start.x), dy = Math.abs(ev.clientY - start.y);
+    if (!box && dx + dy < 8) return;
+    if (!box) { box = document.createElement('div'); box.className = 'rahmen-auswahl'; document.body.appendChild(box); }
+    box.style.left = Math.min(ev.clientX, start.x) + 'px'; box.style.top = Math.min(ev.clientY, start.y) + 'px';
+    box.style.width = dx + 'px'; box.style.height = dy + 'px';
+    ev.preventDefault();
+  });
+  window.addEventListener('mouseup', ev => {
+    if (!start) return;
+    const s0 = start; start = null;
+    if (!box) return;
+    const r = box.getBoundingClientRect(); box.remove(); box = null;
+    RAHMEN_KLICK_SPERRE = true; setTimeout(() => { RAHMEN_KLICK_SPERRE = false; }, 50);
+    if (STATE.tabRahmen.active) { tabRahmenBoxGezogen(wrap, page, r); return; }
+    const treffer = [];
+    wrap.querySelectorAll('.w').forEach((el, i) => {
+      const b = el.getBoundingClientRect();
+      const cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2;
+      if (cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) treffer.push(i);
+    });
+    if (!treffer.length) { if (!STATE.zielLiCell && !STATE.zielTaxCell) ausschnittLesen(wrap, page, r); return; }
+    if (STATE.zielLiCell) { liZelleRahmen(page, treffer); return; }
+    if (STATE.zielTaxCell) { taxZelleRahmen(page, treffer); return; }
+    if (STATE.zielInput) { zielWoerter(page, treffer, true); return; }
+    if (!STATE.selField) { $('#msg').textContent = 'erst ein Feld anklicken, dann den Wert in der Rechnung markieren'; return; }
+    const a = { page, anchor: (STATE.assign[STATE.selField] || {}).anchor ?? null, values: treffer };
+    const fertig = STATE.selField;
+    STATE.assign[fertig] = a;
+    paint();
+    wertEintragen(fertig, page, treffer);
+    naechstesFeld(fertig);
+  });
 }
 
 function clearAssign(field) {
@@ -1542,7 +2685,9 @@ async function saveCorrection(field, value) {
   const r = await api('/api/correction', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ file: STATE.file, field: field, value: value,
-                          template_id: STATE.tid || null, quelle_vorher: quelleVorher }),
+                          template_id: STATE.tid || null, quelle_vorher: quelleVorher,
+                          wert_vorher: (STATE.current[field] || {}).value == null ? null
+                                       : String((STATE.current[field] || {}).value) }),
   });
   if (r.ok) {
     $('#msg').textContent = `Korrektur für ${field} gespeichert: ${value}`;
@@ -1582,23 +2727,51 @@ function learnedMsg(r) {
   return ` · Vorlage ${l.created ? 'gelernt' : 'ergänzt'}: ${l.learned.join(', ')}`;
 }
 
+async function sendeRechnung() {
+  // Ein Klick (Aaron 11.10.2026): pruefen -> lernen -> an JobRouter freigeben
+  // -> aus der Liste -> naechste Rechnung.
+  const alteListe = [...LIST_FILES], alt = STATE.file;
+  $('#msg').textContent = 'Sende …';
+  const sende = trotzdem => fetch('/api/senden', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file, template_id: STATE.tid || null, trotzdem }) });
+  let r = await sende(false);
+  let d = await r.json().catch(() => ({}));
+  if (r.status === 409 && d.code === 'dublette') {
+    if (!confirm(d.detail + '\n\nTrotzdem senden?')) { $('#msg').textContent = 'Nicht gesendet (Dublettenverdacht).'; return; }
+    r = await sende(true); d = await r.json().catch(() => ({}));
+  }
+  if (!r.ok) { $('#msg').textContent = '✗ ' + (d.detail || ('Fehler ' + r.status)); alert(d.detail || ('Fehler ' + r.status)); return; }
+  const wohin = (d.jobrouter_live ? 'an JobRouter übergeben' : 'freigegeben – geht an JobRouter, sobald die Anbindung steht')
+    + (d.als_dummy ? ' (als Dummy Lieferant)' : '');
+  STATE.file = null;
+  await loadList();
+  const row = naechsteBereite(alteListe, alt);
+  if (row) { await openInvoice(row.dataset.file, row); }
+  else {
+    $('#work').innerHTML = `<p class="hint" style="padding:12px">${esc(keineBereite())}</p>`;
+  }
+  const m = $('#msg'); if (m) m.textContent = `✓ Vorige Rechnung ${wohin}.`;
+  else if (!row) $('#work').insertAdjacentHTML('beforeend', `<p class="hint" style="padding:0 12px">✓ Vorige Rechnung ${esc(wohin)}.</p>`);
+}
+
 async function confirmTpl() {
   // Naechste Datei VOR dem Neuladen merken -- loadList() baut #list komplett
   // neu auf, danach ist die alte Reihenfolge/Position weg.
-  const idx = LIST_FILES.indexOf(STATE.file);
-  const next = idx >= 0 ? LIST_FILES[idx + 1] : null;
+  const alteListe = [...LIST_FILES], alt = STATE.file;
 
   const r = await api('/api/confirm', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ file: STATE.file, template_id: STATE.tid }),
   });
+  STATE.file = null;
   await loadList();
-  if (next) {
-    const row = document.querySelector(`#list .row[data-file="${CSS.escape(next)}"]`);
-    openInvoice(next, row);
-    $('#msg').textContent = `bestätigt ${r.confirmations}× ${r.secured ? '· GESICHERT' : ''}${learnedMsg(r)} – nächste Rechnung geöffnet`;
+  const row = naechsteBereite(alteListe, alt);
+  const kopf = `bestätigt ${r.confirmations}× ${r.secured ? '· GESICHERT' : ''}${learnedMsg(r)}`;
+  if (row) {
+    openInvoice(row.dataset.file, row);
+    $('#msg').textContent = `${kopf} – nächste bereite Rechnung geöffnet`;
   } else {
-    $('#msg').textContent = `bestätigt ${r.confirmations}× ${r.secured ? '· GESICHERT' : ''}${learnedMsg(r)} – keine weitere Rechnung in der Liste`;
+    $('#msg').textContent = `${kopf} – ${keineBereite()}`;
   }
 }
 
@@ -1610,9 +2783,26 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key !== 'b' || ev.ctrlKey || ev.metaKey || ev.altKey) return;
   const tag = document.activeElement && document.activeElement.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-  if (!canConfirm()) return;
+  if (!STATE || !STATE.file) return;
   ev.preventDefault();
-  confirmTpl();
+  sendeRechnung();
+});
+
+// Esc bricht das Tabelle-Rahmen-Ziehen bzw. die Zellen-Zielauswahl ab
+// (Baustein 2, Aaron 12.10.2026) -- Markierte Rahmen bleiben im PDF stehen.
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape' || !STATE) return;
+  if (STATE.tabRahmen.active) { toggleTabRahmen(); return; }
+  if (STATE.zielLiCell) {
+    STATE.zielLiCell = null;
+    document.querySelectorAll('.li-cell-ziel').forEach(e => e.classList.remove('li-cell-ziel'));
+    document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+  }
+  if (STATE.zielTaxCell) {
+    STATE.zielTaxCell = null;
+    document.querySelectorAll('.tax-cell-ziel').forEach(e => e.classList.remove('tax-cell-ziel'));
+    document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+  }
 });
 
 /* ================= Betriebsmodus ================= */
@@ -1633,6 +2823,23 @@ async function loadVersion() {
   $('#version').textContent = `Stand ${v.datum}`;
   $('#version').title = `${v.commit} · ${v.betreff}`;
   $('#btn-update').style.display = '';
+  loadUpdateWarnung();
+}
+
+// Gelbe Leiste, wenn ein Update haengt (05.11.2026: Updates kamen zehn Tage
+// unbemerkt nicht an, weil Fehlschlaege nur in update.log standen).
+async function loadUpdateWarnung() {
+  const s = await api('/api/update-status');
+  let bar = $('#update-warnung');
+  if (!s.warnung) { if (bar) bar.remove(); return; }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'update-warnung';
+    bar.style.cssText = 'background:#fffbe6;color:#ad6800;border-bottom:1px solid #ffe58f;' +
+      'padding:6px 12px;font-size:13px;white-space:pre-wrap';
+    document.body.insertBefore(bar, document.body.firstChild);
+  }
+  bar.textContent = '⚠ ' + s.warnung;
 }
 
 async function holeUpdate() {
@@ -1654,6 +2861,7 @@ async function holeUpdate() {
     alert('Update fehlgeschlagen: ' + err);
   }
   b.disabled = false; b.textContent = 'Update holen';
+  loadUpdateWarnung();
 }
 
 async function ausEingangEntfernen() {
@@ -1666,12 +2874,38 @@ async function ausEingangEntfernen() {
   loadList();
 }
 
-async function postfachBericht() {
+async function keineRechnungVonHand() {
+  if (!STATE.file) return;
+  if (!confirm(`„${STATE.file}“ ist keine Rechnung (z.B. Lieferschein/Angebot) und soll in den Ordner 'Keine Rechnung' verschoben werden?`)) return;
+  const r = await fetch('/api/keine-rechnung/von-hand', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: STATE.file }) });
+  if (!r.ok) { alert('Nicht möglich: ' + ((await r.json()).detail || r.status)); return; }
+  STATE.file = null;
+  $('#work').innerHTML = '<p class="hint">Als "keine Rechnung" aussortiert. Links eine Rechnung wählen.</p>';
+  loadList();
+  loadKeineRechnung();
+}
+
+async function postfachBericht(nr = 0) {
   show('scan');
   const w = $('#work'); w.className = '';
   w.innerHTML = '<p class="hint">Postfach wird gelesen (nur lesen, nichts wird verändert) …</p>';
-  const r = await api('/api/postfach-bericht');
+  const r = await api('/api/postfach-bericht?nr=' + encodeURIComponent(nr));
   const ab = r.abholung || {};
+  const pf = r.postfaecher || [];
+  const pfStatus = p => {
+    if (p.hinweis) return `<span style="color:#b07800">${esc(p.hinweis)}</span>`;
+    const l = p.letzte_abholung;
+    if (!l) return '<span class="hint">noch nicht abgeholt</span>';
+    return l.ok ? `<span style="color:#1c7550">OK</span> · ${l.mails ?? 0} Mail(s), ${l.neu ?? 0} neu`
+      : `<b style="color:#b22">Fehler: ${esc(l.fehler || '')}</b>`;
+  };
+  const nOk = pf.filter(p => !p.hinweis && p.letzte_abholung && p.letzte_abholung.ok).length;
+  const nFehler = pf.filter(p => !p.hinweis && p.letzte_abholung && !p.letzte_abholung.ok).length;
+  const nNicht = pf.filter(p => p.hinweis).length;
+  const pfZeilen = pf.map(p => `<tr${p.nr === r.nr && !p.hinweis ? ' style="background:#eef6f1"' : ''}>
+      <td>${esc(p.name || '')}</td><td>${esc(p.adresse || '–')}</td><td>${esc(p.ordner || '')}</td><td>${pfStatus(p)}</td>
+      <td>${p.nr !== null && p.nr !== undefined ? `<button class="ghost" onclick="postfachBericht(${p.nr})">Mails ansehen</button>` : ''}</td></tr>`).join('');
   const zeilen = (r.mails || []).map(m => `<tr>
       <td>${esc(m.datum || '')}</td><td>${esc(m.von || '')}</td><td>${esc(m.betreff || '')}</td>
       <td>${m.gelesen ? 'ja' : 'nein'}</td>
@@ -1683,20 +2917,77 @@ async function postfachBericht() {
     <h3>Postfach-Übersicht</h3>
     <div class="hint">Mach bei Problemen ein Foto von dieser Seite.</div>
     <table>
-      <tr><td>Postfach</td><td>${esc(r.postfach || '')} · Ordner „${esc(r.ordner || '')}“ · ${r.anzahl_im_ordner ?? '?'} Mail(s) darin</td></tr>
+      <tr><td>Postfach</td><td>${esc(r.postfach || '')} · Ordner „${esc(r.ordner || '')}“ · ${r.anzahl_im_ordner ?? '?'} Mail(s) darin${Object.keys(r.je_ordner || {}).length > 1 ? ' (' + Object.entries(r.je_ordner).map(([o, n]) => `${esc(o)}: ${n}` + ((r.zeitraum || {})[o] ? ` [${esc(r.zeitraum[o][0])} – ${esc(r.zeitraum[o][1])}]` : '')).join(', ') + ')' : ''}${r.nur_lesen ? ' · <b>nur lesen</b> (markiert/verschiebt nichts)' : ''}</td></tr>
       <tr><td>Verbindung</td><td>${r.ok ? 'OK' : 'FEHLER: ' + esc(r.fehler || '')}</td></tr>
       <tr><td>Automatische Abholung</td><td>${ab.minuten ? `alle ${ab.minuten} Min.` : 'aus'} · zuletzt ${esc(ab.letzte_pruefung || '–')}
-        · ${ab.mails_zuletzt ?? 0} Mail(s), ${ab.zuletzt_neu ?? 0} neu ${ab.laeuft ? '· <b>läuft gerade</b>' : ''}
+        · ${ab.mails_zuletzt ?? 0} Mail(s), ${ab.zuletzt_neu ?? 0} neu ${ab.laeuft ? '· <b>läuft gerade</b>' + (ab.fortschritt ? ` (Postfach ${esc(ab.fortschritt)}: ${esc(ab.aktuelles_postfach || '')})` : '') : ''}
         ${ab.fehler ? '<br><b>Fehler: ' + esc(ab.fehler) + '</b>' : ''}</td></tr>
       ${r.nachtsperre ? '<tr><td>Sperre</td><td><b>Nachtlauf-Sperre aktiv – Abholung wartet</b></td></tr>' : ''}
       <tr><td>Andere Ordner</td><td>${esc((r.alle_ordner || []).join(' · '))}</td></tr>
       <tr><td>Eingang</td><td>${esc(r.eingang || '')}: ${(r.im_eingang || []).length} Datei(en)</td></tr>
     </table>
+    <h4>Alle Postfächer (${pf.length}): ${nOk} OK · ${nFehler} mit Fehler · ${nNicht} werden nicht abgeholt</h4>
+    <table><tr><th>Name</th><th>Adresse</th><th>Ordner</th><th>Letzte Abholung</th><th></th></tr>${pfZeilen}</table>
     <h4>Programm</h4>
     <table>${Object.entries(r.system || {}).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(String(v))}</td></tr>`).join('')}</table>
     <h4>Letzte Mails im Ordner „${esc(r.ordner || '')}“</h4>
     <table><tr><th>Datum</th><th>Von</th><th>Betreff</th><th>gelesen</th><th>Anhänge</th><th>Was das Programm tut</th></tr>${zeilen}</table>
   </div>`;
+}
+
+async function abbyyEinlesen(art, input) {
+  const f = input.files && input.files[0]; if (!f) return;
+  const msg = $('#abbyy-msg'); msg.textContent = `„${f.name}“ wird eingelesen …`;
+  const buf = new Uint8Array(await f.arrayBuffer());
+  let bin = ''; for (let i = 0; i < buf.length; i += 8192) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 8192));
+  const r = await fetch('/api/import-abbyy', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ art, inhalt: btoa(bin) }) });
+  const d = await r.json().catch(() => ({}));
+  input.value = '';
+  if (!r.ok) { msg.textContent = 'Fehler: ' + (d.detail || r.status); return; }
+  msg.textContent = `${d.anzahl} ${art === 'lieferanten' ? 'Lieferanten' : 'Geschäftsbereiche'} eingelesen.` +
+    (d.fehlend && d.fehlend.length ? ` Achtung: ${d.fehlend.length} Geschäftsbereich-ID(s) fehlen noch (${d.fehlend.slice(0, 8).join(', ')}) – bitte erst die Geschäftsbereiche einlesen.` : '');
+  if (art === 'lieferanten') loadSuppliers();
+}
+
+async function startklar() {
+  show('scan');
+  const w = $('#work'); w.className = '';
+  w.innerHTML = '<p class="hint" style="padding:12px">Prüfe … (Anmeldungen bei Postfach, JobRouter, Mailversand – dauert einige Sekunden)</p>';
+  const d = await api('/api/startklar');
+  const sym = { ok: '✓', warn: '!', fehler: '✗', aus: '–' };
+  const farbe = { ok: '#1c7550', warn: '#b07800', fehler: '#b22', aus: '#777' };
+  const alleOk = d.punkte.every(p => p.status !== 'fehler');
+  w.innerHTML = `<div style="padding:12px"><h3>Startklar? ${alleOk ? '<span style="color:#1c7550">ja</span>' : '<span style="color:#b22">noch nicht</span>'}</h3>
+    <table>${d.punkte.map(p => `<tr>
+      <td style="color:${farbe[p.status]};font-weight:bold;width:20px">${sym[p.status]}</td>
+      <td><b>${esc(p.name)}</b></td><td>${esc(p.detail)}</td>
+      <td class="hint">${esc(p.hilfe || '')}</td></tr>`).join('')}</table>
+    <p><button class="ghost" onclick="sicherungJetzt(this)">Datensicherung jetzt</button></p></div>`;
+}
+async function sicherungJetzt(btn) {
+  btn.disabled = true;
+  const r = await fetch('/api/sicherung', { method: 'POST' }); const d = await r.json().catch(() => ({}));
+  btn.disabled = false; btn.textContent = r.ok ? (d.ok ? '✓ ' + d.detail : d.detail) : 'Fehler: ' + (d.detail || r.status);
+}
+async function jobrouterVorschau() {
+  if (!STATE.file) return;
+  const r = await fetch('/api/jobrouter-vorschau?file=' + encodeURIComponent(STATE.file));
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert('Vorschau nicht möglich: ' + (d.detail || r.status)); return; }
+  const box = document.createElement('div');
+  box.style.cssText = 'position:fixed;inset:5% 10%;background:#fff;border:2px solid #1c7550;z-index:100;overflow:auto;padding:14px;box-shadow:0 4px 24px rgba(0,0,0,.3)';
+  const pr = d.prozess || {};
+  box.innerHTML = `<button style="float:right" onclick="this.parentElement.remove()">Schließen</button>
+    <h3>JobRouter-Vorschau</h3>
+    <p class="hint">${d.live ? 'JobRouter ist angebunden.' : 'JobRouter noch nicht angebunden – so würde es gesendet.'}
+      Prozess: ${esc(pr.name || '–')} · Version ${esc(pr.version || '–')} · Schritt ${esc(pr.schritt || '–')}
+      ${d.zuordnung_vorhanden ? '' : '<br><b style="color:#b22">Keine Feldzuordnung hinterlegt – Feldnamen gehen unverändert raus.</b>'}</p>
+    <table><tr><th>Unser Feld</th><th>JobRouter-Feld</th><th>Wert</th></tr>
+    ${d.felder.map(f => `<tr><td>${esc(f.feld)}</td><td style="${f.zugeordnet ? '' : 'color:#b07800'}">${esc(f.jobrouter)}${f.zugeordnet ? '' : ' (nicht zugeordnet)'}</td>
+      <td><code>${esc(JSON.stringify(f.wert))}</code></td></tr>`).join('')}</table>
+    <details><summary>Komplette Nutzlast (technisch)</summary><pre style="white-space:pre-wrap">${esc(JSON.stringify(d.nutzlast, null, 2))}</pre></details>`;
+  document.body.appendChild(box);
 }
 
 /* ================= Postfach-Abholung (abholung.py) ================= */
@@ -1761,6 +3052,83 @@ async function loadHuman() {
   $('#human-table').innerHTML = ''; $('#human-table').appendChild(t);
 }
 
+/* ================= Keine Rechnung (Entscheidung Aaron 14.10.2026) ======= */
+async function loadKeineRechnung() {
+  const d = await api('/api/keine-rechnung');
+  $('#keine-rechnung-dir').textContent = d.ordner;
+  $('#keine-rechnung-count').textContent = d.offen.length ? `(${d.offen.length})` : '';
+  if (!d.offen.length) {
+    $('#keine-rechnung-table').innerHTML = '<p class="hint">Nichts aussortiert.</p>';
+    return;
+  }
+  const t = document.createElement('table');
+  t.innerHTML = `<tr><th><input type="checkbox" onchange="krToggleAll(this)"></th>
+    <th>Datei</th><th>Grund</th><th>Absender/Betreff</th><th>seit</th><th></th></tr>`;
+  for (const r of d.offen) {
+    const herk = r.herkunft || {};
+    const absender = [herk.von, herk.betreff].filter(Boolean).join(' – ');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><input type="checkbox" class="kr-sel" value="${esc(r.datei)}"></td>
+      <td><a href="/api/keine-rechnung/datei?file=${encodeURIComponent(r.datei)}" target="_blank">${esc(r.datei)}</a></td>
+      <td>${esc(r.grund || '')}${r.beschriftung ? `<br><span class="hint">erkannt als „${esc(r.beschriftung)}“</span>` : ''}</td>
+      <td>${esc(absender)}</td>
+      <td>${esc((r.abgelegt || '').slice(0, 16).replace('T', ' '))}</td>
+      <td><button class="ghost" onclick="keineRechnungZurueck('${esc(r.sha256)}')" title="Die Regel lag falsch">Doch eine Rechnung</button>
+          <button class="danger" onclick="keineRechnungLoeschen(['${esc(r.datei)}'])">Löschen</button></td>`;
+    t.appendChild(tr);
+  }
+  $('#keine-rechnung-table').innerHTML = '';
+  $('#keine-rechnung-table').appendChild(t);
+  const bar = document.createElement('div'); bar.className = 'actionbar';
+  bar.innerHTML = `<button class="danger" onclick="krLoeschenAusgewaehlte()">Ausgewählte löschen</button>`;
+  $('#keine-rechnung-table').appendChild(bar);
+}
+
+function krToggleAll(cb) {
+  document.querySelectorAll('.kr-sel').forEach(x => x.checked = cb.checked);
+}
+
+async function keineRechnungZurueck(sha256) {
+  if (!confirm('Doch eine Rechnung? Die Datei geht zurück in den Eingang und wird normal verarbeitet.')) return;
+  const r = await fetch('/api/keine-rechnung/zurueck', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sha256 }) });
+  if (!r.ok) { alert('Nicht möglich: ' + ((await r.json()).detail || r.status)); return; }
+  loadKeineRechnung();
+  loadList();
+}
+
+function keineRechnungLoeschen(namen) {
+  // Eigener Dialog statt confirm(): hier endgueltig geloescht wird, soll
+  // sichtbar bleiben WELCHE Dateien betroffen sind (Nachtrag 14.10.2026).
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-box">
+      <h3>Endgültig löschen?</h3>
+      <p>${namen.length} Datei(en) werden unwiderruflich aus dem Ordner „Keine Rechnung“ entfernt.
+         Das Postfach selbst wird dabei nicht verändert.</p>
+      <div class="files">${namen.map(esc).join('<br>')}</div>
+      <div class="actions">
+        <button class="ghost" id="kr-del-abbrechen">Abbrechen</button>
+        <button class="danger" id="kr-del-bestaetigen">Endgültig löschen</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#kr-del-abbrechen').onclick = () => overlay.remove();
+  overlay.querySelector('#kr-del-bestaetigen').onclick = async () => {
+    const r = await fetch('/api/keine-rechnung/loeschen', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ namen }) });
+    overlay.remove();
+    if (!r.ok) { alert('Löschen nicht möglich: ' + ((await r.json()).detail || r.status)); return; }
+    loadKeineRechnung();
+  };
+}
+function krLoeschenAusgewaehlte() {
+  const namen = [...document.querySelectorAll('.kr-sel:checked')].map(x => x.value);
+  if (!namen.length) { alert('Nichts ausgewählt.'); return; }
+  keineRechnungLoeschen(namen);
+}
+
 /* ================= Lieferanten ================= */
 async function loadSuppliers() {
   const [rows, addresses] = await Promise.all([api('/api/suppliers'), api('/api/addresses')]);
@@ -1774,7 +3142,7 @@ async function loadSuppliers() {
   const sorted = [...rows].sort((a, b) =>
     (a.bestaetigt === false ? 0 : 1) - (b.bestaetigt === false ? 0 : 1));
   const t = document.createElement('table');
-  t.innerHTML = '<tr><th></th><th>ID</th><th>Name</th><th>Lieferantennr.</th><th>Rechnungsadressen</th><th>Währung</th><th>USt-IdNr</th><th>IBAN</th><th>feste Werte</th><th>Templates</th><th></th></tr>';
+  t.innerHTML = '<tr><th></th><th>ID</th><th>Name</th><th>Lieferantennr.</th><th>Rechnungsadressen</th><th>Währung</th><th>Positionen</th><th>USt-IdNr</th><th>IBAN</th><th>feste Werte</th><th>Templates</th><th></th></tr>';
   for (const s of sorted) {
     if (onlyUnconfirmed && s.bestaetigt !== false) continue;
     const tr = document.createElement('tr'); tr.className = 'clickable';
@@ -1783,6 +3151,7 @@ async function loadSuppliers() {
       <td>${esc(s.external_id || '')}</td>
       <td>${(s.addresses || []).length ? (s.addresses || []).map(a => esc(addrName(a))).join('<br>') : '<span class="hint">alle</span>'}</td>
       <td>${esc(s.currency || 'EUR')}</td>
+      <td>${esc(POSITIONSMODUS_LABEL[s.positionsmodus] || s.positionsmodus || 'einzeln')}${s.positionsmodus === 'eine_position' && s.positionsbezeichnung ? `<br><span class="hint">${esc(s.positionsbezeichnung)}</span>` : ''}</td>
       <td>${(s.ustids || []).map(esc).join('<br>')}</td>
       <td>${(s.ibans || []).map(esc).join('<br>')}</td>
       <td>${Object.entries(s.fixed_fields || {}).map(([k, v]) => `${esc(k)}=${esc(v)}`).join('<br>')}</td>
@@ -1791,6 +3160,7 @@ async function loadSuppliers() {
          <button class="danger" onclick="event.stopPropagation();delTemplate('${esc(x.id)}')">×</button>`).join('<br>')}</td>
       <td>${s.bestaetigt === false
         ? `<button onclick="event.stopPropagation();confirmSupplierRow('${esc(s.id)}')">Bestätigen</button>
+           <button class="ghost" onclick="event.stopPropagation();uebernehmenSupplierRow('${esc(s.id)}')">In bestehenden übernehmen…</button>
            <button class="danger" onclick="event.stopPropagation();discardSupplierRow('${esc(s.id)}')">Verwerfen</button>`
         : ''}
         <button class="danger" onclick="event.stopPropagation();delSupplier('${esc(s.id)}')">Löschen</button></td>`;
@@ -1856,7 +3226,46 @@ function editSupplier(s) {
         ${FIXED_FIELDS.map(k => `<label>${k}</label><input id="ff-${k}" value="${esc(ff[k] || '')}">`).join('')}
       </div>
     </div>
+    ${s.id ? renderPositionsmodusBox(s) : ''}
     <button onclick="submitSupplier()">Speichern</button>`;
+}
+
+/* Positionsmodus (Teil B, Entscheidung Aaron 10.10.2026): eigener Speichern-
+   Knopf -- eigener API-Weg (POST .../positionsmodus) mit Audit-Eintrag,
+   unabhaengig vom allgemeinen Stammdaten-Speichern oben. */
+function renderPositionsmodusBox(s) {
+  const modus = s.positionsmodus || 'einzeln';
+  return `
+    <div class="box">
+      <h4>Positionen</h4>
+      <div class="hint">Wie Positionen dieses Lieferanten gelesen werden -- Normalfall "einzeln" (unveraendert).
+        Verschiedene MwSt-Sätze werden nie zusammengefasst.</div>
+      <div class="form-grid">
+        <label>Modus</label>
+        <select id="pm-modus" onchange="pmModusChanged()">
+          ${Object.entries(POSITIONSMODUS_LABEL).map(([k, label]) =>
+            `<option value="${k}" ${k === modus ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+        </select>
+        <label id="pm-bez-label" style="${modus === 'eine_position' ? '' : 'display:none'}">Bezeichnung</label>
+        <input id="pm-bezeichnung" style="${modus === 'eine_position' ? '' : 'display:none'}"
+               value="${esc(s.positionsbezeichnung || '')}" placeholder="z.B. Strom">
+      </div>
+      <button class="ghost mini" onclick="submitPositionsmodus('${esc(s.id)}')">Positionsmodus speichern</button>
+      <span id="pm-msg" class="hint"></span>
+    </div>`;
+}
+function pmModusChanged() {
+  const eine = $('#pm-modus').value === 'eine_position';
+  $('#pm-bez-label').style.display = eine ? '' : 'none';
+  $('#pm-bezeichnung').style.display = eine ? '' : 'none';
+}
+async function submitPositionsmodus(id) {
+  await api('/api/suppliers/' + encodeURIComponent(id) + '/positionsmodus', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ modus: $('#pm-modus').value, bezeichnung: $('#pm-bezeichnung').value.trim() }),
+  });
+  $('#pm-msg').textContent = 'gespeichert';
+  loadSuppliers();
 }
 
 const lines = id => ($('#' + id).value || '').split('\n').map(x => x.trim()).filter(Boolean);
@@ -2001,6 +3410,136 @@ async function loadJournal() {
   $('#journal-table').innerHTML = '';
   $('#journal-table').appendChild(t);
   if (!d.rows.length) $('#journal-table').innerHTML = '<p class="hint">Noch keine bestätigten Rechnungen.</p>';
+}
+
+/* ================= Qualität (Aaron 10.10.2026) ================= */
+const pct = v => (v === null || v === undefined) ? '–' : v.toFixed(1).replace('.', ',') + ' %';
+let TESTSATZ_TIMER = null;
+
+function lernfortschrittHtml(d) {
+  const g = d.gesichert_anteil || {};
+  const kopf = g.prozent != null
+    ? `<p><b>${g.prozent} %</b> der wartenden Rechnungen (${g.gesichert} von ${g.wartend}) kommen von Lieferanten mit gesicherter Vorlage.</p>`
+    : '<p class="hint">Keine wartenden Rechnungen (oder Liste noch nicht geladen).</p>';
+  const rows = d.lernfortschritt || [];
+  const quote = r => r.korrekturquote == null ? '–' : Math.round(100 * r.korrekturquote) + ' % (letzte ' + r.in_stichprobe + ')';
+  return kopf + (!rows.length ? '<p class="hint">Noch keine bestätigten Rechnungen.</p>' :
+    '<table><tr><th>Lieferant</th><th class="num">bestätigt</th><th>Vorlage gesichert</th>' +
+    '<th class="num">Korrekturquote</th><th class="num">wartend</th></tr>' +
+    rows.map(r => `<tr><td>${esc(r.name)}</td><td class="num">${r.bestaetigt}</td>
+      <td>${r.gesichert ? '<span class="chk ok">ja</span>' : (r.vorlage ? '<span class="chk warn">noch nicht</span>' : '<span class="hint">keine Vorlage</span>')}</td>
+      <td class="num">${quote(r)}</td><td class="num">${r.wartend || ''}</td></tr>`).join('') + '</table>');
+}
+
+async function loadQualitaet() {
+  loadTestsatz(); loadLernbericht();
+  const d = await api('/api/qualitaet');
+  $('#q-lernfortschritt').innerHTML = lernfortschrittHtml(d);
+  $('#q-prof-min').textContent = d.min_rechnungen;
+  const geld = v => v == null ? '' : Number(v).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  $('#q-profile').innerHTML = !d.profile.length ? '<p class="hint">Noch keine bestätigten Rechnungen.</p>' :
+    '<table><tr><th>Lieferant</th><th class="num">Rechnungen</th><th>aktiv</th><th>Steuersätze</th>' +
+    '<th>Währung</th><th class="num">Brutto Median</th><th class="num">min</th><th class="num">max</th>' +
+    '<th>Rechnungsnummer</th><th class="num">Zahlungsziel</th></tr>' +
+    d.profile.map(p => { const m = p.rechnungsnummer || {}, b = p.brutto || {};
+      return `<tr><td>${esc(p.lieferant_name || p.lieferant)}</td><td class="num">${p.rechnungen}</td>
+        <td>${p.aktiv ? '✓' : '<span class="hint">noch nicht</span>'}</td>
+        <td>${esc((p.steuersaetze || []).map(x => String(x).replace('.', ',') + ' %').join(', '))}</td>
+        <td>${esc((p.waehrungen || []).join(', '))}</td>
+        <td class="num">${geld(b.median)}</td><td class="num">${geld(b.min)}</td><td class="num">${geld(b.max)}</td>
+        <td>${esc(m.beispiel || '')}${m.geruest ? ` <span class="hint">(${esc(m.geruest)}${m.fortlaufend ? ', fortlaufend' : ''})</span>` : ''}</td>
+        <td class="num">${p.zahlungsziel_tage == null ? '' : p.zahlungsziel_tage + ' Tage'}</td></tr>`; }).join('') +
+    '</table>';
+  const fs = d.fehlerstatistik || { zeilen: [], lohnend: [] };
+  const anteil = v => v == null ? '–' : Math.round(100 * v) + ' %';
+  const trendHtml = t => t === 'besser' ? '<span class="chk ok">↓ besser</span>'
+    : t === 'schlechter' ? '<span class="chk bad">↑ schlechter</span>' : esc(t || '');
+  // Positionszeilen einzeln: bestätigt = Treffer, geändert/eingefügt = Korrektur (Aaron 05.11.2026)
+  const zs = d.zeilenstatistik || { gesamt: {}, lieferanten: [] };
+  const zg = zs.gesamt || {};
+  const zeilenHtml = (zg.treffer || zg.korrigiert || zg.bestaetigt_vom_menschen)
+    ? `<p><b>Positionszeilen:</b> ${zg.treffer || 0} richtig erkannt (bestätigt), ${zg.korrigiert || 0} geändert/eingefügt${zg.quote != null ? ` → <b>${Math.round(100 * zg.quote)} %</b> Treffer` : ''}.</p>` +
+      '<table><tr><th>Lieferant</th><th class="num">Treffer</th><th class="num">geändert</th><th class="num">Quote</th></tr>' +
+      zs.lieferanten.map(r => `<tr><td>${esc(r.lieferant_name || r.lieferant)}</td><td class="num">${r.treffer}</td>
+        <td class="num">${r.korrigiert}</td><td class="num">${r.quote == null ? '–' : Math.round(100 * r.quote) + ' %'}</td></tr>`).join('') + '</table>'
+    : '';
+  $('#q-fehler').innerHTML = zeilenHtml + (!fs.zeilen.length ? '<p class="hint">Noch keine Korrekturen.</p>' :
+    (fs.lohnend.length ? '<p><b>Lohnendste Verbesserungen</b></p><ul>' +
+      fs.lohnend.map(r => `<li>${esc(r.text)}</li>`).join('') + '</ul>' : '') +
+    '<table><tr><th>Lieferant</th><th>Feld</th><th class="num">korrigiert</th><th class="num">Anteil</th>' +
+    `<th class="num">letzte ${fs.trend_tage / 7} Wochen</th><th class="num">davor</th><th>Trend</th></tr>` +
+    fs.zeilen.map(r => `<tr><td>${esc(r.lieferant_name || r.lieferant)}</td><td>${esc(r.feld_label)}</td>
+      <td class="num">${r.korrigiert} von ${r.rechnungen}</td><td class="num">${anteil(r.anteil)}</td>
+      <td class="num">${anteil(r.anteil_4_wochen)}</td><td class="num">${anteil(r.anteil_davor)}</td>
+      <td>${trendHtml(r.trend)}</td></tr>`).join('') + '</table>');
+}
+
+async function loadLernbericht() {
+  const el = $('#q-lernbericht'); if (!el) return;
+  const d = await api('/api/lernbericht').catch(() => null); if (!d) return;
+  const z = d.zusammenfassung;
+  el.textContent = (d.an ? `Empfänger: ${d.an}. ` : 'Kein Empfänger eingestellt (RECHNUNG_BERICHT_AN). ') +
+    `Seit dem letzten Bericht: ${z.rechnungen} Rechnung(en), ${z.korrigiert} von ${z.felder} Feldern korrigiert.` +
+    (d.letzter && d.letzter.gesendet ? ` Zuletzt gesendet: ${String(d.letzter.gesendet).slice(0, 16).replace('T', ' ')}.` : '');
+  $('#q-zuordnung').innerHTML = '<table>' + (d.zuordnung || []).map(z =>
+    `<tr><td>${esc(z.pseudonym)}</td><td>${esc(z.name)}</td></tr>`).join('') + '</table>';
+}
+async function lernberichtSenden() {
+  const el = $('#q-lernbericht'); el.textContent = 'Sende …';
+  const r = await fetch('/api/lernbericht', { method: 'POST' });
+  const d = await r.json().catch(() => ({}));
+  el.textContent = r.ok ? (d.gesendet ? `Gesendet an ${d.an} (${d.rechnungen} Rechnungen).` : 'Nicht gesendet: ' + d.grund)
+                        : 'Fehler: ' + (d.detail || r.status);
+}
+
+async function loadTestsatz() {
+  const d = await api('/api/testsatz');
+  const l = d.lauf, st = $('#q-testsatz-status');
+  $('#q-testsatz-btn').disabled = l.laeuft || !d.faelle;
+  if (l.laeuft) {
+    st.textContent = `läuft … ${l.fertig} von ${l.gesamt || '?'}` + (l.datei ? ` (${l.datei})` : '');
+    clearTimeout(TESTSATZ_TIMER);
+    TESTSATZ_TIMER = setTimeout(loadTestsatz, 1500);
+  } else {
+    st.textContent = (l.fehler ? 'Fehler: ' + l.fehler + ' · ' : '') +
+      `${d.faelle} Testfall/-fälle vorhanden` + (d.faelle ? '' : ' – erst Rechnungen bestätigen');
+  }
+  const b = d.letzter, box = $('#q-testsatz');
+  if (!b) { box.innerHTML = '<p class="hint">Noch kein Lauf.</p>'; return; }
+  const f = b.filter || {};
+  const v = b.vergleich || {};
+  let html = `<p><b>Trefferquote ${pct(b.trefferquote)}</b> · ${b.anzahl} Rechnung(en) ·
+    ${esc((b.erstellt || '').slice(0, 16).replace('T', ' '))} · Variante ${esc(f.variante)}` +
+    (f.nur_ohne_ki ? ' · nur ohne KI' : '') + (f.lieferant ? ` · Lieferant ${esc(f.lieferant)}` : '') +
+    (b.zeit_s && b.zeit_s.anzahl ? ` · Zeit je Rechnung Median ${b.zeit_s.median} s, P90 ${b.zeit_s.p90} s` : '') +
+    (b.abgebrochen ? ` · <span class="chk bad">${b.abgebrochen} abgebrochen</span>` : '') + '</p>';
+  if (v.vorher) html += v.schlechter.length
+    ? `<div class="holdbox">Schlechter geworden gegenüber dem Lauf davor (${pct(v.trefferquote_vorher)}): ` +
+      v.schlechter.map(esc).join('; ') + '</div>'
+    : `<p class="hint">Gegenüber dem Lauf davor (${pct(v.trefferquote_vorher)}) nichts schlechter geworden.</p>`;
+  html += '<table><tr><th>Feld</th><th class="num">richtig</th><th class="num">falsch</th>' +
+    '<th class="num">fehlt</th><th class="num">Quote</th></tr>' +
+    Object.entries(b.felder || {}).map(([k, r]) => `<tr><td>${esc(k)}</td><td class="num">${r.richtig}</td>
+      <td class="num">${r.falsch ? `<span class="chk bad">${r.falsch}</span>` : 0}</td>
+      <td class="num">${r.fehlt}</td><td class="num">${pct(r.quote)}</td></tr>`).join('') + '</table>';
+  const p = b.positionen || {};
+  if (p.soll) html += `<p class="hint">Positionen: ${p.korrekt} von ${p.soll} Zeilen korrekt
+    (${pct(p.quote)}), ${p.gefunden} Zeilen gelesen.</p>`;
+  const schlecht = (b.faelle || []).filter(x => Object.values(x.felder).some(r => r.ergebnis !== 'richtig'));
+  if (schlecht.length) html += '<details><summary>Rechnungen mit Abweichungen (' + schlecht.length +
+    ')</summary><table><tr><th>Datei</th><th>Lieferant</th><th>Feld</th><th>bestätigt</th><th>gelesen</th></tr>' +
+    schlecht.flatMap(x => Object.entries(x.felder).filter(([, r]) => r.ergebnis !== 'richtig').map(([k, r]) =>
+      `<tr><td>${esc(x.datei)}</td><td>${esc(x.lieferant_name || x.lieferant)}</td><td>${esc(k)}</td>
+       <td>${esc(r.soll)}</td><td>${r.ergebnis === 'fehlt' ? '<i>fehlt</i>' : esc(r.ist)}</td></tr>`)).join('') +
+    '</table></details>';
+  (b.uebersprungen || []).forEach(u => html += `<p class="hint">übersprungen: ${esc(u.datei)} – ${esc(u.grund)}</p>`);
+  box.innerHTML = html;
+}
+
+async function testsatzStart() {
+  const r = await fetch('/api/testsatz', { method: 'POST' });
+  if (!r.ok) { const d = await r.json(); alert(d.detail || 'Fehler'); }
+  loadTestsatz();
 }
 
 /* ================= Vorlernen aus Altbestand ================= */

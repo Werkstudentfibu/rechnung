@@ -22,6 +22,8 @@ if "%MIT_VERARBEITUNG%"=="1" (
   "%RECHNUNG_EXE%" --data "%RECHNUNG_DATA%" --samples "%RECHNUNG_EINGANG%" scan >> "%LOG%" 2>&1
   "%RECHNUNG_EXE%" --data "%RECHNUNG_DATA%" --samples "%RECHNUNG_EINGANG%" push >> "%LOG%" 2>&1
 )
+rem Vorab alles auslesen, damit am Morgen niemand warten muss (nichts wird gesendet)
+"%RECHNUNG_EXE%" --data "%RECHNUNG_DATA%" --samples "%RECHNUNG_EINGANG%" vorbereiten --ohne-abholen >> "%LOG%" 2>&1
 "%RECHNUNG_EXE%" --data "%RECHNUNG_DATA%" --samples "%RECHNUNG_EINGANG%" nacht >> "%LOG%" 2>&1
 set "RC=%errorlevel%"
 echo ==== Ende, Code %RC% ==== >> "%LOG%"

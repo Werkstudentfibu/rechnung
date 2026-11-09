@@ -182,7 +182,11 @@ def test_secured_template_is_only_extended(tmp_path: Path):
     store.mark_confirmed(doc.sha256)
     out = learn.learn_from_confirmed(store, res, doc)
     assert out.saved and not out.created
-    assert out.kept == ["netto"] and out.learned == ["rechnungsnummer"]
+    # (die automatisch erkannte Positionstabelle wird seit 05.11.2026 mitgelernt:
+    # eine Tabelle ohne Pos.-Spalte und mit Ganzzahl-Betraegen war vorher nie
+    # "reproduzierbar")
+    assert out.kept == ["netto"]
+    assert [x for x in out.learned if x != "_positionen"] == ["rechnungsnummer"]
     tpl = store.template("muster__standard")
     assert {f.name for f in tpl.fields} == {"netto", "rechnungsnummer"}
     assert tpl.confirmations >= 5
@@ -238,8 +242,10 @@ def test_existing_correct_template_is_kept(tmp_path: Path):
     res = process(src, store, use_llm=False)
     store.mark_confirmed(doc.sha256)
     out = learn.learn_from_confirmed(store, res, doc)
-    assert not out.saved and set(out.kept) == set(CONFIRMED)
-    assert not [a for a in store.audit_log() if a["action"] == "template_learned"]
+    # an den Feldern ist nichts neu zu lernen; hoechstens die erkannte Tabelle
+    assert set(out.kept) == set(CONFIRMED)
+    assert out.learned in ([], ["_positionen"])
+    assert out.saved == bool(out.learned)
 
 
 def test_einvoice_and_unknown_supplier_not_learned(tmp_path: Path):

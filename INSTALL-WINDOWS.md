@@ -155,6 +155,32 @@ schtasks /Create /TN "Rechnung Nachtlauf" /TR "\"C:\Rechnung\nachtlauf.cmd\"" /S
 - Testen ohne zu warten: `schtasks /Run /TN "Rechnung Nachtlauf"`.
 - Entfernen: `schtasks /Delete /TN "Rechnung Nachtlauf" /F`.
 
+## Schritt 7b – Rechnungen vorbereiten lassen (empfohlen)
+
+Damit beim Prüfen niemand auf die Texterkennung/KI warten muss, liest das
+Programm neue Rechnungen **vorab** aus – im offenen Fenster im Hintergrund, und
+mit dem Befehl `rechnung vorbereiten` auch ohne offenes Fenster (holt zuerst das
+Postfach ab, falls eingerichtet). Bestätigt, gesendet oder gelernt wird dabei
+nie etwas. Im Programm zeigt jede Rechnung „bereit zur Prüfung / wird
+vorbereitet / wartet / Fehler“; oben steht der Zähler.
+
+Einmalig einrichten (Doppelklick auf `C:\Rechnung\app\windows\vorbereitung-einrichten.cmd`,
+legt zwei Aufgaben an – das Skript ändert sonst nichts):
+
+- „Rechnung Vorbereiten (Tag)“: Mo–Fr 07:00–19:00, alle 30 Minuten
+- „Rechnung Vorbereiten (Nacht)“: täglich ab 20:00, stündlich bis 06:00
+
+Ohne das Skript von Hand: `schtasks /Create /F /TN "Rechnung Vorbereiten (Tag)" /TR "\"C:\Rechnung\app\windows\vorbereiten.cmd\"" /SC WEEKLY /D MON,TUE,WED,THU,FRI /ST 07:00 /RI 30 /DU 12:00`
+
+- Läuft mit niedriger Priorität, eine Datei nach der anderen (Zeitgrenze je Datei
+  10 Minuten, einstellbar mit `--zeit`). Ein zweiter Lauf, während einer arbeitet,
+  beendet sich sofort; ein offenes Programmfenster rechnet dieselbe Datei nie
+  doppelt (Sperre je Datei).
+- Protokoll: `C:\Rechnung\data\vorbereiten.log`. Von Hand: `rechnung vorbereiten`
+  (`--ohne-abholen`, `--max N`, `--erneut`).
+- Der Nachtlauf (`laptop-nachtlauf.cmd`) ruft `vorbereiten` ebenfalls auf.
+- Entfernen: `schtasks /Delete /TN "Rechnung Vorbereiten (Tag)" /F` (ebenso „(Nacht)“).
+
 ## Schritt 8 – Alte Rechnungen vorlernen (empfohlen, vor dem ersten Echtbetrieb)
 
 Die alten Rechnungen (z.B. ~170 Stück) in einen Ordner legen, etwa

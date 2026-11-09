@@ -103,6 +103,17 @@ def payload_from_result(res: dict, cfg: JobRouterConfig | None = None) -> dict:
            if res.get("supplier_external_id") else {}),
         "billingAddress": res.get("billing_address_name"),
         "billingAddressId": res.get("billing_address_id"),
+        # Stammdaten aus der Bibliothek wie im Abbyy-Kopf (stammdaten.py) --
+        # Geschaeftsbereich + Lieferant mit ID, USt-ID, Anschrift, Bank
+        "geschaeftsbereich": (res.get("stammdaten") or {}).get("geschaeftsbereich"),
+        "lieferantStammdaten": (res.get("stammdaten") or {}).get("lieferant"),
+        # Dummy-Lieferant (dummy.py): die vom Programm erkannten echten Daten,
+        # damit der neue Lieferant nicht abgetippt werden muss, plus kurzer
+        # Text fuers Bemerkungsfeld.
+        **({"lieferantIstDummy": True,
+            "erkannterLieferant": res.get("erkannter_lieferant") or {},
+            "bemerkung": res.get("bemerkung") or ""}
+           if res.get("lieferant_ist_dummy") else {}),
         "confidence": res.get("overall_confidence"),
         "fields": _map_fields(flat_fields, cfg),
         "herkunft": herkunft,
@@ -255,7 +266,11 @@ def enqueue(data_root: str | Path, res: dict) -> Path | None:
 
 
 def push_queue(data_root: str | Path, cfg: JobRouterConfig | None = None,
-               out_dir: str | Path | None = None) -> dict:
+               out_dir: str | Path | None = None, trockenlauf_aufheben: bool = False) -> dict:
+    """``trockenlauf_aufheben``: ohne echte JobRouter-Anbindung (Trockenlauf)
+    bleibt die Rechnung in der Warteschlange und geht automatisch raus,
+    sobald JobRouter angeschlossen ist (Aaron 11.10.2026: freigeben ab
+    Mittwoch, Anbindung evtl. erst spaeter)."""
     cfg = cfg or _jr_cfg()
     root = Path(data_root)
     q = queue_dir(root)
@@ -269,6 +284,8 @@ def push_queue(data_root: str | Path, cfg: JobRouterConfig | None = None,
         r = submit(res, out_dir, cfg, pdf_path=pdf_path)
         r["file"] = res.get("file")
         results.append(r)
+        if r.get("dry_run") and trockenlauf_aufheben:
+            continue
         if r.get("sent") or r.get("dry_run") or r.get("skipped"):
             f.rename(done / f.name)
         else:

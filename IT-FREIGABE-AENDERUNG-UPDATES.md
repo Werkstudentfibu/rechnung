@@ -3,6 +3,10 @@
 **Status: Vorschlag, noch nicht in `IT-FREIGABE-ENTWURF-v2.md` eingearbeitet.**
 Erst nach Aarons Freigabe übernehmen.
 
+*Hinweis 2026-11-06: Der unter Punkt 2 vorgeschlagene Satz „keine Verbindung zu
+Cloud-KI-Anbietern“ ist überholt – seit der Anlernphase mit Claude gibt es eine
+solche Verbindung, siehe `IT-FREIGABE-AENDERUNG-CLAUDE.md`.*
+
 ## 1. Abschnitt 6, Tabelle – neue Zeile
 
 | Verbindung | Richtung | Ziel / Port | Wann | Standard |

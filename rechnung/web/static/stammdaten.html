@@ -1,0 +1,610 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stammdaten aus Excel – Rechnung</title>
+<link rel="icon" href="data:,">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, sans-serif; color: #1a1a1a; background: #fff; }
+  header { padding: 8px 16px; background: #1c7550; color: #fff; display: flex; gap: 16px; align-items: center; }
+  header b { font-size: 15px; }
+  header a { color: #fff; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  h2 { margin: 0 0 8px; font-size: 18px; }
+  h3 { margin: 0; font-size: 15px; }
+  .hint { color: #555; font-size: 13px; }
+  .slots { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; margin: 14px 0; }
+  .slot { border: 1px solid #d5ddd9; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .slot.geladen { border-color: #1f9d55; background: #f4fbf6; }
+  .slot.problem { border-color: #e0a800; background: #fffaf0; }
+  .slot .anweisung { font-weight: 600; }
+  .drop { border: 2px dashed #1c7550; border-radius: 8px; padding: 22px 10px; text-align: center; background: #f3f7f5; flex: 1; }
+  .drop.over { background: #e3efe9; }
+  .drop label { cursor: pointer; text-decoration: underline; color: #1c7550; }
+  .drop input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  .drop:focus-within { outline: 3px solid #f2b705; outline-offset: 1px; }
+  button, select, input[type=text] { font: inherit; padding: 5px 10px; }
+  button { cursor: pointer; border: 1px solid #1c7550; background: #1c7550; color: #fff; border-radius: 4px; }
+  button.sek { background: #fff; color: #1c7550; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  :focus-visible { outline: 3px solid #f2b705; outline-offset: 1px; }
+  .card { border: 1px solid #d5ddd9; border-radius: 6px; margin: 14px 0; }
+  .card > .kopf { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap;
+                  padding: 10px 12px; background: #f3f7f5; border-bottom: 1px solid #d5ddd9; }
+  .card > .inhalt { padding: 10px 12px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #eee; vertical-align: top; }
+  th { font-size: 12px; color: #555; font-weight: 600; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+  .chip { padding: 3px 10px; border-radius: 12px; font-weight: 600; font-size: 13px; }
+  .chip.gruen { background: #dff3e6; color: #14653a; }
+  .chip.gelb { background: #fff2c6; color: #7a5a00; }
+  .chip.rot { background: #fbd9d6; color: #9a1c12; }
+  .chip.neutral { background: #e8ecea; color: #333; }
+  .punkt { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  .punkt.gruen { background: #1f9d55; } .punkt.gelb { background: #e0a800; } .punkt.rot { background: #c8352b; }
+  .frage { margin: 4px 0 8px; padding: 6px 8px; border-left: 3px solid #e0a800; background: #fffaf0; }
+  .frage.rot { border-left-color: #c8352b; background: #fff5f4; }
+  .frage.beantwortet { border-left-color: #1f9d55; background: #f4fbf6; }
+  .frage .zeile { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+  .frage input[type=text] { min-width: 260px; }
+  .nicht-gewaehlt { background: #fff5f4; }
+  .fehler { background: #fbd9d6; color: #9a1c12; padding: 8px 12px; border-radius: 4px; margin: 10px 0; }
+  .ok { background: #dff3e6; color: #14653a; padding: 10px 12px; border-radius: 4px; margin: 10px 0; }
+  .warn { background: #fff2c6; color: #5c4400; padding: 10px 12px; border-radius: 4px; margin: 10px 0; }
+  .leiste { position: sticky; bottom: 0; background: #fff; border-top: 1px solid #d5ddd9; padding: 10px 0; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .klein { font-size: 12px; color: #666; }
+  details.auto { margin: 2px 0; font-size: 13px; }
+  details.auto ul { max-height: 160px; overflow: auto; margin: 4px 0 4px 18px; padding: 0; }
+  .gruppe { display: grid; grid-template-columns: 5.5em 1fr; gap: 4px 12px; padding: 8px 0; border-bottom: 1px solid #eee; }
+  .gruppe .anz { font-weight: 700; font-size: 16px; text-align: right; }
+  .gruppe .steuer { grid-column: 2; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .gruppe input[type=text] { min-width: 220px; }
+  .zeile-btn { display: flex; gap: 8px; flex-wrap: wrap; }
+  @media (prefers-reduced-motion: no-preference) { .drop { transition: background .15s; } }
+</style>
+</head>
+<body>
+<header><b>Rechnung – Stammdaten aus Excel</b><span id="programmstand" class="klein" style="margin-left:auto;margin-right:1em;opacity:.7"></span><a href="/">← zurück zu den Rechnungen</a></header>
+<main id="app" aria-live="polite"></main>
+<script>
+const LABEL = {
+  name: 'Name', strasse: 'Straße', plz: 'PLZ', ort: 'Ort', land: 'Land', ustid: 'USt-IdNr / UID',
+  steuernummer: 'Steuernummer', iban: 'IBAN', bic: 'BIC', kreditorennummer: 'Kreditorennummer (Konto)',
+  mandant_verweis: 'Mandant (Nummer / Verweis)', email: 'E-Mail (Postfach)', passwort: 'Passwort',
+  server: 'Server', ordner: 'Ordner', name1: 'Name 1 (wird mit Name 2 zusammengesetzt)', name2: 'Name 2',
+  bezeichnung1: 'Bezeichnung 1 (nur zur Gegenprüfung)', postfach_kuerzel: 'Kürzel (aus Bezeichnung)',
+  postfach_name: 'Postfach-Name (komplett)', notiz: 'als Notiz ablegen'
+};
+const ART = { kreditor_de: 'Kreditoren Deutschland', kreditor_ch: 'Kreditoren Schweiz', mandant: 'Mandanten',
+  postfach: 'Postfächer', gemischt_land: 'Kreditoren (Land je Zeile entscheidet)', unklar: 'keine bekannte Liste' };
+
+// Die vier festen Upload-Bereiche. Die Art der Liste steht damit fest -- das Programm muss
+// sie nicht erraten. Passt eine Datei erkennbar nicht zum Bereich, wird gewarnt.
+const SLOTS = [
+  { id: 'de', art: 'kreditor_de', kurz: 'Kreditoren DE', titel: 'Deutsche Kreditoren',
+    text: 'Hier die deutschen Kreditoren hochladen',
+    info: 'Erwartet: Konto, Name1, Name2, Straße, Land, PlzOrt, Ortsbezeichnung …' },
+  { id: 'ch', art: 'kreditor_ch', kurz: 'Kreditoren CH', titel: 'Schweizer Kreditoren',
+    text: 'Hier die Schweizer Kreditoren hochladen',
+    info: 'Gleicher Aufbau wie die deutschen Kreditoren.' },
+  { id: 'mandanten', art: 'mandant', kurz: 'Mandanten', titel: 'Mandanten',
+    text: 'Hier die Mandanten hochladen',
+    info: 'Erwartet: Mandanten Nr., Bezeichnung (WJ und LM werden ignoriert).' },
+  { id: 'postfaecher', art: 'postfach', kurz: 'Postfächer', titel: 'E-Mail-Postfächer',
+    text: 'Hier die Zugangsdaten der E-Mail-Postfächer hochladen',
+    info: 'Erwartet: MDT, E-Mail, Passwort, Bezeichnung, Name. Enthält Passwörter im Klartext – nach dem Import die Excel-Datei löschen.' },
+];
+
+const S = { slots: {}, slotFehler: {}, zielfelder: [], vor: null, antworten: {}, fehler: '', ergebnis: null,
+            busy: false, nurOffen: true, detail: false, gruppenEingabe: {}, sicherung: '', warnung: '',
+            uebernehmenFortschritt: null };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const lbl = (k) => LABEL[k] || k;
+const slotById = (id) => SLOTS.find((s) => s.id === id);
+const blattKey = (sl, blatt) => sl.kurz + ' / ' + blatt;
+
+async function post(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  let j = null;
+  try { j = await r.json(); } catch (e) { /* leere Antwort */ }
+  if (!r.ok) throw new Error((j && j.detail) || ('Fehler ' + r.status));
+  return j;
+}
+
+async function get(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('Fehler ' + r.status);
+  return r.json();
+}
+
+// Alle geladenen Bereiche ZUSAMMEN pruefen (Postfaecher brauchen die Mandanten, DE/CH-Dubletten
+// fallen nur beim gemeinsamen Pruefen auf). Die Art kommt aus dem Bereich, nicht aus einer Vermutung.
+function alleSheets() {
+  const out = {};
+  for (const sl of SLOTS) {
+    const d = S.slots[sl.id];
+    if (!d) continue;
+    for (const [n, b] of Object.entries(d.sheets)) {
+      out[blattKey(sl, n)] = { headers: b.headers, rows: b.rows, mapping: b.mapping, art: sl.art };
+    }
+  }
+  return out;
+}
+const hatDaten = () => SLOTS.some((sl) => S.slots[sl.id]);
+
+function plausibilitaet(sl, d) {
+  const probs = [];
+  for (const [n, b] of Object.entries(d.sheets)) {
+    const v = b.art_vorschlag;
+    const passt = sl.id === 'de' ? ['kreditor_de', 'gemischt_land'].includes(v)
+      : sl.id === 'ch' ? ['kreditor_ch', 'gemischt_land'].includes(v) : v === sl.art;
+    if (!passt) {
+      probs.push(v === 'unklar' || !v
+        ? `Blatt „${n}“ passt zu keiner bekannten Liste`
+        : `Blatt „${n}“ sieht nach „${ART[v] || v}“ aus`);
+    }
+  }
+  return probs.join('; ');
+}
+
+function offeneWahl() {
+  const p = [];
+  for (const sl of SLOTS) {
+    const d = S.slots[sl.id];
+    if (!d) continue;
+    for (const [name, b] of Object.entries(d.sheets)) {
+      const n = Object.values(b.mapping).filter((v) => !v).length;
+      if (n) p.push(`${sl.titel}, Blatt „${name}“: ${n} Spalte(n) noch ohne Zuordnung`);
+    }
+    if (d.warnung && !d.bestaetigt) p.push(`${sl.titel}: Datei passt vielleicht nicht in diesen Bereich – bitte prüfen`);
+  }
+  return p;
+}
+
+const payloadAntworten = () => Object.fromEntries(Object.entries(S.antworten)
+  .filter(([, a]) => a.antwort && !(a.antwort.toLowerCase().startsWith('korrigieren') && !(a.wert || '').trim())));
+
+function antwortenLoeschen(sl) {
+  const prefix = sl.kurz + ' / ';
+  for (const k of Object.keys(S.antworten)) if (k.startsWith(prefix)) delete S.antworten[k];
+}
+
+async function dateiLaden(slotId, base64, name) {
+  const sl = slotById(slotId);
+  S.fehler = ''; S.ergebnis = null; S.busy = true; delete S.slotFehler[slotId];
+  render();
+  try {
+    const res = await post('/api/stammdaten/parse', { inhalt: base64 });
+    const d = { datei: name || '', sheets: res.sheets, warnung: '', bestaetigt: false };
+    d.warnung = plausibilitaet(sl, d);
+    antwortenLoeschen(sl);   // Antworten gehoeren zu den alten Zeilen -- nie auf neue Daten uebertragen
+    S.slots[slotId] = d;
+    S.zielfelder = res.zielfelder;
+    S.vor = null; S.busy = false;
+    render();
+    if (!offeneWahl().length) await pruefen();
+  } catch (e) {
+    S.busy = false; S.slotFehler[slotId] = e.message; render();
+  }
+}
+
+function slotEntfernen(slotId) {
+  const sl = slotById(slotId);
+  antwortenLoeschen(sl);
+  delete S.slots[slotId]; delete S.slotFehler[slotId];
+  S.vor = null;
+  return hatDaten() ? pruefen() : render();
+}
+
+async function pruefen() {
+  if (!hatDaten() || offeneWahl().length) { S.vor = null; render(); return; }
+  S.busy = true; render();
+  try {
+    S.vor = await post('/api/stammdaten/vorschau', { sheets: alleSheets(), antworten: payloadAntworten() });
+    S.fehler = '';
+  } catch (e) { S.fehler = e.message; S.vor = null; }
+  S.busy = false; render();
+}
+
+function setMapping(slotId, blatt, header, val) {
+  S.slots[slotId].sheets[blatt].mapping[header] = val === '' ? null : val;
+  S.vor = null; return pruefen();
+}
+function slotBestaetigen(slotId) { S.slots[slotId].bestaetigt = true; S.vor = null; return pruefen(); }
+function setAntwort(key, antwort, vorschlag) {
+  if (!antwort) delete S.antworten[key];
+  else S.antworten[key] = { antwort, wert: antwort.toLowerCase().startsWith('korrigieren') ? (vorschlag || '') : undefined };
+  return pruefen();
+}
+function setWert(key, wert) { if (S.antworten[key]) S.antworten[key].wert = wert; return pruefen(); }
+function umschalten(v) { S.nurOffen = v; render(); }
+
+// ---- Sammel-Antwort: eine Antwort fuer eine ganze Gruppe gleichartiger Fragen ----------------
+// Reiner Komfortweg: der Server traegt dieselben Antworten ein, die Sie sonst Zeile fuer Zeile
+// gesetzt haetten. Uebernommen wird erst beim Klick auf "Zeile(n) uebernehmen" (dort wird alles
+// serverseitig neu geprueft); Einzelantworten lassen sich in der Detailansicht weiter aendern.
+function gruppeEingabe(id) { return S.gruppenEingabe[id] || (S.gruppenEingabe[id] = { antwort: '', wert: '' }); }
+function gruppeWaehlen(id, antwort) { gruppeEingabe(id).antwort = antwort; render(); }
+function gruppeWert(id, wert) { gruppeEingabe(id).wert = wert; }
+
+async function gruppeAnwenden(id, mitVorschlaegen) {
+  const g = S.vor.gruppen.find((x) => x.id === id);
+  const e = gruppeEingabe(id);
+  if (!g || (!mitVorschlaegen && !e.antwort)) return;
+  const korr = !mitVorschlaegen && e.antwort.toLowerCase().startsWith('korrigieren');
+  if (korr && !e.wert.trim()) { S.fehler = 'Für „korrigieren“ bitte den neuen Wert eintragen.'; return render(); }
+  const n = mitVorschlaegen ? g.anzahl_vorschlaege : g.anzahl;
+  const was = mitVorschlaegen ? 'den jeweiligen Vorschlag' : `„${e.antwort}${korr ? ' ' + e.wert : ''}“`;
+  if (!confirm(`${n} Frage(n) („${g.muster}“) mit ${was} beantworten?`)) return;
+  S.busy = true; S.fehler = ''; render();
+  try {
+    const res = await post('/api/stammdaten/gruppen-antwort', {
+      sheets: alleSheets(), antworten: payloadAntworten(), gruppen_id: id,
+      antwort: e.antwort, wert: korr ? e.wert : undefined, vorschlaege: mitVorschlaegen });
+    Object.assign(S.antworten, res.antworten);
+    delete S.gruppenEingabe[id];
+  } catch (err) { S.fehler = err.message; }
+  S.busy = false;
+  return pruefen();
+}
+
+function gruppenHtml(v) {
+  const gr = v.gruppen || [];
+  if (!gr.length) return '';
+  const offen = gr.reduce((n, g) => n + g.anzahl, 0);
+  let h = `<div class="card"><div class="kopf"><h3>Gleichartige Fragen gebündelt</h3>
+    <span class="klein">${offen} offene Fragen in ${gr.length} Gruppen</span></div><div class="inhalt">
+    <p class="hint">Eine Antwort gilt für alle Fragen der Gruppe. Nichts wird übernommen, bevor Sie unten auf „übernehmen“ klicken;
+    in der Einzelansicht darunter können Sie nachprüfen und einzelne Zeilen anders beantworten.</p>`;
+  for (const g of gr.slice(0, 100)) {
+    const e = gruppeEingabe(g.id);
+    const opts = `<option value="">— bitte antworten —</option>`
+      + g.sammelfaehig.map((o) => `<option value="${esc(o)}"${e.antwort === o ? ' selected' : ''}>${esc(o)}</option>`).join('');
+    const korr = e.antwort.toLowerCase().startsWith('korrigieren');
+    h += `<div class="gruppe"><div class="anz">${g.anzahl}×</div>
+      <div>${esc(g.muster)} <span class="klein">(${esc(ART[g.art] || g.art)}, Feld ${esc(lbl(g.feld))}; z. B. ${g.beispiele.map(esc).join(', ')})</span></div>
+      <div class="steuer"><select aria-label="Antwort für ${g.anzahl} Fragen: ${esc(g.muster)}" data-act="gantwort" data-id="${esc(g.id)}">${opts}</select>
+      ${korr ? `<input type="text" aria-label="Neuer Wert für alle" placeholder="neuer Wert für alle ${g.anzahl}" value="${esc(e.wert)}" data-act="gwert" data-id="${esc(g.id)}">` : ''}
+      <button data-act="ganwenden" data-id="${esc(g.id)}" ${e.antwort && !S.busy ? '' : 'disabled'}>für alle ${g.anzahl} anwenden</button>
+      ${g.hat_vorschlag ? `<button class="sek" data-act="gvorschlag" data-id="${esc(g.id)}" ${S.busy ? 'disabled' : ''}>${g.anzahl_vorschlaege === g.anzahl ? 'alle' : g.anzahl_vorschlaege + ' von ' + g.anzahl} Vorschläge übernehmen</button>` : ''}
+      </div></div>`;
+  }
+  if (gr.length > 100) h += `<p class="hint">… und ${gr.length - 100} kleinere Gruppen (nach Anwenden der obigen erscheinen sie).</p>`;
+  return h + `</div></div>`;
+}
+
+async function uebernehmen() {
+  const n = S.vor ? S.vor.zusammenfassung.bereit_zum_uebernehmen : 0;
+  if (!n || !confirm(`${n} Zeile(n) in die Bibliothek übernehmen?`)) return;
+  S.busy = true; S.uebernehmenFortschritt = null; render();
+  try {
+    await post('/api/stammdaten/uebernehmen', { sheets: alleSheets(), antworten: payloadAntworten() });
+    S.fehler = '';
+    await uebernehmenAbwarten();
+  } catch (e) { S.fehler = e.message; S.busy = false; render(); }
+}
+
+// Laeuft im Hintergrund (grosse Listen > 10.000 Zeilen) -- den Fortschritt
+// per Polling abfragen, bis der Lauf fertig ist (Aaron 23.10.2026).
+async function uebernehmenAbwarten() {
+  for (;;) {
+    let st;
+    try { st = await get('/api/stammdaten/uebernehmen/fortschritt'); }
+    catch (e) { S.fehler = e.message; break; }
+    S.uebernehmenFortschritt = st;
+    render();
+    if (!st.laeuft) {
+      if (st.fehler) S.fehler = st.fehler;
+      else {
+        S.ergebnis = st.ergebnis;
+        S.slots = {}; S.slotFehler = {}; S.vor = null; S.antworten = {}; S.gruppenEingabe = {};
+      }
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  S.busy = false; S.uebernehmenFortschritt = null; render();
+}
+
+function neu() {
+  if (hatDaten() && !S.ergebnis && !confirm('Alle hochgeladenen Listen und Antworten verwerfen?\nDer gespeicherte Zwischenstand wird dabei ebenfalls gelöscht.')) return;
+  S.slots = {}; S.slotFehler = {}; S.vor = null; S.antworten = {}; S.gruppenEingabe = {}; S.ergebnis = null; S.fehler = ''; render();
+}
+
+function beispiel(b, i) {
+  const h = b.headers[i];
+  const z = b.rows.find((r) => (r[i] || '').trim());
+  if (!z) return '';
+  return b.mapping[h] === 'passwort' ? '••••••••' : z[i];
+}
+
+function mappingHtml(sl, name, b) {
+  const offen = Object.values(b.mapping).filter((v) => !v).length;
+  const zf = S.zielfelder.map((k) => [k, lbl(k)]).sort((a, c) => a[1].localeCompare(c[1], 'de'));
+  const zeilen = b.headers.map((h, i) => {
+    const v = b.mapping[h] || '';
+    const opts = `<option value=""${v === '' ? ' selected' : ''}>— bitte wählen —</option>`
+      + zf.map(([k, l]) => `<option value="${esc(k)}"${v === k ? ' selected' : ''}>${esc(l)}</option>`).join('')
+      + `<option value="ignorieren"${v === 'ignorieren' ? ' selected' : ''}>Spalte ignorieren</option>`;
+    return `<tr class="${v === '' ? 'nicht-gewaehlt' : ''}"><td>${esc(h)}</td><td class="klein">${esc(beispiel(b, i))}</td>
+      <td><select aria-label="Zuordnung für Spalte ${esc(h)}" data-act="map" data-slot="${esc(sl.id)}" data-blatt="${esc(name)}" data-header="${esc(h)}">${opts}</select></td></tr>`;
+  }).join('');
+  const kopf = offen
+    ? `<span style="color:#9a1c12">${offen} Spalte(n) bitte zuordnen</span>`
+    : `Spalten automatisch zugeordnet${b.gelernt ? ' (aus früherem Import gemerkt)' : ''} – ansehen/ändern`;
+  return `<details ${offen ? 'open' : ''}><summary><b>${esc(sl.titel)}</b>, Blatt „${esc(name)}“ (${b.rows.length} Zeilen): ${kopf}</summary>
+    <table><tr><th>Spalte in der Excel-Datei</th><th>Beispiel</th><th>Wird übernommen als</th></tr>${zeilen}</table></details>`;
+}
+
+function slotHtml(sl) {
+  const d = S.slots[sl.id];
+  const fehler = S.slotFehler[sl.id] ? `<div class="fehler" role="alert">${esc(S.slotFehler[sl.id])}</div>` : '';
+  if (!d) {
+    return `<section class="slot" aria-label="${esc(sl.titel)}"><div class="anweisung">${esc(sl.text)}</div>
+      <div class="drop" data-drop="${esc(sl.id)}"><p>.xlsx hierher ziehen</p>
+      <p><label><input type="file" accept=".xlsx" data-file="${esc(sl.id)}">oder Datei auswählen</label></p></div>
+      <div class="klein">${esc(sl.info)}</div>${fehler}</section>`;
+  }
+  const zeilen = Object.values(d.sheets).reduce((n, b) => n + b.rows.length, 0);
+  const prob = d.warnung && !d.bestaetigt;
+  let h = `<section class="slot ${prob ? 'problem' : 'geladen'}" aria-label="${esc(sl.titel)}"><div class="anweisung">${esc(sl.titel)}</div>
+    <div>${prob ? '⚠' : '✓'} <b>${esc(d.datei || 'Datei')}</b> – ${zeilen} Zeilen</div>`;
+  if (prob) {
+    h += `<div class="warn"><b>Passt das hier rein?</b> ${esc(d.warnung)}.
+      <div class="zeile-btn" style="margin-top:6px"><button data-act="bestaetigen" data-slot="${esc(sl.id)}">Ja, trotzdem als „${esc(sl.titel)}“ verwenden</button></div></div>`;
+  } else if (d.warnung) {
+    h += `<div class="klein">Von Ihnen bestätigt, obwohl: ${esc(d.warnung)}</div>`;
+  }
+  h += `<div class="zeile-btn"><button class="sek" type="button" data-act="ersetzen" data-slot="${esc(sl.id)}">Andere Datei</button>
+    <button class="sek" data-act="entfernen" data-slot="${esc(sl.id)}">Entfernen</button>
+    <input type="file" accept=".xlsx" data-file="${esc(sl.id)}" id="ersatz-${esc(sl.id)}" hidden></div>${fehler}</section>`;
+  return h;
+}
+
+function zeileText(z) {
+  const w = z.werte || {};
+  const j = (a) => a.filter(Boolean).join(' · ');
+  if (z.art === 'mandant') return j([w.mandant_verweis, w.name]);
+  if (z.art === 'postfach') return j([w.mandant_verweis, w.email, w.kuerzel, w.postfach_name, w.passwort ? 'Passwort gesetzt' : '']);
+  return j([w.kreditorennummer, w.name, [w.strasse, [w.plz, w.ort].filter(Boolean).join(' ')].filter(Boolean).join(', '), w.land]);
+}
+
+function frageHtml(z, f) {
+  const key = z.schluessel + '|' + f.feld;
+  const a = S.antworten[key];
+  const korr = a && a.antwort.toLowerCase().startsWith('korrigieren');
+  const opts = `<option value="">— bitte antworten —</option>`
+    + f.antwortmoeglichkeiten.map((o) => `<option value="${esc(o)}"${a && a.antwort === o ? ' selected' : ''}>${esc(o)}</option>`).join('');
+  const vor = f.vorschlag ? ` <span class="klein">Vorschlag: <b>${esc(f.vorschlag)}</b></span>` : '';
+  return `<div class="frage ${z.status === 'rot' ? 'rot' : ''} ${a ? 'beantwortet' : ''}">${esc(f.grund)}${vor}
+    <div class="zeile"><select aria-label="Antwort" data-act="antwort" data-key="${esc(key)}" data-vorschlag="${esc(f.vorschlag || '')}">${opts}</select>
+    ${korr ? `<input type="text" aria-label="Korrigierter Wert" value="${esc(a.wert || '')}" data-act="wert" data-key="${esc(key)}">` : ''}</div></div>`;
+}
+
+const AUTO_TEXTE = [
+  ['identisch', (n) => `${n} identische Zeile(n) zusammengefasst`, 'identisch mit'],
+  ['ergaenzend', (n) => `${n} Zeile(n) ergänzend zusammengeführt`, 'zusammengeführt in'],
+  ['zusammengefuehrt', (n) => `${n} Zeile(n) auf Ihre Antwort „zusammenführen (gleicher Lieferant)“ in eine andere Zeile zusammengeführt`, 'zusammengeführt in'],
+  ['fuehrende_null', (n) => `${n} führende Null(en) ergänzt (Excel hatte sie entfernt)`, ''],
+  ['getrennte_lieferanten', (n) => `${n} Lieferant(en) mit gleichem Namen, aber anderer Kontonummer – als getrennte Lieferanten angelegt`, 'gleicher Name wie'],
+  ['leerzeilen', (n) => `${n} Leer-/Summenzeile(n) übersprungen`, ''],
+  ['kopfzeilen', (n) => `${n} wiederholte Kopfzeile(n) übersprungen`, ''],
+  ['dummy', (n) => `${n} Zeile(n) „Dummy…“ ignoriert – der Dummy-Lieferant gehört dem Programm und wird nicht importiert`, ''],
+];
+
+// Was das Programm ohne Rückfrage getan hat: je Art aufklappbar mit den Zeilen
+// (Blatt:Zeile), damit stichprobenartig geprüft werden kann.
+function autoHtml(v) {
+  const a = v.automatisch || {};
+  const max = 500;
+  return AUTO_TEXTE.filter(([k]) => (a[k] || []).length).map(([k, text, mit]) => {
+    const l = a[k];
+    const items = l.slice(0, max).map((x) => `<li>${esc(x.zeile)}${x.mit && mit ? ` <span class="klein">(${mit} ${esc(x.mit)})</span>` : ''}</li>`).join('');
+    return `<details class="auto"><summary>${text(l.length)}</summary><ul>${items}</ul>${l.length > max ? `<p class="hint">… und ${l.length - max} weitere</p>` : ''}</details>`;
+  }).join('');
+}
+
+function vorschauHtml() {
+  const v = S.vor;
+  const zs = v.zusammenfassung;
+  const offen = Object.values(v.blaetter).reduce((n, b) => n + b.zeilen.filter((z) => !z.beantwortet && !z.weglassen).length, 0);
+  const verschmolzenChip = zs.automatisch_verschmolzen_paare
+    ? ` <span class="chip neutral">${zs.automatisch_verschmolzen_paare} Firma(en) automatisch verschmolzen (DE/CH)</span>`
+    : '';
+  let h = `<h2>Vorschau</h2><div class="chips"><span class="chip gruen">${zs.gruen} grün</span><span class="chip gelb">${zs.gelb} gelb – Frage offen</span>
+    <span class="chip rot">${zs.rot} rot</span><span class="chip neutral">${offen} noch zu beantworten</span>${verschmolzenChip}</div>
+    <div class="auto-box"><p class="klein"><b>Automatisch erledigt</b> (ohne Information zu verlieren – zum Stichproben-Prüfen aufklappen):</p>${autoHtml(v) || '<p class="klein">Nichts.</p>'}</div>
+    ${gruppenHtml(v)}
+    <label><input type="checkbox" ${S.detail ? 'checked' : ''} data-act="detail"> Einzelansicht je Zeile zeigen (zum Nachprüfen / für Einzelfälle)</label>
+    <label style="margin-left:12px"><input type="checkbox" ${S.nurOffen ? 'checked' : ''} data-act="nuroffen"> nur Zeilen mit Fragen zeigen</label>`;
+  for (const [name, b] of Object.entries(S.detail || !(v.gruppen || []).length ? v.blaetter : {})) {
+    const alle = b.zeilen;
+    const sicht = alle.filter((z) => !S.nurOffen || z.status !== 'gruen' || z.fragen.length);
+    const zeigen = sicht.slice(0, 300);
+    h += `<div class="card"><div class="kopf"><h3>${esc(name)}</h3><span class="klein">${alle.length} Zeilen, ${alle.filter((z) => z.status === 'gruen').length} grün</span></div><div class="inhalt">`;
+    if (!zeigen.length) h += `<p class="hint">Alle Zeilen sind eindeutig – keine Frage offen.</p>`;
+    else h += `<table><tr><th>Zeile</th><th>Status</th><th>Inhalt</th></tr>` + zeigen.map((z) => `<tr><td>${z.zeile}</td>
+      <td><span class="punkt ${z.status}"></span>${z.zusammengefasst ? 'zusammengefasst' : z.status === 'gruen' ? 'grün' : z.status === 'gelb' ? 'gelb' : 'rot'}</td>
+      <td>${esc(zeileText(z))}${(z.hinweise || []).map((x) => `<div class="klein">Hinweis: ${esc(x)}</div>`).join('')}
+      ${z.fragen.map((f) => frageHtml(z, f)).join('')}</td></tr>`).join('') + `</table>`;
+    if (sicht.length > zeigen.length) h += `<p class="hint">… und ${sicht.length - zeigen.length} weitere Zeilen (zuerst die gezeigten beantworten).</p>`;
+    h += `</div></div>`;
+  }
+  return h;
+}
+
+function render() {
+  let h = '';
+  if (S.fehler) h += `<div class="fehler" role="alert">${esc(S.fehler)}</div>`;
+  if (S.ergebnis) {
+    const e = S.ergebnis;
+    h += `<h2>Fertig</h2><div class="ok">Übernommen: ${e.kreditoren} Kreditoren, ${e.mandanten} Mandanten, ${e.postfaecher} Postfächer
+      (${e.uebersprungen} Zeile(n) nicht übernommen – Frage offen oder weggelassen)${e.verschmolzene_lieferanten ? `, davon ${e.verschmolzene_lieferanten} automatisch verschmolzen (DE/CH)` : ''}${e.zusammengefasst ? `; ${e.zusammengefasst} Zeile(n) waren automatisch in eine andere zusammengefasst` : ''}${e.unveraendert_uebersprungen ? `; ${e.unveraendert_uebersprungen} Zeile(n) bereits unverändert vorhanden, übersprungen` : ''}.</div>`;
+    if (e.hinweis_passwoerter) h += `<div class="warn"><b>Wichtig:</b> ${esc(e.hinweis_passwoerter)}</div>`;
+    h += `<button data-act="neu">Weitere Dateien einlesen</button>`;
+  } else {
+    h += `<h2>Stammdaten aus Excel hochladen</h2>
+      <p class="hint">Laden Sie in jedem Bereich die passende Excel-Datei (.xlsx) hoch. Das Programm erkennt die Spalten und sortiert die Einträge selbst an die richtigen Stellen.
+      Wo es nicht sicher ist, fragt es nach – es übernimmt nichts, was Sie nicht gesehen haben. Sie müssen nicht alle vier Bereiche auf einmal befüllen.</p>
+      ${S.warnung ? `<div class="warn" role="alert">${esc(S.warnung)}</div>` : ''}
+      <p class="klein" id="sicherung">${esc(S.sicherung)}</p>
+      <div class="slots">${SLOTS.map(slotHtml).join('')}</div>`;
+    if (S.uebernehmenFortschritt && S.uebernehmenFortschritt.gesamt) {
+      const f = S.uebernehmenFortschritt;
+      h += `<p>Übernehmen läuft … Zeile ${f.fertig} von ${f.gesamt}</p>`;
+    } else if (S.busy) h += `<p>Bitte warten …</p>`;
+    if (hatDaten()) {
+      for (const sl of SLOTS) {
+        const d = S.slots[sl.id];
+        if (d) h += Object.entries(d.sheets).map(([n, b]) => mappingHtml(sl, n, b)).join('');
+      }
+      const probleme = offeneWahl();
+      if (probleme.length) h += `<div class="warn"><b>Bitte zuerst entscheiden:</b><ul>${probleme.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>
+        Unbekannte Spalten werden nie stillschweigend weggelassen – wählen Sie „Spalte ignorieren“, wenn sie nicht gebraucht wird.</div>`;
+      else if (S.vor) h += vorschauHtml();
+      const n = S.vor ? S.vor.zusammenfassung.bereit_zum_uebernehmen : 0;
+      h += `<div class="leiste"><button data-act="uebernehmen" ${n && !S.busy ? '' : 'disabled'}>${n} Zeile(n) übernehmen</button>
+        <button class="sek" data-act="neu">Alles verwerfen</button>
+        <span class="klein">Übernommen werden grüne Zeilen und beantwortete Fragen. Alles andere bleibt unberührt.</span></div>`;
+    }
+  }
+  $('app').innerHTML = h;
+  bindeDateien();
+  entwurfSync();
+}
+
+function lesen(slotId, file) {
+  if (!file) return;
+  const r = new FileReader();
+  r.onload = () => dateiLaden(slotId, String(r.result).split(',', 2)[1] || '', file.name);
+  r.readAsDataURL(file);
+}
+
+function bindeDateien() {
+  const root = $('app');
+  if (!root.querySelectorAll) return;
+  root.querySelectorAll('input[data-file]').forEach((inp) => {
+    inp.onchange = () => lesen(inp.dataset.file, inp.files[0]);
+  });
+  root.querySelectorAll('[data-drop]').forEach((dz) => {
+    dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('over'); };
+    dz.ondragleave = () => dz.classList.remove('over');
+    dz.ondrop = (e) => { e.preventDefault(); dz.classList.remove('over'); lesen(dz.dataset.drop, e.dataTransfer.files[0]); };
+  });
+}
+
+// Ein gemeinsamer Handler statt vieler onclick-Attribute (kein Quoting-Problem mit Sonderzeichen in Namen).
+function aktion(el) {
+  const a = el.dataset.act, d = el.dataset;
+  if (a === 'map') return setMapping(d.slot, d.blatt, d.header, el.value);
+  if (a === 'antwort') return setAntwort(d.key, el.value, d.vorschlag);
+  if (a === 'wert') return setWert(d.key, el.value);
+  if (a === 'gantwort') return gruppeWaehlen(d.id, el.value);
+  if (a === 'gwert') return gruppeWert(d.id, el.value);
+  if (a === 'ganwenden') return gruppeAnwenden(d.id, false);
+  if (a === 'gvorschlag') return gruppeAnwenden(d.id, true);
+  if (a === 'detail') { S.detail = el.checked; return render(); }
+  if (a === 'nuroffen') return umschalten(el.checked);
+  if (a === 'bestaetigen') return slotBestaetigen(d.slot);
+  if (a === 'entfernen') return slotEntfernen(d.slot);
+  if (a === 'ersetzen') return $('ersatz-' + d.slot).click();
+  if (a === 'uebernehmen') return uebernehmen();
+  if (a === 'neu') return neu();
+}
+$('app').addEventListener('click', (e) => {
+  const el = e.target.closest('button[data-act]');
+  if (el) aktion(el);
+});
+$('app').addEventListener('change', (e) => {
+  const el = e.target.closest('[data-act]');
+  if (el && el.tagName !== 'BUTTON') aktion(el);
+});
+
+// ---- Zwischenspeicher (Befund Aaron 16.10.2026: "die eingelesenen Tabellen sind weg, wenn man das
+// Programm schließt") --------------------------------------------------------------------------------
+// Hochgeladene Listen, Spaltenzuordnung und Antworten bleiben auf diesem Rechner gespeichert, bis sie
+// übernommen oder verworfen werden -- auch nach dem Schließen des Programms. Das ist KEINE Übernahme:
+// in die Bibliothek kommt weiterhin nur, was Sie im Schritt "übernehmen" gesehen haben. Passwörter
+// legt der Server getrennt verschlüsselt ab (stammdaten_entwurf.py), nie im Klartext in der Datei.
+const ENTWURF_URL = '/api/stammdaten/entwurf';
+const ENTW = { bereit: false, an: true, letzter: '', timer: null };
+const entwurfStand = () => hatDaten()
+  ? JSON.stringify({ slots: S.slots, antworten: S.antworten, zielfelder: S.zielfelder, nurOffen: S.nurOffen })
+  : '';
+
+function sicherungAnzeigen(text) {
+  S.sicherung = text;
+  const el = document.getElementById('sicherung');
+  if (el) el.textContent = text;
+}
+
+function entwurfSync() {
+  if (!ENTW.bereit || !ENTW.an) return;
+  const jetzt = entwurfStand();
+  if (jetzt === ENTW.letzter) return;
+  clearTimeout(ENTW.timer);
+  ENTW.timer = setTimeout(() => entwurfSichern(jetzt), 500);
+}
+
+async function entwurfSichern(stand) {
+  ENTW.timer = null;
+  try {
+    const r = await fetch(ENTWURF_URL, stand
+      ? { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: stand }
+      : { method: 'DELETE' });
+    if (r.status === 404 || r.status === 405) { ENTW.an = false; return; }   // älterer Programmstand ohne Zwischenspeicher
+    if (!r.ok) {
+      let j = null;
+      try { j = await r.json(); } catch (e) { /* leere Antwort */ }
+      throw new Error((j && j.detail) || ('Fehler ' + r.status));
+    }
+    ENTW.letzter = stand;
+    sicherungAnzeigen(stand
+      ? 'Automatisch gespeichert um ' + new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
+        + ' – bleibt auch nach dem Schließen erhalten. Übernommen ist noch nichts.'
+      : '');
+  } catch (e) {
+    sicherungAnzeigen('⚠ Zwischenspeichern fehlgeschlagen: ' + e.message
+      + ' – bitte erst schließen, wenn Sie übernommen haben.');
+  }
+}
+
+async function entwurfLaden() {
+  try {
+    const r = await fetch(ENTWURF_URL);
+    if (!r.ok) { ENTW.an = false; return; }
+    const e = (await r.json()).entwurf;
+    ENTW.bereit = true;
+    if (!e || hatDaten() || S.ergebnis) return;
+    S.slots = e.slots;
+    S.antworten = e.antworten || {};
+    S.zielfelder = e.zielfelder || [];
+    S.nurOffen = e.nurOffen !== false;
+    S.warnung = e.passwoerter_fehlen
+      ? `${e.passwoerter_fehlen} Passwort/Passwörter konnten nicht wiederhergestellt werden – bitte die Postfach-Liste noch einmal hochladen.`
+      : '';
+    ENTW.letzter = entwurfStand();
+    const wann = e.gespeichert ? new Date(e.gespeichert) : null;
+    sicherungAnzeigen('Gespeicherter Stand' + (wann && !isNaN(wann) ? ' vom ' + wann.toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' }) : '')
+      + ' wiederhergestellt – es wurde noch nichts übernommen.');
+    render();
+    if (!offeneWahl().length) await pruefen();
+  } catch (err) {
+    ENTW.an = false;   // Zwischenspeicher nicht erreichbar: Seite funktioniert wie bisher
+  }
+}
+
+render();
+entwurfLaden();
+// Programmstand im Kopf (Aaron 19.10.2026: sichtbar machen, ob ein Update wirklich angekommen ist)
+fetch('/api/version').then((r) => r.ok ? r.json() : null).then((v) => {
+  const el = document.getElementById('programmstand');
+  if (el && v) el.textContent = v.commit ? `Programmstand ${v.commit} vom ${v.datum}` : 'Programmstand: kein Git-Klon';
+}).catch(() => {});
+</script>
+</body>
+</html>

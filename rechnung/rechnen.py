@@ -13,6 +13,12 @@ Herkunft:
 
 Ablauf von ``rechne()``:
 
+0. Teil A (Befund Aaron 09.10.2026, Modul ``summen.py``): gehen die
+   GELESENEN Kopf-Betraege nicht auf (oder fehlen sie), wird ein
+   eindeutiges Tripel aus dem Rechnungsvolltext hergeleitet (Formel +
+   Schluesselwoerter + Lage im Text, keine KI) und uebernimmt die
+   betroffenen Felder als ``errechnet`` -- eine menschliche Korrektur und
+   der Schweizer QR-Zahlteil-Betrag bleiben davon unberuehrt.
 1. Kopf ergaenzen (netto/ust_betrag/brutto/ust_satz aus je zwei der vier,
    nur wenn der Satz fuer die Waehrung gueltig ist).
 2. USt-Aufstellung aus dem (jetzt vollstaendigeren) Kopf/den Positionen
@@ -32,7 +38,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from . import summen
 from .identify import DEFAULT_CURRENCY, EXPECTED_RATES
+from .identify import nearest_valid_rate as _identify_nearest_valid_rate
 from .template import FieldResult
 from .textnorm import coerce
 from .validate import looks_like_brutto_prices
@@ -70,20 +78,12 @@ def _num(it: dict, key: str) -> float | None:
     return _to_amount(v)
 
 
-def _valid_rates(currency: str | None) -> list[float]:
-    return EXPECTED_RATES.get(currency or DEFAULT_CURRENCY, EXPECTED_RATES[DEFAULT_CURRENCY])
-
-
 def _nearest_valid_rate(satz: float, currency: str | None) -> float | None:
     """Naechster gueltiger Satz der Waehrung, wenn ``satz`` (z.B. aus
     USt/Netto zurueckgerechnet) innerhalb der Rundungstoleranz liegt --
-    sonst ``None`` (kein gueltiger Satz, nicht raten)."""
-    best, best_d = None, None
-    for r in _valid_rates(currency):
-        d = abs(r - satz)
-        if d <= _RATE_TOL and (best_d is None or d < best_d):
-            best, best_d = r, d
-    return best
+    sonst ``None`` (kein gueltiger Satz, nicht raten). Gemeinsame Grundlage
+    mit ``summen.py`` (Teil A) steht jetzt in ``identify.nearest_valid_rate``."""
+    return _identify_nearest_valid_rate(satz, currency, _RATE_TOL)
 
 
 def tax_breakdown(fields: dict, line_items: list[dict] | None) -> list[dict]:
@@ -323,6 +323,128 @@ def _ergaenze_aufstellung(rows: list[dict], currency: str | None, gruende: list[
             row["_herkunft"] = h
 
 
+# Quellen, die ein Summen-Tripel (Teil A) nie ueberschreiben darf: eine
+# menschliche Korrektur gewinnt immer, der Schweizer QR-Zahlteil-Betrag
+# bleibt maassgeblich (SPEC Teil A, Entscheidung Aaron 10.10.2026).
+_SUMMEN_GESPERRTE_QUELLEN = ("manual", "qr")
+
+# Konfidenz eines aus dem Kontext hergeleiteten Betrags -- wie ein normaler
+# Vorschlag (gelb/"Vorschlag" im UI), nicht so hoch wie ein tatsaechlich
+# GELESENER Wert.
+_SUMMEN_KONFIDENZ = 0.75
+
+
+def _kopf_konsistent(fields: dict, currency: str | None) -> bool:
+    """Gehen die GELESENEN (bzw. manuell korrigierten) Kopf-Betraege schon
+    in sich auf -- Brutto = Netto + Steuer, ein gueltiger Satz, nicht
+    "Netto gleich Brutto trotz Steuer"? Nur wenn das NICHT der Fall ist,
+    kommt ``summen.py`` (Teil A) zum Zug -- Vorlagen-/KI-Werte, die aufgehen,
+    bleiben unangetastet.
+
+    Reicht schon EIN Betrag (z.B. nur Brutto gelesen) zusammen mit einem
+    gueltigen Satz, kann ``_ergaenze_kopf`` selbst das Fehlende errechnen
+    (Formel, kein Kontext-Scan noetig) -- dann gilt der Kopf ebenfalls schon
+    als konsistent, ``summen.py`` wird nicht erst bemueht (sonst wuerde ein
+    per Formel bereits ableitbarer Wert zusaetzlich -- und u.U. abweichend
+    -- aus dem Fliesstext gesucht, Befund 10.10.2026 beim Anlernen)."""
+    _, netto = _feldwert(fields, "netto")
+    _, ust = _feldwert(fields, "ust_betrag")
+    _, brutto = _feldwert(fields, "brutto")
+    _, satz = _feldwert(fields, "ust_satz")
+    anzahl = sum(x is not None for x in (netto, ust, brutto))
+    if satz is not None and _nearest_valid_rate(satz, currency) is None:
+        return False
+    satz_gueltig = satz is not None  # bereits oben auf Gueltigkeit geprueft
+    if anzahl == 0:
+        return False
+    if anzahl == 1 and not satz_gueltig:
+        return False
+    if netto is not None and ust is not None and brutto is not None:
+        if abs(netto + ust - brutto) > 0.02:
+            return False
+    steuer = (ust is not None and abs(ust) > 0.005) or (satz is not None and satz > 0)
+    if (netto is not None and brutto is not None and abs(netto - brutto) < 0.005
+            and netto != 0 and steuer):
+        return False
+    return True
+
+
+def _qr_hinweis_betrag(fields: dict) -> float | None:
+    """Brutto aus dem Schweizer QR-Zahlteil (swissqr.apply, Quelle "qr"),
+    falls vorhanden -- staerkstes Signal fuer ``summen.summen_aus_kontext``
+    (SPEC Teil A). Wird NIE ueberschrieben (siehe
+    ``_SUMMEN_GESPERRTE_QUELLEN``), hilft aber, den richtigen Kandidaten im
+    Fliesstext zu erkennen."""
+    fr = fields.get("brutto")
+    if fr is not None and fr.source == "qr" and isinstance(fr.value, (int, float)):
+        return float(fr.value)
+    return None
+
+
+def _uebernehme_summen(fields: dict, erg: "summen.SummenErgebnis",
+                       gruende: list[str], ergaenzt: list[str]) -> None:
+    """Ein eindeutiges Summen-Tripel (Teil A) in die Kopf-Felder eintragen --
+    nie eine gesperrte Quelle (manuell/QR) ueberschreiben, UND ein bereits
+    gelesenes Feld nur ersetzen, wenn es nachweislich WIDERSPRUECHLICH ist
+    (Netto=Brutto trotz Steuer, oder alle drei Betraege zusammen gehen
+    rechnerisch nicht auf) -- fehlt nur ein GESCHWISTERFELD (z.B. kennt eine
+    Vorlage bislang nur Netto), bleibt das vorhandene, korrekte Feld
+    unangetastet und summen.py füllt ausschliesslich die Luecke (Befund
+    10.10.2026 beim Anlernen: sonst verliert ein bereits korrektes Feld
+    seine Herkunft "gelesen" an ein zufaellig textlich passendes
+    "errechnet"). Mischsaetze gehen als ``ust_aufstellung``-Block ein
+    (Prioritaet 1 in ``tax_breakdown``)."""
+    _, netto = _feldwert(fields, "netto")
+    _, ust = _feldwert(fields, "ust_betrag")
+    _, brutto = _feldwert(fields, "brutto")
+    _, satz = _feldwert(fields, "ust_satz")
+    steuer = (ust is not None and abs(ust) > 0.005) or (satz is not None and satz > 0)
+    widerspruch = (
+        (netto is not None and brutto is not None and abs(netto - brutto) < 0.005
+         and netto != 0 and steuer)
+        or (netto is not None and ust is not None and brutto is not None
+            and abs(netto + ust - brutto) > 0.02))
+
+    def gesperrt(name: str) -> bool:
+        fr = fields.get(name)
+        return (fr is not None and fr.source in _SUMMEN_GESPERRTE_QUELLEN
+                and fr.value not in (None, ""))
+
+    def vorhanden(name: str) -> bool:
+        fr = fields.get(name)
+        return fr is not None and fr.source != "missing" and fr.value not in (None, "")
+
+    def setze(name: str, value) -> None:
+        if value is None or gesperrt(name):
+            return
+        if vorhanden(name) and not widerspruch:
+            return
+        fields[name] = FieldResult(name, value, erg.begruendung, _SUMMEN_KONFIDENZ, ERRECHNET)
+
+    setze("netto", erg.netto)
+    setze("ust_betrag", erg.ust_betrag)
+    setze("brutto", erg.brutto)
+    setze("ust_satz", erg.ust_satz)
+    if erg.steuerzeilen:
+        setze("ust_aufstellung", erg.steuerzeilen)
+    ergaenzt.append(f"Beträge aus dem Rechnungskontext hergeleitet ({erg.begruendung}, Quelle: summen)")
+
+
+def _summen_aus_kontext(fields: dict, currency: str | None, text: str,
+                        gruende: list[str], ergaenzt: list[str]) -> None:
+    """Teil A: gehen die gelesenen Kopf-Betraege nicht auf (oder fehlen sie),
+    sucht ``summen.py`` ein eindeutiges Tripel im Rechnungstext und gewinnt
+    gegen die gelesenen Werte -- siehe Modul-Docstring von ``summen.py`` und
+    ``_kopf_konsistent``/``_uebernehme_summen`` oben."""
+    if _kopf_konsistent(fields, currency) or not text:
+        return
+    erg = summen.summen_aus_kontext(text, currency, qr_brutto=_qr_hinweis_betrag(fields))
+    if erg.gefunden:
+        _uebernehme_summen(fields, erg, gruende, ergaenzt)
+    elif erg.hinweis:
+        gruende.append(erg.hinweis)
+
+
 def rechne(fields: dict[str, FieldResult], line_items: list[dict] | None,
           text: str = "") -> RechenResult:
     """Fuehrt Baustein 2 komplett aus (Kopf ergaenzen -> USt-Aufstellung
@@ -338,6 +460,7 @@ def rechne(fields: dict[str, FieldResult], line_items: list[dict] | None,
     waehrung_fr = _feld(fields, "waehrung")
     currency = waehrung_fr.value if waehrung_fr else None
 
+    _summen_aus_kontext(fields, currency, text, gruende, ergaenzt)
     _ergaenze_kopf(fields, currency, gruende, ergaenzt)
     rows = tax_breakdown(fields, line_items)
     _ergaenze_positionen(line_items, fields, currency, text, gruende)

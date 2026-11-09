@@ -10,3 +10,4 @@ build/
 dist/
 rechnung.env
 build-windows.log
+/.pytest-tmp/

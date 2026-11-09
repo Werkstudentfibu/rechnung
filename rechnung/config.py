@@ -35,6 +35,11 @@ class ImapConfig:
     source_folder: str = os.environ.get("RECHNUNG_IMAP_FOLDER", "INBOX")
     # Nach erfolgreichem Abholen dorthin verschieben (leer = nur als gelesen markieren)
     done_folder: str = os.environ.get("RECHNUNG_IMAP_DONE_FOLDER", "")
+    # Nur lesen (Aaron 05.11.2026): Postfaecher gehoeren ABBYY FlexiCapture,
+    # das Programm liest dessen Ordner "Done"/"Error" mit -- nichts als
+    # gelesen markieren, nichts verschieben. Abgeholt wird dann nur, was im
+    # Lesefenster (RECHNUNG_IMAP_TAGE) liegt und noch nicht bekannt ist.
+    nur_lesen: bool = _b("RECHNUNG_IMAP_NUR_LESEN", False)
     # nur Anhaenge mit diesen Endungen (kommagetrennt). .xml fuer reine
     # E-Rechnungen (XRechnung); ZUGFeRD steckt im PDF und braucht das nicht.
     # Bild-Endungen (Scans als Foto/TIFF) laufen in der Pipeline automatisch
@@ -113,6 +118,40 @@ def imap_poll_minutes() -> float:
         return 5.0
 
 
+def imap_neueste() -> int:
+    """``RECHNUNG_IMAP_NEUESTE`` (Standard 0 = aus): zusaetzlich zum
+    Lesefenster die N neuesten Mails JE ORDNER abholen, egal wie alt (Aaron
+    05.11.2026: Trainingsphase, FlexiCapture-Ordner enthalten nur aeltere
+    Mails, z.B. 1721 in Error). Jede Mail weiterhin nur einmal."""
+    try:
+        return max(0, int(os.environ.get("RECHNUNG_IMAP_NEUESTE", "0")))
+    except ValueError:
+        return 0
+
+
+def imap_lesefenster_tage() -> int:
+    """Wie viele Tage zurueck auch schon GELESENE Mails abgeholt werden
+    (``RECHNUNG_IMAP_TAGE``, Standard 7). Groesser stellen, wenn Rechnungen
+    im Postfach liegen, die jemand anderes schon geoeffnet hat (Aaron
+    05.11.2026: ~100 offene, laengst gelesene Rechnungen). Jede Mail wird
+    trotzdem nur einmal geholt (Message-ID in abgeholt.json)."""
+    try:
+        return max(1, int(os.environ.get("RECHNUNG_IMAP_TAGE", "7")))
+    except ValueError:
+        return 7
+
+
+def imap_timeout() -> float:
+    """Zeitgrenze in Sekunden je IMAP-Netzwerkschritt (Verbinden, Login,
+    Abruf). Ohne Grenze hing ein einziges nicht antwortendes Postfach die
+    komplette, nacheinander laufende Abholung aller ~50 Postfaecher auf
+    (Befund 02.11.2026). 0 = ohne Grenze (altes Verhalten)."""
+    try:
+        return max(0.0, float(os.environ.get("RECHNUNG_IMAP_TIMEOUT", "60")))
+    except ValueError:
+        return 60.0
+
+
 def inbox_dir() -> Path:
     """Ablage fuer per IMAP abgeholte PDFs (Standard: <data>/inbox)."""
     v = os.environ.get("RECHNUNG_INBOX")
@@ -130,13 +169,58 @@ def category_fuzzy_min() -> float:
         return 0.72
 
 
+def gruendlich() -> bool:
+    """Modus "gruendlich" (``RECHNUNG_GRUENDLICH``, Standard AN; Aaron
+    05.11.2026: "aktuell kommt es nicht darauf an, wie schnell das Programm
+    ist, weil es noch lernt -- Rechnungen so richtig wie moeglich"). Solange
+    das Programm lernt, geht Genauigkeit vor Tempo: KI-Gegencheck gegen die
+    Vorlage immer, volle Seiten/laengere Zeitgrenzen/mehr KI-Text, deutsch+
+    englische Texterkennung, KI liest Positionen als Rueckfall. Laeuft nur im
+    Hintergrund (Vorverarbeiter, nacheinander) -- die Liste erscheint
+    trotzdem sofort. ``RECHNUNG_GRUENDLICH=0`` = altes, schnelles Verhalten.
+    Ausdrueckliche Einzelwerte (``RECHNUNG_TIMEOUT``, ``RECHNUNG_LLM_*`` ...)
+    gehen immer vor. Nie eine Rechnung ohne Bestaetigung fertig."""
+    return _b("RECHNUNG_GRUENDLICH", True)
+
+
+def namenserkennung() -> float | None:
+    """Lieferanten-Erkennung ueber den Namen (identify.py, Aaron 09.11.2026):
+    Lieferanten aus dem Excel-Import haben weder USt-IdNr noch IBAN. Steht
+    von allen Lieferanten der Bibliothek GENAU EIN Name als ganze Wortfolge
+    auf der Rechnung, gilt er als erkannt (Score 0.2 statt Schwelle 0.5);
+    bei zwei Namen oder keinem bleibt es beim bisherigen Verhalten (Mensch).
+    Standard AN. ``RECHNUNG_NAMENSERKENNUNG=0`` schaltet ab, eine Zahl setzt
+    die Schwelle. -> Schwelle oder ``None`` (aus)."""
+    v = os.environ.get("RECHNUNG_NAMENSERKENNUNG", "1").strip().lower()
+    if v in ("0", "", "nein", "false", "aus", "off", "no"):
+        return None
+    if v in ("1", "ja", "true", "an", "on", "yes"):
+        return 0.2
+    try:
+        return float(v.replace(",", "."))
+    except ValueError:
+        return 0.2
+
+
+def gruendlich_seiten() -> int:
+    """Bis zu dieser Seitenzahl wird im gruendlichen Modus ein Scan VOLLSTAENDIG
+    erkannt und die KI liest den ganzen Text (``RECHNUNG_GRUENDLICH_SEITEN``,
+    Standard 12); darueber bleibt es bei Kopf-/Fussseiten (Rest im Nachtlauf)."""
+    try:
+        return max(1, int(os.environ.get("RECHNUNG_GRUENDLICH_SEITEN", "12")))
+    except ValueError:
+        return 12
+
+
 def process_timeout() -> float:
     """Zeitgrenze je Rechnung in Sekunden fuer die komplette Verarbeitung
-    inkl. OCR und KI (guard.py). 0 = ohne Zeitgrenze im selben Prozess."""
+    inkl. OCR und KI (guard.py). 0 = ohne Zeitgrenze im selben Prozess.
+    Standard 120 s, im gruendlichen Modus 360 s."""
+    standard = 360.0 if gruendlich() else 120.0
     try:
-        return max(0.0, float(os.environ.get("RECHNUNG_TIMEOUT", "120")))
+        return max(0.0, float(os.environ.get("RECHNUNG_TIMEOUT", standard)))
     except ValueError:
-        return 120.0
+        return standard
 
 
 def gegencheck_min() -> int:
@@ -179,6 +263,14 @@ def iban_mode() -> str:
     Warnfeld bis in den JobRouter-Datensatz (pipeline._apply_hold)."""
     v = os.environ.get("RECHNUNG_IBAN_ABWEICHUNG", "mensch").strip().lower()
     return v if v in ("mensch", "warnen") else "mensch"
+
+
+def ki_variante() -> str:
+    """Extraktionsvariante der KI-Stufe fuer die echte Verarbeitung
+    (``RECHNUNG_KI_VARIANTE``, Aaron 12.10.2026: A bleibt Standard, bis
+    gemessen). Keine eigene Pruefung hier -- ``semantic.pruefe_variante``
+    entscheidet, ob der Wert ueberhaupt gebaut ist."""
+    return os.environ.get("RECHNUNG_KI_VARIANTE", "A").strip().upper()
 
 
 def operator() -> str:
@@ -239,12 +331,79 @@ def imap() -> ImapConfig:
     return ImapConfig()
 
 
+def postfach_ordner() -> str:
+    """``RECHNUNG_POSTFACH_ORDNER`` (kommagetrennt, z.B. ``Done,Error``):
+    Abholordner fuer alle per Excel eingespielten Postfaecher, die keinen
+    eigenen Ordner haben (Standard INBOX). Gesetzt -> diese Postfaecher
+    werden nur gelesen (Aaron 05.11.2026: INBOX ist immer leer, weil ABBYY
+    FlexiCapture die Mails sofort nach Done/Error verschiebt)."""
+    teile = [t.strip() for t in os.environ.get("RECHNUNG_POSTFACH_ORDNER", "").split(",")]
+    return ",".join(t for t in teile if t)
+
+
+def postfaecher(store) -> list[tuple[str, ImapConfig, str | None]]:
+    """Alle konfigurierten Postfaecher (Entscheidung Aaron 15.10.2026: ~50
+    IONOS-Postfaecher, je Mandant eines): das alte Einzelpostfach ueber
+    ``RECHNUNG_IMAP_*`` (``ImapConfig()``, Standard-ENV-Konfiguration) bleibt
+    als "Postfach 1 (ENV)" voll funktionsfaehig -- plus alle in der
+    Bibliothek gepflegten (Excel-Stammdaten-Import, ``store.postfaecher()``).
+    -> [(Anzeigename, ImapConfig, Mandant-BillingAddress-Id oder ``None``)],
+    ENV-Postfach immer zuerst -- Reihenfolge ist wichtig fuer die
+    sequentielle (nicht parallele) Abholung auf dem schwachen Laptop."""
+    from . import secrets as secrets_mod
+
+    out: list[tuple[str, ImapConfig, str | None]] = []
+    ordner = postfach_ordner()
+    env_cfg = ImapConfig()
+    if env_cfg.configured:
+        # gilt auch fuers alte Einzelpostfach, solange es auf INBOX steht
+        # (Laptop 05.11.2026: AP-015-KHB ist das ENV-Postfach und blieb auf INBOX)
+        if ordner and (env_cfg.source_folder or "INBOX").upper() == "INBOX":
+            import dataclasses
+
+            env_cfg = dataclasses.replace(env_cfg, source_folder=ordner, done_folder="", nur_lesen=True)
+        out.append(("Postfach 1 (ENV)", env_cfg, None))
+    for p in store.postfaecher():
+        if not p.aktiv or not p.user:
+            continue
+        eigener = (p.source_folder or "INBOX").upper() != "INBOX"
+        if ordner and not eigener:
+            cfg = ImapConfig(host=p.host, port=p.port, user=p.user,
+                             password=secrets_mod.get_password(store, p.id),
+                             ssl=p.ssl, source_folder=ordner, done_folder="", nur_lesen=True)
+        else:
+            cfg = ImapConfig(host=p.host, port=p.port, user=p.user,
+                             password=secrets_mod.get_password(store, p.id),
+                             ssl=p.ssl, source_folder=p.source_folder,
+                             done_folder=p.done_folder)
+        out.append((p.label, cfg, p.mandant_id or None))
+    return out
+
+
 def jobrouter() -> JobRouterConfig:
     return JobRouterConfig()
 
 
 def llm() -> LlmConfig:
-    return LlmConfig()
+    """Wirksame KI-Einstellungen. Im gruendlichen Modus (``gruendlich()``) gelten
+    -- nur wo nichts ausdruecklich in rechnung.env steht -- laengere Zeitgrenze
+    (120 s statt 30 s: ein 3B-Modell auf dem Firmenlaptop braucht bei vollem
+    Text laenger, ein Abbruch heisst "KI hat nichts geliefert"), mehr Kontext
+    (6144 statt 4096) und KI-Positionen als Rueckfall, wenn die Tabellen-
+    erkennung nichts findet."""
+    import dataclasses
+
+    cfg = LlmConfig()
+    if not gruendlich():
+        return cfg
+    over: dict = {}
+    if "RECHNUNG_LLM_TIMEOUT" not in os.environ:
+        over["timeout"] = max(cfg.timeout, 120)
+    if "RECHNUNG_LLM_CTX" not in os.environ:
+        over["num_ctx"] = max(cfg.num_ctx, 6144)
+    if "RECHNUNG_LLM_LINE_ITEMS" not in os.environ:
+        over["line_items"] = True
+    return dataclasses.replace(cfg, **over)
 
 
 def vorverarbeitung_an() -> bool:

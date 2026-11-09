@@ -32,6 +32,41 @@ EXPECTED_RATES: dict[str, list[float]] = {
 }
 DEFAULT_CURRENCY = "EUR"
 
+
+def valid_rates(currency: str | None) -> list[float]:
+    """Gueltige USt-/MwSt-Saetze einer Waehrung -- gemeinsame Grundlage fuer
+    ``rechnen.py`` (Kopf/Positionen ergaenzen) UND ``summen.py`` (Beträge aus
+    dem Kontext herleiten, Teil A)."""
+    return EXPECTED_RATES.get(currency or DEFAULT_CURRENCY, EXPECTED_RATES[DEFAULT_CURRENCY])
+
+
+def nearest_valid_rate(satz: float, currency: str | None, tol: float = 0.5) -> float | None:
+    """Naechster gueltiger Satz der Waehrung, wenn ``satz`` (z.B. aus USt/Netto
+    zurueckgerechnet oder im Fliesstext gefunden) innerhalb der Rundungstoleranz
+    ``tol`` (Prozentpunkte) liegt -- sonst ``None`` (kein gueltiger Satz, nicht
+    raten)."""
+    best, best_d = None, None
+    for r in valid_rates(currency):
+        d = abs(r - satz)
+        if d <= tol and (best_d is None or d < best_d):
+            best, best_d = r, d
+    return best
+
+
+# ---- Positionsmodus je Lieferant (Teil B, Entscheidung Aaron 10.10.2026) --
+# Wie in Abbyy FlexiCapture entscheidet die bearbeitende Person beim Pruefen
+# einer Rechnung, wie die Positionstabelle dieses Lieferanten zu lesen ist --
+# der Modus haengt am Lieferanten (Supplier.positionsmodus), nicht an der
+# einzelnen Rechnung, und bleibt stabil, bis ihn jemand aendert. Normalfall
+# ist "einzeln" (unveraendertes Verhalten); nur wenige Lieferanten brauchen
+# einen der anderen beiden Modi. Verschiedene MwSt-Saetze werden in KEINEM
+# Modus zusammengefasst (immer eine Positionszeile je Steuersatz).
+POSITIONSMODUS_EINZELN = "einzeln"
+POSITIONSMODUS_ZUSAMMENFASSUNG = "zusammenfassung"
+POSITIONSMODUS_EINE_POSITION = "eine_position"
+POSITIONSMODI = (POSITIONSMODUS_EINZELN, POSITIONSMODUS_ZUSAMMENFASSUNG,
+                 POSITIONSMODUS_EINE_POSITION)
+
 # Pruefungs-Grund, wenn auf der Rechnung eine andere IBAN steht als im
 # Lieferanten-Stammdatensatz -- klassisches Betrugsmuster (geaenderte
 # Bankverbindung). Wortgleich in Pruefung, Rueckstellgrund und Fehlerbericht.
@@ -61,6 +96,13 @@ class Supplier:
     # BusinessUnitId ist die interne ``id`` zusammengesetzt (siehe importers.py),
     # ``external_id`` bleibt die reine Fremd-Id fuer den Export (jobrouter.py).
     external_id: str = ""
+    # Je Land ("DE"/"CH") die Fremd-Lieferantennummer, wenn ein Lieferant aus
+    # einem DE- und einem CH-Kreditorensatz verschmolzen wurde (Stammdaten-
+    # Import, Entscheidung Aaron 16.10.2026): ABBYY hat der DE- und der
+    # CH-Seite derselben Firma ggf. verschiedene Nummern gegeben, JobRouter
+    # braucht die zum Beleg passende (``external_id_fuer``). ``external_id``
+    # bleibt als Rueckfall/Rueckwaertskompatibilitaet bestehen.
+    external_ids: dict[str, str] = field(default_factory=dict)
     # Entwurfsstatus (Entscheidung Aaron 09.10.2026): ersetzt die bisherige
     # Regel "Lieferanten werden nie automatisch angelegt" (SPEC §7h) -- ein
     # beim Verarbeiten einer Rechnung automatisch angelegter, noch nicht
@@ -73,6 +115,10 @@ class Supplier:
     bestaetigt: bool = True
     entwurf_quelle: str = ""
     entwurf_am: str = ""
+    # Der EINE Dummy-Lieferant (dummy.py, Aaron 17.10.2026): Platzhalter fuer
+    # "Lieferant unbekannt". Taucht in der Lieferantenerkennung, im Lernen und
+    # im Stammdaten-Import nie auf (Store.suppliers() blendet ihn aus).
+    dummy: bool = False
     # --- gepflegte Stammdaten -------------------------------------------
     address_lines: list[str] = field(default_factory=list)
     bank_name: str = ""
@@ -88,6 +134,44 @@ class Supplier:
     currency: str = DEFAULT_CURRENCY
     # Feld -> fester Wert, gilt fuer alle Rechnungen dieses Lieferanten
     fixed_fields: dict[str, str] = field(default_factory=dict)
+    # Positionsmodus (Teil B, Entscheidung Aaron 10.10.2026) -- Standard
+    # "einzeln" (unveraendertes Verhalten); altes suppliers.json ohne dieses
+    # Feld laedt ebenfalls als "einzeln" (siehe from_dict). "eine_position"
+    # braucht zusaetzlich eine Bezeichnung (z.B. "Strom").
+    positionsmodus: str = POSITIONSMODUS_EINZELN
+    positionsbezeichnung: str = ""
+    # War der Modus schon einmal eine bewusste menschliche Entscheidung
+    # (POST .../positionsmodus, siehe pipeline.set_positionsmodus)? Nur dann
+    # unterbleibt der "Langer Beleg"-Hinweis (pipeline._positionsmodus_hint)
+    # -- unterscheidet "noch nie entschieden" vom Standardwert "einzeln".
+    positionsmodus_gesetzt: bool = False
+    # Inhalts-Fingerabdruck der zuletzt angewendeten Stammdaten-Import-Zeile
+    # (stammdaten_import._zeilen_fingerabdruck) -- erlaubt, bei einem erneuten
+    # Lauf (z.B. nach einem Neustart mitten in einem grossen Import)
+    # unveraenderte Zeilen zu erkennen und zu ueberspringen. Fehlt das Feld
+    # (alter Datensatz vor dieser Aenderung), gilt die Zeile IMMER als
+    # geaendert -- siehe ``from_dict``. Nicht zu verwechseln mit
+    # ``fingerprint`` oben (Rechnungserkennung, voellig anderer Zweck).
+    stammdaten_import_hash: str = ""
+
+    def external_id_fuer(self, land: str | None) -> str:
+        """Fremd-Lieferantennummer fuer einen Beleg aus ``land`` ("DE"/"CH"/
+        ``None`` = nicht erkennbar). Hat der Lieferant nur EINE Nummer (der
+        Normalfall), gilt sie immer. Hat er mehrere verschiedene und das Land
+        ist unbekannt (oder hat dafuer keine), wird NICHT geraten: ``""``."""
+        if land and self.external_ids.get(land):
+            return self.external_ids[land]
+        verschieden = set(v for v in self.external_ids.values() if v)
+        if self.external_id:
+            verschieden.add(self.external_id)
+        if len(verschieden) > 1:
+            return ""
+        return self.external_id or next(iter(verschieden), "")
+
+    @property
+    def external_id_mehrdeutig(self) -> bool:
+        return len(set(v for v in self.external_ids.values() if v)
+                   | ({self.external_id} if self.external_id else set())) > 1
 
     def to_dict(self) -> dict:
         return {
@@ -95,6 +179,7 @@ class Supplier:
             "ibans": self.ibans, "domains": self.domains,
             "fingerprint": self.fingerprint,
             "addresses": self.addresses, "external_id": self.external_id,
+            "external_ids": self.external_ids,
             "address_lines": self.address_lines, "bank_name": self.bank_name,
             "bic": self.bic, "bank_code": self.bank_code,
             "bank_account": self.bank_account, "creditor_id": self.creditor_id,
@@ -103,7 +188,11 @@ class Supplier:
             "default_tax_rate": self.default_tax_rate, "notes": self.notes,
             "fixed_fields": self.fixed_fields, "currency": self.currency,
             "bestaetigt": self.bestaetigt, "entwurf_quelle": self.entwurf_quelle,
-            "entwurf_am": self.entwurf_am,
+            "entwurf_am": self.entwurf_am, "dummy": self.dummy,
+            "positionsmodus": self.positionsmodus,
+            "positionsbezeichnung": self.positionsbezeichnung,
+            "positionsmodus_gesetzt": self.positionsmodus_gesetzt,
+            "stammdaten_import_hash": self.stammdaten_import_hash,
         }
 
     @classmethod
@@ -113,6 +202,7 @@ class Supplier:
             ibans=d.get("ibans", []), domains=d.get("domains", []),
             fingerprint=d.get("fingerprint", []),
             addresses=d.get("addresses", []), external_id=d.get("external_id", ""),
+            external_ids=dict(d.get("external_ids") or {}),
             address_lines=d.get("address_lines", []),
             bank_name=d.get("bank_name", ""), bic=d.get("bic", ""),
             bank_code=d.get("bank_code", ""), bank_account=d.get("bank_account", ""),
@@ -128,6 +218,14 @@ class Supplier:
             bestaetigt=d.get("bestaetigt", True),
             entwurf_quelle=d.get("entwurf_quelle", ""),
             entwurf_am=d.get("entwurf_am", ""),
+            dummy=bool(d.get("dummy", False)),
+            # Fehlt in altem suppliers.json (vor dieser Aenderung) --
+            # "einzeln"/unentschieden als Standard (siehe Positionsmodus-Doku
+            # oben).
+            positionsmodus=d.get("positionsmodus") or POSITIONSMODUS_EINZELN,
+            positionsbezeichnung=d.get("positionsbezeichnung", ""),
+            positionsmodus_gesetzt=d.get("positionsmodus_gesetzt", False),
+            stammdaten_import_hash=d.get("stammdaten_import_hash", ""),
         )
 
 
@@ -156,6 +254,71 @@ def extract_identifiers(doc: Document) -> dict:
         "domains": find_domains(text),
         "fingerprint": _fingerprint(doc),
     }
+
+
+# Namens-Erkennung (config.namenserkennung, Aaron 09.11.2026): kuerzere
+# normalisierte Namen zaehlen nie als Namenstreffer ("ewz", "ada" ...).
+MIN_NAMENSLAENGE = 4
+
+
+def name_auf_rechnung(name: str | None, text_n: str) -> bool:
+    """Steht der normalisierte Lieferantenname als GANZE Wortfolge im
+    normalisierten Rechnungstext? ``norm`` trennt Woerter mit '-', deshalb
+    wird an Wortgrenzen verglichen: "hotel" trifft nicht in "hotelbedarf",
+    "gema" nicht in "allgemein". Zu kurze Namen (< MIN_NAMENSLAENGE)
+    zaehlen nie."""
+    n = norm(name or "")
+    if len(n) < MIN_NAMENSLAENGE:
+        return False
+    return f"-{n}-" in f"-{text_n}-"
+
+
+def empfaenger_namen(addresses) -> set[str]:
+    """Normalisierte Namen und Suchbegriffe der Rechnungsadressen (Mandanten,
+    ``billing.BillingAddress``). Ein Lieferant, der so heisst, zaehlt bei der
+    Namens-Erkennung nie als Treffer: die eigenen Gesellschaften stehen als
+    Empfaenger auf jeder Rechnung und teils zugleich als Lieferant in der
+    Bibliothek (Befund Trockenlauf 09.11.2026: ein Versicherungsschreiben
+    waere sonst dem Empfaenger als Lieferant zugeordnet worden)."""
+    out: set[str] = set()
+    for a in addresses or ():
+        for s in [getattr(a, "name", "")] + list(getattr(a, "match_terms", None) or []):
+            n = norm(s or "")
+            if len(n) >= MIN_NAMENSLAENGE:
+                out.add(n)
+    return out
+
+
+# Ab dieser Laenge gilt ein gemeinsamer Anfang als derselbe Name -- die
+# Adressnamen aus dem Excel-Import sind oft abgeschnitten
+# ("...Betreuungsgesellschaf" statt "...Betreuungsgesellschaft mbH").
+_EMPFAENGER_PRAEFIX = 12
+
+
+def _ist_empfaenger(name_n: str, empfaenger: set[str]) -> bool:
+    for e in empfaenger:
+        if e == name_n or f"-{e}-" in f"-{name_n}-" or f"-{name_n}-" in f"-{e}-":
+            return True
+        kurz, lang = sorted((e, name_n), key=len)
+        if len(kurz) >= _EMPFAENGER_PRAEFIX and lang.startswith(kurz):
+            return True
+    return False
+
+
+def namenstreffer(suppliers: list["Supplier"], text_n: str,
+                  empfaenger: set[str] | None = None) -> list["Supplier"]:
+    """Lieferanten, deren Name als ganze Wortfolge im normalisierten Text
+    steht -- ohne Dummy und ohne Lieferanten, die wie eine Rechnungsadresse
+    heissen (``empfaenger_namen``)."""
+    emp = empfaenger or set()
+    out = []
+    for s in suppliers:
+        if s.dummy or not name_auf_rechnung(s.name, text_n):
+            continue
+        if emp and _ist_empfaenger(norm(s.name), emp):
+            continue
+        out.append(s)
+    return out
 
 
 def _jaccard(a: set, b: set) -> float:
@@ -232,16 +395,20 @@ def _address_scope_reason(has_addresses: bool, address_id: str | None,
 def identify(doc: Document, suppliers: list[Supplier], threshold: float = 0.5,
             min_margin: float = 0.15, index: dict | None = None,
             address_id: str | None = None, has_addresses: bool = False,
-            address_name: str = ""):
+            address_name: str = "", einzelkandidat_namensschwelle: float | None = None,
+            empfaenger: set[str] | None = None):
     """-> (Supplier, score) oder None. Kurzform von ``identify_with_reason``."""
     return identify_with_reason(doc, suppliers, threshold, min_margin, index,
-                                address_id, has_addresses, address_name)[0]
+                                address_id, has_addresses, address_name,
+                                einzelkandidat_namensschwelle, empfaenger)[0]
 
 
 def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: float = 0.5,
                          min_margin: float = 0.15, index: dict | None = None,
                          address_id: str | None = None, has_addresses: bool = False,
-                         address_name: str = ""):
+                         address_name: str = "",
+                         einzelkandidat_namensschwelle: float | None = None,
+                         empfaenger: set[str] | None = None):
     """-> ((Supplier, score) oder None, Grund).
 
     Die Lieferanten-Identitaet kommt ausschliesslich aus der Bibliothek
@@ -280,7 +447,29 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
     sicherer Treffer" als eine mehrdeutige Zuordnung zu raten (verhindert
     eine stille Verwechslung zwischen zwei Lieferanten mit aehnlichem
     Kopf-Layout, z.B. derselben Buchhaltungssoftware).
-    """
+
+    ``einzelkandidat_namensschwelle`` -- Namens-Erkennung (aktiv seit
+    09.11.2026 ueber ``config.namenserkennung()``, Entscheidung Aaron; davor
+    nur ein Vorschlag, siehe worker/bericht-lieferant-erkennung-1106.md
+    Teil C). Befund Aaron 06.11.2026: Lieferanten aus dem Excel-
+    Stammdatenimport (stammdaten_import.py) haben nur ``name`` (+ ggf.
+    ``address_lines``), keine IBAN/USt-IdNr/Fingerprint/Domain -- und fast
+    alle (11.218 von 11.219 am 09.11.2026) keine Rechnungsadresse, gelten
+    also global: nach ``kandidaten()`` bleibt praktisch IMMER die ganze
+    Bibliothek uebrig, ein reiner Namens-Teiltreffer bringt 0.2 Score und
+    erreicht die globale ``threshold`` (0.5) nie. Ist dieser Wert gesetzt
+    UND steht von allen Kandidaten GENAU EIN Lieferantenname als ganze
+    Wortfolge auf der Rechnung (``name_auf_rechnung``, kein Dummy) UND ist
+    dieser Lieferant der bestbewertete, gilt fuer IHN dieser (niedrigere)
+    Wert statt ``threshold``. Stehen zwei oder mehr Lieferantennamen auf
+    der Rechnung (z.B. "Muster Handels GmbH" und "Muster Handels"), bleibt
+    die normale ``threshold``-/``min_margin``-Pruefung unveraendert streng
+    -> Mensch. Der Mehrdeutigkeits-/Betrugsschutz-Pfad ueber USt-IdNr/IBAN
+    weiter oben bleibt unberuehrt. pipeline.py vermerkt einen so erkannten
+    Lieferanten als Hinweis (``NAME_HINWEIS``), damit der Mensch beim
+    Bestaetigen weiss, dass nur der Name gepasst hat. ``empfaenger``
+    (``empfaenger_namen(store.addresses())``): Lieferanten, die wie eine
+    Rechnungsadresse heissen, zaehlen nie als Namenstreffer."""
     suppliers = kandidaten(suppliers, address_id, has_addresses)
     if not suppliers:
         if has_addresses:
@@ -309,7 +498,7 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
             score += 0.5
         if ids["domains"] & set(s.domains):
             score += 0.3
-        if s.name and norm(s.name) in text_n:
+        if name_auf_rechnung(s.name, text_n):
             score += 0.2
         score += 0.3 * _jaccard(ids["fingerprint"], set(s.fingerprint))
         return (s, round(score, 3)), ""
@@ -320,13 +509,22 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
         score = 0.0
         if ids["domains"] & set(s.domains):
             score += 0.3
-        if s.name and norm(s.name) in text_n:
+        if name_auf_rechnung(s.name, text_n):
             score += 0.2
         score += 0.3 * _jaccard(ids["fingerprint"], set(s.fingerprint))
         scored.append((s, round(score, 3)))
     scored.sort(key=lambda x: x[1], reverse=True)
     best_s, best_score = scored[0]
-    if best_score < threshold:
+    eff_threshold = threshold
+    # Namens-Erkennung (siehe Docstring): nur wenn der Aufrufer sie anfordert
+    # UND von allen Kandidaten GENAU EINER mit seinem Namen auf der Rechnung
+    # steht -- und das ist der beste. Stehen zwei Namen auf der Rechnung oder
+    # keiner, bleibt alles unveraendert streng.
+    if einzelkandidat_namensschwelle is not None:
+        treffer = namenstreffer([s for s, _ in scored], text_n, empfaenger)
+        if len(treffer) == 1 and treffer[0] is best_s:
+            eff_threshold = min(threshold, einzelkandidat_namensschwelle)
+    if best_score < eff_threshold:
         return None, _address_scope_reason(has_addresses, address_id, address_name,
                                            "kein Lieferant aus der Bibliothek passt")
     if len(scored) > 1:
@@ -414,3 +612,32 @@ def identify_einvoice(inv, suppliers: list[Supplier]):
         if len(by_name) == 1:
             return by_name[0], 0.6
     return None
+
+
+def land_aus_kennungen(ustids=(), ibans=()) -> str | None:
+    """"DE"/"CH" aus UIDs/IBANs eines Belegs, wenn sie GENAU ein Land
+    ergeben; sonst ``None`` (nicht erkennbar oder widerspruechlich -- nie
+    raten)."""
+    laender = set()
+    for u in ustids:
+        n = norm_ustid(u)
+        if n.startswith("CHE"):
+            laender.add("CH")
+        elif n.startswith("DE"):
+            laender.add("DE")
+    for i in ibans:
+        k = re.sub(r"\s+", "", str(i or "")).upper()
+        if k[:2] in ("DE", "CH"):
+            laender.add(k[:2])
+    return next(iter(laender)) if len(laender) == 1 else None
+
+
+def land_aus_beleg_text(sup: "Supplier", text: str) -> str | None:
+    """Land eines Belegs anhand der UIDs/IBANs des Lieferanten, die im Text
+    stehen (Beleg einer DE-Seite nennt die DE-UID/-IBAN, einer CH-Seite die
+    CH-Kennungen)."""
+    kompakt = re.sub(r"\s+", "", (text or "").upper())
+    ustids_im_text = find_ustids(text or "")
+    ust = [u for u in sup.ustids if norm_ustid(u) in ustids_im_text]
+    ib = [i for i in sup.ibans if re.sub(r"\s+", "", i).upper() in kompakt]
+    return land_aus_kennungen(ust, ib)

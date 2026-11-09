@@ -1,4 +1,4 @@
-"""Kommandozeile: fetch / scan / messen / vorlernen / suppliers / templates / journal / schatten / modus / push / web / app / demo."""
+"""Kommandozeile: fetch / scan / messen / testsatz / vorlernen / suppliers / templates / journal / schatten / modus / push / web / app / demo."""
 
 from __future__ import annotations
 
@@ -31,6 +31,26 @@ def _cmd_fetch(args) -> int:
         print(f"  {s}")
     for h in res.human:
         print(f"  -> Menschliche Bearbeitung: {h}")
+    return 0
+
+
+def _cmd_vorbereiten(args) -> int:
+    """Rechnungen im Eingang vorab auslesen (Texterkennung + KI), damit der
+    Mensch spaeter ohne Wartezeit nur noch prueft und sendet. Auch ohne offenes
+    Programmfenster; nichts wird bestaetigt, gesendet oder gelernt."""
+    from .vorbereitung import vorbereiten_lauf
+
+    store = Store(args.data)
+    b = vorbereiten_lauf(store, args.samples, abholen=not args.ohne_abholen,
+                         zeitgrenze=args.zeit, erneut=args.erneut, max_dateien=args.max,
+                         melde=(lambda t: None) if args.json else print)
+    if args.json:
+        print(json.dumps(b, indent=2, ensure_ascii=False))
+        return 0
+    if b["uebersprungen_laeuft"]:
+        return 0
+    print(f"Vorbereitet: {b['bereit']} neu, {b['schon_fertig']} waren schon fertig, "
+          f"{len(b['fehler'])} Fehler, {b['belegt']} woanders in Arbeit (von {b['dateien']} Dateien).")
     return 0
 
 
@@ -70,7 +90,7 @@ def _cmd_push(args) -> int:
     from .jobrouter import push_queue
 
     store = Store(args.data)
-    res = push_queue(store.root)
+    res = push_queue(store.root, trockenlauf_aufheben=True)
     if args.json:
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0
@@ -336,6 +356,60 @@ def _cmd_fehlerbericht(args) -> int:
     return 0
 
 
+def _cmd_testsatz(args) -> int:
+    """Testsatz aus bestaetigten Rechnungen im Trockenlauf pruefen
+    (testsatz.py): je Feld richtig/falsch/fehlt, Positionen, Zeit, Vergleich
+    mit dem letzten Lauf."""
+    from . import testsatz
+
+    store = Store(args.data)
+    try:
+        b = testsatz.pruefen(store, speichern_=not args.kein_bericht,
+                             lieferant=args.lieferant, variante=args.variante,
+                             nur_ohne_ki=args.ohne_ki)
+    except (ValueError, NotImplementedError) as e:
+        print(f"Fehler: {e}")
+        return 2
+    if args.ausgabe:
+        Path(args.ausgabe).write_text(json.dumps(b, indent=2, ensure_ascii=False), "utf-8")
+    if args.json:
+        print(json.dumps(b, indent=2, ensure_ascii=False))
+        return 0
+    if not b["anzahl"] and not b["uebersprungen"]:
+        print("Noch keine bestaetigten Rechnungen im Testsatz.")
+        return 0
+    print(testsatz.text(b))
+    return 0
+
+
+def _cmd_fehlerstatistik(args) -> int:
+    """Je Lieferant x Feld: Anteil korrigierter Rechnungen, Trend 4 Wochen,
+    lohnendste Verbesserungen (eventlog.fehlerstatistik)."""
+    from .eventlog import fehlerstatistik
+
+    data = fehlerstatistik(Store(args.data))
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return 0
+    if not data["zeilen"]:
+        print("Noch keine Korrekturen.")
+        return 0
+    if data["lohnend"]:
+        print("Lohnendste Verbesserungen:")
+        for r in data["lohnend"]:
+            print(f"  {r['text']}")
+        print()
+    pct = lambda v: "-" if v is None else f"{100 * v:.0f} %"  # noqa: E731
+    print(f"{'Lieferant':28s} {'Feld':18s} {'korr.':>9s} {'Anteil':>7s} "
+          f"{'4 Wochen':>8s} {'davor':>7s}  Trend")
+    for r in data["zeilen"]:
+        who = r["lieferant_name"] or r["lieferant"]
+        print(f"{who:28.28s} {r['feld_label']:18.18s} {r['korrigiert']:4d}/{r['rechnungen']:<4d} "
+              f"{pct(r['anteil']):>7s} {pct(r['anteil_4_wochen']):>8s} {pct(r['anteil_davor']):>7s}"
+              f"  {r['trend'] or ''}")
+    return 0
+
+
 def _cmd_modus(args) -> int:
     """Betriebsmodus anzeigen bzw. ausdruecklich umschalten (Audit)."""
     from . import modus
@@ -427,6 +501,8 @@ def _cmd_nacht(args) -> int:
     print(f"  {bericht['betrieb']['text']}")
     print(f"  Ordner Menschliche Bearbeitung: {bericht['betrieb']['menschlich_offen']} offen")
     print(f"  veraltete Vorlagen: {len(bericht['layoutwechsel']['veraltete_vorlagen'])}")
+    for r in (bericht.get("fehlerstatistik") or {}).get("lohnend", [])[:5]:
+        print(f"  lohnend: {r['text']}")
     for name, h in bericht["gesundheit"].items():
         mark = {True: "ok", False: "FAIL", None: "-"}[h["ok"]]
         print(f"  [{mark:4s}] {name}: {h['detail']}")
@@ -550,6 +626,17 @@ def main(argv=None) -> int:
     f.add_argument("--json", action="store_true")
     f.set_defaults(func=_cmd_fetch)
 
+    vb = sub.add_parser("vorbereiten",
+                        help="Eingang vorab auslesen (Postfach abholen, falls eingerichtet) -- "
+                             "auch ohne offenes Programmfenster, fuer die Aufgabenplanung")
+    vb.add_argument("--ohne-abholen", action="store_true", help="Postfach nicht abholen")
+    vb.add_argument("--zeit", type=float, default=600.0,
+                    help="Zeitgrenze je Datei in Sekunden (Standard 600)")
+    vb.add_argument("--max", type=int, default=0, help="hoechstens N Dateien pro Lauf (0 = alle)")
+    vb.add_argument("--erneut", action="store_true", help="auch schon vorbereitete Dateien neu auslesen")
+    vb.add_argument("--json", action="store_true")
+    vb.set_defaults(func=_cmd_vorbereiten)
+
     pu = sub.add_parser("push", help="Warteschlange an JobRouter uebergeben")
     pu.add_argument("--json", action="store_true")
     pu.set_defaults(func=_cmd_push)
@@ -607,6 +694,27 @@ def main(argv=None) -> int:
     fb.add_argument("--seit", help="nur Ereignisse ab diesem Datum (YYYY-MM-DD)")
     fb.add_argument("--json", action="store_true")
     fb.set_defaults(func=_cmd_fehlerbericht)
+
+    ts = sub.add_parser("testsatz",
+                        help="Bestaetigte Rechnungen im Trockenlauf neu lesen und je Feld "
+                             "richtig/falsch/fehlt messen (Goldstandard)")
+    ts.add_argument("--lieferant", help="nur dieser Lieferant (ID oder Teil des Namens)")
+    ts.add_argument("--variante", default="A",
+                    help="Extraktionsvariante A (ein Rundum-Prompt) | B (Positionen als "
+                         "eigener Block) | C (vorgesehen, noch nicht gebaut)")
+    ts.add_argument("--ohne-ki", action="store_true",
+                    help="nur Testfaelle, die ohne KI auskommen (Vorlage/E-Rechnung)")
+    ts.add_argument("--kein-bericht", action="store_true",
+                    help="Bericht nicht unter <data>/berichte speichern")
+    ts.add_argument("--ausgabe", help="Bericht zusaetzlich als JSON in diese Datei schreiben")
+    ts.add_argument("--json", action="store_true")
+    ts.set_defaults(func=_cmd_testsatz)
+
+    fs = sub.add_parser("fehlerstatistik",
+                        help="Welche Felder werden bei welchen Lieferanten wie oft korrigiert "
+                             "(Anteil, Trend 4 Wochen, lohnendste Verbesserung)")
+    fs.add_argument("--json", action="store_true")
+    fs.set_defaults(func=_cmd_fehlerstatistik)
 
     mo = sub.add_parser("modus",
                         help="Betriebsmodus (testphase/autonom) anzeigen oder umschalten")

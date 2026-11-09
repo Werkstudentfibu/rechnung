@@ -20,7 +20,7 @@ import shutil
 import time
 from pathlib import Path
 
-from . import eventlog, human, jobrouter, lock, modus, shadow
+from . import eventlog, human, jobrouter, keine_rechnung, lock, modus, shadow
 from .config import imap as _imap_cfg
 from .timing import distribution as _distribution
 
@@ -41,8 +41,10 @@ def _check_ionos() -> dict:
         return {"ok": None, "detail": "nicht konfiguriert (RECHNUNG_IMAP_*)"}
     import imaplib
 
+    from .ingest import _verbinden
+
     try:
-        M = imaplib.IMAP4_SSL(cfg.host, cfg.port) if cfg.ssl else imaplib.IMAP4(cfg.host, cfg.port)
+        M = _verbinden(cfg)
     except OSError as e:
         return {"ok": False, "detail": f"{type(e).__name__}: {e}"}
     try:
@@ -140,6 +142,16 @@ def tagesbericht(store, samples=None, tag: str | None = None) -> dict:
     totals = shadow.stats(store)["totals"]
     gesamt = totals.get("rechnungen") or 0
     fehler = totals.get("fehlentscheidungen") or 0
+    # Ordner "Keine Rechnung" (keine_rechnung.py, Entscheidung Aaron
+    # 14.10.2026): aussortierte Dokumente, Rueckholungen ("Doch eine
+    # Rechnung" -- die Regel lag falsch, zaehlt als Fehlsortierung) und
+    # endgueltige Loeschungen (Nachtrag 14.10.2026), je mit Liste.
+    kr_events = [e for e in store.events()
+                 if e.get("type") == eventlog.TYPE_KEINE_RECHNUNG
+                 and (e.get("ts") or "").startswith(tag)]
+    aussortiert = [e for e in kr_events if e.get("aktion") == eventlog.KR_AUSSORTIERT]
+    zurueckgeholt = [e for e in kr_events if e.get("aktion") == eventlog.KR_ZURUECKGEHOLT]
+    geloescht = [e for e in kr_events if e.get("aktion") == eventlog.KR_GELOESCHT]
     return {
         "tag": tag,
         "verarbeitet": len(events),
@@ -153,14 +165,21 @@ def tagesbericht(store, samples=None, tag: str | None = None) -> dict:
         "dauer_je_stufe": _stufen_verteilung(events),
         "dauer_je_seitenzahl": _dauer_je_seitenzahl(events),
         "rueckstand": _rueckstand(store, samples),
+        "nicht_rechnung_aussortiert": len(aussortiert),
+        "nicht_rechnung_liste": [f"{e.get('file')}: {e.get('grund')}" for e in aussortiert],
+        "nicht_rechnung_geloescht": len(geloescht),
+        "fehlsortierungen": len(zurueckgeholt),
+        "fehlsortierungen_liste": [f"{e.get('file')}: {e.get('grund')}" for e in zurueckgeholt],
     }
 
 
 def betrieb(store) -> dict:
     """Betriebsmodus + Fortschritt Testphase -> Autonomie (modus.py) und wie
-    viele Rechnungen im Ordner "Menschliche Bearbeitung" warten."""
+    viele Rechnungen im Ordner "Menschliche Bearbeitung" bzw. Dokumente im
+    Ordner "Keine Rechnung" warten."""
     fp = modus.fortschritt(store)
-    return dict(fp, text=modus.text(fp), menschlich_offen=len(human.offen(store)))
+    return dict(fp, text=modus.text(fp), menschlich_offen=len(human.offen(store)),
+                keine_rechnung_offen=len(keine_rechnung.offen(store)))
 
 
 def _write_report(store, bericht: dict) -> Path:
@@ -195,6 +214,8 @@ def run_nightly(store, samples: str | Path | None = None,
             "layoutwechsel": {"veraltete_vorlagen": stale},
             "ocr_rest": ocr_rest,
             "fehlerbericht": eventlog.report(store),
+            # je Lieferant x Feld + lohnendste Verbesserung (Aaron 10.10.2026)
+            "fehlerstatistik": eventlog.fehlerstatistik(store),
             "tagesbericht": tagesbericht(store, samples),
             "betrieb": betrieb(store),
             "gesundheit": health_checks(store),

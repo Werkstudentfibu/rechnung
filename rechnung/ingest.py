@@ -245,6 +245,12 @@ class MailOutcome:
     # kein eigener Beleg, sondern an jeden Beleg dieser Mail gehaengt
     # (Postfach-Baustein 8): (Dateiname, Inhalt, Anlagenart)
     anlagen: list[tuple[str, bytes, str]] = field(default_factory=list)
+    # Nicht-Rechnung aussortieren (keine_rechnung.py, Entscheidung Aaron
+    # 14.10.2026): True, wenn ``human_reason`` NICHT nach "Menschliche
+    # Bearbeitung" soll, sondern in den Ordner "Keine Rechnung" -- Mail ganz
+    # ohne Anhang/Rechnungs-Hinweis, oder Mail deren Anhaenge ALLE eindeutig
+    # Nicht-Beleg sind (kein einziger unzuordenbarer/Beleg-Anhang dabei).
+    keine_rechnung: bool = False
 
 
 def _classify_attachment(att: Attachment) -> tuple[str, str | None, str]:
@@ -327,6 +333,13 @@ def analyse_mail(raw: bytes, extensions: tuple[str, ...] = (".pdf",)) -> MailOut
             zusatz = f" (nur: {', '.join(teile)})" if teile else \
                 " (nicht zuzuordnen)" if unklar else ""
             out.human_reason = MAIL_OHNE_BELEG_ANHANG + zusatz
+            if anlage and not unklar:
+                # ALLE Anhaenge eindeutig als Nicht-Beleg beschriftet (AGB,
+                # Lieferschein, ...) und kein einziger unzuordenbarer Anhang
+                # dabei (der koennte eine Rechnung sein) -> aussortieren statt
+                # "Menschliche Bearbeitung" (Entscheidung Aaron 14.10.2026).
+                out.keine_rechnung = True
+                out.anlagen = anlage
             return out
         out.attachments = beleg
         out.anlagen = anlage
@@ -345,7 +358,12 @@ def analyse_mail(raw: bytes, extensions: tuple[str, ...] = (".pdf",)) -> MailOut
         out.human_reason = MAIL_TEXT_RECHNUNG
         out.body_text = body
     else:
+        # Mail ganz ohne Anhang und ohne Rechnungs-Hinweis im Text ->
+        # aussortieren statt "Menschliche Bearbeitung" (Entscheidung Aaron
+        # 14.10.2026) -- anders als MAIL_NUR_LINK/MAIL_TEXT_RECHNUNG oben,
+        # die eine Rechnung sein KOENNTEN.
         out.human_reason = MAIL_OHNE_ANHANG
+        out.keine_rechnung = True
     if out.ignored:
         out.human_reason += " (nicht verwertbare Anhaenge: " + ", ".join(out.ignored) + ")"
     return out
@@ -482,12 +500,21 @@ def _mail_name(out: MailOutcome) -> str:
 
 
 def handle_mail(raw: bytes, cfg: ImapConfig, dest: Path, store=None,
-                dry_run: bool = False) -> dict:
+                dry_run: bool = False, mandant_address_id: str | None = None) -> dict:
     """Eine Mail verarbeiten -> ``{"saved": [...], "human": [...]}``. Wirft
     nur bei echten Fehlern (Platte voll ...) -- dann darf die Mail NICHT als
-    gelesen markiert werden."""
+    gelesen markiert werden.
+
+    ``mandant_address_id`` (Entscheidung Aaron 15.10.2026, mehrere
+    Postfaecher): der Mandant (BillingAddress.id), dem DIESES Postfach
+    zugeordnet ist -- wird je gespeichertem Anhang als starker Hinweis
+    unter ``store.set_datei_mandant`` vermerkt (``pipeline.py`` entscheidet
+    anhand der Rechnungsadresse auf der Rechnung selbst, ob dieser Hinweis
+    uebernommen wird oder ein Widerspruch vorliegt -- hier wird nur
+    vermerkt, nie etwas Fachliches entschieden)."""
     from . import anlagen as anlagen_mod
     from . import human
+    from . import keine_rechnung
     from .store import Store
 
     out = analyse_mail(raw, cfg.extensions)
@@ -504,6 +531,9 @@ def handle_mail(raw: bytes, cfg: ImapConfig, dest: Path, store=None,
         if gespeichert is None:   # identische Rechnung schon da
             continue
         saved.append(str(gespeichert))
+        if mandant_address_id:
+            store = store or Store(data_dir())
+            store.set_datei_mandant(hashlib.sha256(att.content).hexdigest(), mandant_address_id)
         if out.anlagen:
             store = store or Store(data_dir())
             anlagen_mod.save(store, hashlib.sha256(att.content).hexdigest(), out.anlagen)
@@ -519,6 +549,22 @@ def handle_mail(raw: bytes, cfg: ImapConfig, dest: Path, store=None,
     if out.human_reason:
         if dry_run:
             to_human.append(f"(dry) {out.human_reason} <- {out.from_addr}")
+        elif out.keine_rechnung and keine_rechnung.aktiv():
+            store = store or Store(data_dir())
+            if out.anlagen:
+                # ALLE Anhaenge eindeutig Nicht-Beleg -- jeder einzeln (plus
+                # die Mail als .eml-Beilage), damit im Ordner "Keine
+                # Rechnung" sichtbar bleibt, welche Datei es war.
+                for fname, content, art in out.anlagen:
+                    rec = keine_rechnung.ablegen_datei(
+                        store, fname, content, grund=out.human_reason, beschriftung=art,
+                        beilagen={".eml": raw}, herkunft=herkunft)
+                    to_human.append(f"{rec['datei'] if rec else fname}: {out.human_reason}")
+            else:
+                name = _mail_name(out)
+                rec = keine_rechnung.ablegen_datei(
+                    store, name + ".eml", raw, grund=out.human_reason, herkunft=herkunft)
+                to_human.append(f"{rec['datei'] if rec else name}: {out.human_reason}")
         else:
             store = store or Store(data_dir())
             grund = [{"art": human.ART_MAIL, "grund": out.human_reason, "felder": []}]
@@ -562,8 +608,13 @@ def _raw_from_fetch(msg_data) -> bytes | None:
 
 # Wie viele Tage zurueck auch GELESENE Mails beruecksichtigt werden
 # (09.10.2026: wer eine Mail im Webmail oeffnet, macht sie "gelesen" --
-# die reine UNSEEN-Suche hat sie dann nie abgeholt).
-LESEFENSTER_TAGE = 7
+# die reine UNSEEN-Suche hat sie dann nie abgeholt). Einstellbar ueber
+# RECHNUNG_IMAP_TAGE (config.imap_lesefenster_tage), Standard 7.
+def _lesefenster_tage() -> int:
+    from .config import imap_lesefenster_tage
+
+    return imap_lesefenster_tage()
+
 ABGEHOLT_NAME = "abgeholt.json"
 
 
@@ -593,14 +644,108 @@ def _message_id(M, num) -> str:
     return (email.message_from_bytes(raw).get("Message-ID") or "").strip()
 
 
+def _ordner(cfg: ImapConfig) -> list[str]:
+    """Abholordner -- mehrere kommagetrennt (z.B. ``Done,Error``)."""
+    return [o.strip() for o in (cfg.source_folder or "INBOX").split(",") if o.strip()] or ["INBOX"]
+
+
+def _ordnername(zeile: bytes) -> str:
+    """Ordnername aus einer IMAP-LIST-Zeile wie ``(\\HasNoChildren) "/" Done``
+    oder ``(...) "/" "INBOX/FlexiCapture12Processing"`` (vorher blieb bei
+    nicht gequoteten Namen ``/" Done`` stehen)."""
+    t = zeile.decode("utf-8", "replace")
+    m = re.match(r'\(.*?\)\s+(?:"(?:[^"\\]|\\.)*"|NIL)\s+(.*)$', t)
+    name = (m.group(1) if m else t).strip()
+    return name[1:-1] if len(name) >= 2 and name[0] == name[-1] == '"' else name
+
+
+def _internaldate(M, num) -> str:
+    """Eingangsdatum einer Mail (IMAP INTERNALDATE) als TT.MM.JJJJ, "" wenn
+    nicht lesbar -- fuer den Zeitraum je Ordner in der Uebersicht."""
+    try:
+        typ, data = M.fetch(num, "(INTERNALDATE)")
+        t = imaplib.Internaldate2tuple(data[0]) if typ == "OK" and data and isinstance(data[0], bytes) else None
+        return time.strftime("%d.%m.%Y", t) if t else ""
+    except Exception:  # noqa: BLE001 -- nur Anzeige
+        return ""
+
+
 def _ids(M, crit: str) -> list[bytes]:
     typ, data = M.search(None, crit)
     return data[0].split() if typ == "OK" and data and data[0] else []
 
 
+def _verbinden(cfg: ImapConfig):
+    """IMAP-Verbindung mit Zeitgrenze (``RECHNUNG_IMAP_TIMEOUT``): ein
+    haengendes Postfach soll die Abholung der uebrigen nicht blockieren."""
+    from .config import imap_timeout
+
+    t = imap_timeout() or None
+    if cfg.ssl:
+        return imaplib.IMAP4_SSL(cfg.host, cfg.port, timeout=t)
+    return imaplib.IMAP4(cfg.host, cfg.port, timeout=t)
+
+
+def _fetch_ordner(M, ordner: str, cfg: ImapConfig, dest: Path, store, dry_run: bool,
+                  limit: int, mandant_address_id, bekannte: set, saved: list,
+                  to_human: list, errors: list) -> int:
+    """Einen Abholordner abarbeiten -> Anzahl verarbeiteter Mails."""
+    mails = 0
+    # Ungelesene Mails wie bisher -- dazu auch GELESENE der letzten
+    # Tage, sofern ihre Message-ID noch nicht abgeholt wurde (im Webmail
+    # geoeffnet = gelesen, war vorher unsichtbar).
+    typ, _ = M.select(ordner, readonly=cfg.nur_lesen)
+    if typ != "OK":
+        return -1   # Ordner fehlt -- Fehler erst, wenn KEINER da ist (fetch)
+    # nur lesen: ungelesen/gelesen spielt keine Rolle (fremdes Programm),
+    # es zaehlt nur das Lesefenster + "noch nicht abgeholt"
+    ungelesen = [] if cfg.nur_lesen else _ids(M, "UNSEEN")
+    seit = time.strftime("%d-%b-%Y", time.gmtime(time.time() - _lesefenster_tage() * 86400))
+    ids = list(ungelesen) + [n for n in _ids(M, f"SINCE {seit}") if n not in ungelesen]
+    from .config import imap_neueste
+
+    neueste = imap_neueste()
+    if neueste:
+        # neueste N je Ordner (hoechste Sequenznummern), egal wie alt
+        ids += [n for n in _ids(M, "ALL")[-neueste:] if n not in ids]
+    if limit:
+        ids = ids[:limit]
+    for num in ids:
+        mid = _message_id(M, num)
+        if num not in ungelesen and (not mid or mid in bekannte):
+            continue   # gelesen und schon abgeholt (bzw. nicht zuzuordnen)
+        # BODY.PEEK[] statt RFC822: Abholen allein markiert NICHT als gelesen
+        typ, msg_data = M.fetch(num, "(BODY.PEEK[])")
+        raw = _raw_from_fetch(msg_data) if typ == "OK" else None
+        if raw is None:
+            errors.append(f"Mail {num!r}: nicht abrufbar")
+            continue
+        try:
+            r = handle_mail(raw, cfg, dest, store, dry_run,
+                           mandant_address_id=mandant_address_id)
+        except OSError as e:
+            # Ergebnis nicht gesichert -> Mail bleibt ungelesen, naechster Lauf
+            errors.append(f"Mail {num!r}: {type(e).__name__}: {e}")
+            continue
+        mails += 1
+        if mid and not dry_run:
+            bekannte.add(mid)
+            _bekannte_speichern(bekannte)   # sofort: Abbruch danach verliert nichts
+        saved += r["saved"]
+        to_human += r["human"]
+        if not dry_run and not cfg.nur_lesen:
+            M.store(num, "+FLAGS", "\\Seen")
+            if cfg.done_folder:
+                M.copy(num, cfg.done_folder)
+                M.store(num, "+FLAGS", "\\Deleted")
+    if not dry_run and cfg.done_folder and not cfg.nur_lesen:
+        M.expunge()
+    return mails
+
+
 def fetch(cfg: ImapConfig | None = None, dest: Path | None = None,
           dry_run: bool = False, limit: int = 0, store=None,
-          warten: bool = True) -> FetchResult:
+          warten: bool = True, mandant_address_id: str | None = None) -> FetchResult:
     cfg = cfg or ImapConfig()
     dest = Path(dest) if dest else inbox_dir()
     if not cfg.configured:
@@ -613,52 +758,27 @@ def fetch(cfg: ImapConfig | None = None, dest: Path | None = None,
     if not warten and lock.is_locked(data_dir()):
         return FetchResult([], 0, dry_run, "Nachtlauf-Sperre aktiv (data\\nacht.lock) -- wartet")
     lock.wait_until_unlocked(data_dir())
-    M = imaplib.IMAP4_SSL(cfg.host, cfg.port) if cfg.ssl else imaplib.IMAP4(cfg.host, cfg.port)
+    M = _verbinden(cfg)
     saved: list[str] = []
     to_human: list[str] = []
     mails = 0
     errors: list[str] = []
     try:
         M.login(cfg.user, cfg.password)
-        M.select(cfg.source_folder)
-        # Ungelesene Mails wie bisher -- dazu auch GELESENE der letzten
-        # Tage, sofern ihre Message-ID noch nicht abgeholt wurde (im Webmail
-        # geoeffnet = gelesen, war vorher unsichtbar).
-        ungelesen = _ids(M, "UNSEEN")
-        seit = time.strftime("%d-%b-%Y", time.gmtime(time.time() - LESEFENSTER_TAGE * 86400))
-        ids = list(ungelesen) + [n for n in _ids(M, f"SINCE {seit}") if n not in ungelesen]
         bekannte = _bekannte_laden()
-        if limit:
-            ids = ids[:limit]
-        for num in ids:
-            mid = _message_id(M, num)
-            if num not in ungelesen and (not mid or mid in bekannte):
-                continue   # gelesen und schon abgeholt (bzw. nicht zuzuordnen)
-            # BODY.PEEK[] statt RFC822: Abholen allein markiert NICHT als gelesen
-            typ, msg_data = M.fetch(num, "(BODY.PEEK[])")
-            raw = _raw_from_fetch(msg_data) if typ == "OK" else None
-            if raw is None:
-                errors.append(f"Mail {num!r}: nicht abrufbar")
-                continue
-            try:
-                r = handle_mail(raw, cfg, dest, store, dry_run)
-            except OSError as e:
-                # Ergebnis nicht gesichert -> Mail bleibt ungelesen, naechster Lauf
-                errors.append(f"Mail {num!r}: {type(e).__name__}: {e}")
-                continue
-            mails += 1
-            if mid and not dry_run:
-                bekannte.add(mid)
-                _bekannte_speichern(bekannte)   # sofort: Abbruch danach verliert nichts
-            saved += r["saved"]
-            to_human += r["human"]
-            if not dry_run:
-                M.store(num, "+FLAGS", "\\Seen")
-                if cfg.done_folder:
-                    M.copy(num, cfg.done_folder)
-                    M.store(num, "+FLAGS", "\\Deleted")
-        if not dry_run and cfg.done_folder:
-            M.expunge()
+        # Fehlende Ordner nur melden, wenn gar keiner da ist: dieselbe
+        # Einstellung (z.B. Done,Error) gilt fuer alle Postfaecher, auch fuer
+        # Test-/Einzelpostfaecher ohne FlexiCapture (Laptop 05.11.2026).
+        fehlend = []
+        for ordner in _ordner(cfg):
+            n = _fetch_ordner(M, ordner, cfg, dest, store, dry_run, limit,
+                              mandant_address_id, bekannte, saved, to_human, errors)
+            if n < 0:
+                fehlend.append(ordner)
+            else:
+                mails += n
+        if fehlend and len(fehlend) == len(_ordner(cfg)):
+            errors.append("Ordner nicht vorhanden: " + ", ".join(fehlend))
     except (imaplib.IMAP4.error, OSError) as e:
         return FetchResult(saved, mails, dry_run, f"{type(e).__name__}: {e}", to_human)
     finally:
@@ -678,7 +798,7 @@ def check_connection(cfg: ImapConfig | None = None) -> dict:
     if not cfg.configured:
         return {"ok": None, "detail": "IMAP nicht konfiguriert (RECHNUNG_IMAP_*)", "folders": []}
     try:
-        M = imaplib.IMAP4_SSL(cfg.host, cfg.port) if cfg.ssl else imaplib.IMAP4(cfg.host, cfg.port)
+        M = _verbinden(cfg)
     except OSError as e:
         return {"ok": False, "detail": f"{type(e).__name__}: {e}", "folders": []}
     try:
@@ -686,11 +806,12 @@ def check_connection(cfg: ImapConfig | None = None) -> dict:
         typ, raw = M.list()
         folders = ([f.decode("utf-8", "replace") for f in raw]
                   if typ == "OK" and raw and raw[0] else [])
-        M.select(cfg.source_folder, readonly=True)
+        erster = _ordner(cfg)[0]
+        M.select(erster, readonly=True)
         typ2, data = M.search(None, "UNSEEN")
         unseen = len(data[0].split()) if typ2 == "OK" and data and data[0] else 0
         return {"ok": True, "detail": f"{len(folders)} Ordner, {unseen} ungelesen in "
-               f"'{cfg.source_folder}'", "folders": folders, "unseen": unseen}
+               f"'{erster}'", "folders": folders, "unseen": unseen}
     except (imaplib.IMAP4.error, OSError) as e:
         return {"ok": False, "detail": f"{type(e).__name__}: {e}", "folders": []}
     finally:
@@ -709,30 +830,45 @@ def bericht(cfg: ImapConfig | None = None, dest: Path | None = None, anzahl: int
 
     cfg = cfg or ImapConfig()
     dest = Path(dest) if dest else inbox_dir()
-    out: dict = {"ok": False, "ordner": cfg.source_folder, "postfach": cfg.user,
+    out: dict = {"ok": False, "ordner": ", ".join(_ordner(cfg)), "nur_lesen": cfg.nur_lesen, "postfach": cfg.user,
                  "nachtsperre": lock.is_locked(data_dir()), "mails": [], "fehler": ""}
     if not cfg.configured:
         out["fehler"] = "IMAP nicht konfiguriert (RECHNUNG_IMAP_*)"
         return out
     bekannte = _bekannte_laden()
-    grenze = time.time() - LESEFENSTER_TAGE * 86400
+    grenze = time.time() - _lesefenster_tage() * 86400
     try:
-        M = imaplib.IMAP4_SSL(cfg.host, cfg.port) if cfg.ssl else imaplib.IMAP4(cfg.host, cfg.port)
+        M = _verbinden(cfg)
     except OSError as e:
         out["fehler"] = f"{type(e).__name__}: {e}"
         return out
     try:
         M.login(cfg.user, cfg.password)
         typ, raw_list = M.list()
-        out["alle_ordner"] = ([f.decode("utf-8", "replace").rsplit(' "', 1)[-1].strip('"')
-                               for f in raw_list] if typ == "OK" and raw_list and raw_list[0] else [])
-        typ, _ = M.select(cfg.source_folder, readonly=True)
-        if typ != "OK":
-            out["fehler"] = f"Ordner '{cfg.source_folder}' nicht vorhanden"
+        out["alle_ordner"] = ([_ordnername(f) for f in raw_list if isinstance(f, bytes)]
+                              if typ == "OK" and raw_list and raw_list[0] else [])
+        liste: list[tuple[str, bytes]] = []
+        out["je_ordner"] = {}
+        for ordner in _ordner(cfg):
+            typ, _ = M.select(ordner, readonly=True)
+            if typ != "OK":
+                out.setdefault("fehlende_ordner", []).append(ordner)
+                continue
+            alle = _ids(M, "ALL")
+            out["je_ordner"][ordner] = len(alle)
+            if alle:
+                out.setdefault("zeitraum", {})[ordner] = [_internaldate(M, alle[0]),
+                                                         _internaldate(M, alle[-1])]
+            liste += [(ordner, n) for n in reversed(alle[-anzahl:])]
+        if not out["je_ordner"]:
+            out["fehler"] = "Ordner nicht vorhanden: " + ", ".join(out.get("fehlende_ordner", []))
             return out
-        alle = _ids(M, "ALL")
-        out["anzahl_im_ordner"] = len(alle)
-        for num in reversed(alle[-anzahl:]):
+        out["anzahl_im_ordner"] = sum(out["je_ordner"].values())
+        aktuell = None
+        for ordner, num in liste:
+            if ordner != aktuell:
+                M.select(ordner, readonly=True)
+                aktuell = ordner
             typ, data = M.fetch(num, "(FLAGS BODY.PEEK[])")
             raw = _raw_from_fetch(data) if typ == "OK" else None
             if raw is None:
@@ -751,9 +887,10 @@ def bericht(cfg: ImapConfig | None = None, dest: Path | None = None, anzahl: int
                     else "neu"} for x in a.attachments]
             if a.message_id and a.message_id in bekannte:
                 aktion = "schon abgeholt"
-            elif gelesen and ts < grenze:
-                aktion = f"wird NICHT abgeholt: gelesen und älter als {LESEFENSTER_TAGE} Tage"
-            elif not a.message_id and gelesen:
+            elif (gelesen or cfg.nur_lesen) and ts < grenze:
+                aktion = (f"wird NICHT abgeholt: gelesen und älter als {_lesefenster_tage()} Tage "
+                          "(RECHNUNG_IMAP_TAGE)")
+            elif not a.message_id and (gelesen or cfg.nur_lesen):
                 aktion = "wird NICHT abgeholt: gelesen und ohne Message-ID"
             elif not a.attachments and not a.human_items:
                 aktion = "wird abgeholt → Menschliche Bearbeitung (kein Rechnungsanhang)"
@@ -762,7 +899,7 @@ def bericht(cfg: ImapConfig | None = None, dest: Path | None = None, anzahl: int
             else:
                 aktion = "wird beim nächsten Prüfen abgeholt"
             out["mails"].append({
-                "datum": datum, "von": a.from_addr, "betreff": a.subject, "gelesen": gelesen,
+                "ordner": ordner, "datum": datum, "von": a.from_addr, "betreff": a.subject, "gelesen": gelesen,
                 "anhaenge": anh, "ignoriert": list(a.ignored),
                 "an_mensch": [f"{n}: {g}" for n, _c, g in a.human_items], "aktion": aktion})
         out["ok"] = True
