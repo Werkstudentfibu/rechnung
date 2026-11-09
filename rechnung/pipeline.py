@@ -646,7 +646,17 @@ def _auto_draft_pdf(res: "Result", doc, store: Store, use_llm: bool,
     belegt findet (``_enrich_draft``; semantic.py ``_SUPPLIER_KEYS``,
     Beleg-Pflicht dort schon eingebaut). Anschrift/Bank/BIC/Steuernummer/
     Kontakt kommen ebenso nachtraeglich aus der KI-Stufe (``_enrich_draft``),
-    nur belegte Teile -- ohne KI bleiben sie leer statt geraten."""
+    nur belegte Teile -- ohne KI bleiben sie leer statt geraten.
+
+    Schluessel/Platzhalter des Entwurfs (``_draft_id_base``/
+    ``_draft_placeholder_name``): erste USt-IdNr, sonst erste IBAN
+    (``neu-<kennung>``, "Unbekannt (<kennung>)"); steht beides nicht auf
+    der Rechnung, ``neu`` (bzw. ``neu-2`` ...) und "Unbekannt" -- so ein
+    Entwurf hat keine harte Kennung und kann ueber den Index nie weitere
+    Rechnungen an sich binden. Als USt-IdNr gelten nur echte Formate
+    (``textnorm.find_ustids``, streng seit 09.11.2026): eine BIC wie
+    COKSDE33XXX darf nie Schluessel werden, sonst buendelt ein Entwurf
+    Rechnungen aller Kunden derselben Sparkasse."""
     ids = extract_identifiers(doc)
     ibans = sorted(ids["ibans"] | find_ibans(doc.text))
     ustids = sorted(ids["ustids"])
