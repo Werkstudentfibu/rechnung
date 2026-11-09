@@ -361,3 +361,12 @@ def test_waehrung_eur_ist_durch_eurozeichen_belegt():
     ab = lehrer.abgleichen("Total CHF 1'190.00", felder, {"waehrung": "EUR"},
                            {"felder": {"waehrung": {"wert": "CHF", "sicher": True}}})
     assert ab.korrekturen.get("waehrung") == "CHF"
+
+
+def test_waehrungszeichen_von_claude_wird_zum_code():
+    """Proberunde 09.11.2026: Claude antwortete mit '€' statt 'EUR'."""
+    felder = {"waehrung": "text"}
+    antwort = {"felder": {"waehrung": {"wert": "€", "sicher": True}}}
+    ab = lehrer.abgleichen("Summe 1.190,00 €", felder, {"waehrung": "EUR"}, antwort)
+    assert "waehrung" not in ab.unsicher and ab.werte["waehrung"] == "EUR"
+    assert "waehrung" not in ab.korrekturen

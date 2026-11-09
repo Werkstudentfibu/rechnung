@@ -401,11 +401,16 @@ _WAEHRUNG_BELEGE = {
     "GBP": ("gbp", "\u00a3", "pfund"),
 }
 
+_WAEHRUNG_ZEICHEN = {"€": "EUR", "euro": "EUR", "fr.": "CHF", "sfr": "CHF",
+                     "$": "USD", "£": "GBP"}
+
 
 def _waehrung_belegt(text: str, wert) -> str | None:
     """ISO-Code der Waehrung, wenn Code oder Zeichen im Text stehen
     ("EUR" ist auch durch "\u20ac" belegt); sonst ``None``."""
-    code = str(wert or "").strip().upper()
+    roh = str(wert or "").strip()
+    # Claude antwortet manchmal mit dem Zeichen statt dem Code ("€")
+    code = _WAEHRUNG_ZEICHEN.get(roh.lower(), roh.upper())
     belege = _WAEHRUNG_BELEGE.get(code)
     if not belege:
         return None
