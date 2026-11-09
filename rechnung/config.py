@@ -183,6 +183,25 @@ def gruendlich() -> bool:
     return _b("RECHNUNG_GRUENDLICH", True)
 
 
+def namenserkennung() -> float | None:
+    """Lieferanten-Erkennung ueber den Namen (identify.py, Aaron 09.11.2026):
+    Lieferanten aus dem Excel-Import haben weder USt-IdNr noch IBAN. Steht
+    von allen Lieferanten der Bibliothek GENAU EIN Name als ganze Wortfolge
+    auf der Rechnung, gilt er als erkannt (Score 0.2 statt Schwelle 0.5);
+    bei zwei Namen oder keinem bleibt es beim bisherigen Verhalten (Mensch).
+    Standard AN. ``RECHNUNG_NAMENSERKENNUNG=0`` schaltet ab, eine Zahl setzt
+    die Schwelle. -> Schwelle oder ``None`` (aus)."""
+    v = os.environ.get("RECHNUNG_NAMENSERKENNUNG", "1").strip().lower()
+    if v in ("0", "", "nein", "false", "aus", "off", "no"):
+        return None
+    if v in ("1", "ja", "true", "an", "on", "yes"):
+        return 0.2
+    try:
+        return float(v.replace(",", "."))
+    except ValueError:
+        return 0.2
+
+
 def gruendlich_seiten() -> int:
     """Bis zu dieser Seitenzahl wird im gruendlichen Modus ein Scan VOLLSTAENDIG
     erkannt und die KI liest den ganzen Text (``RECHNUNG_GRUENDLICH_SEITEN``,

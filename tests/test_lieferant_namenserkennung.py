@@ -91,7 +91,10 @@ def test_library_name_as_substring_of_invoice_name_still_only_scores_name_part(t
 
 # ---- Teil 1, Zusatzfrage: welche Lieferantenfelder fehlen bei einem
 # Nicht-Treffer, weil sie nur aus der Bibliothek kaemen? --------------------
-def test_no_match_means_library_master_fields_are_never_merged_in(tmp_path: Path):
+def test_no_match_means_library_master_fields_are_never_merged_in(tmp_path: Path, monkeypatch):
+    # Seit 09.11.2026 wuerde die Namens-Erkennung (config.namenserkennung)
+    # diesen Fall treffen -- hier geht es um das Verhalten OHNE Treffer.
+    monkeypatch.setenv("RECHNUNG_NAMENSERKENNUNG", "0")
     """Erklaert Aarons zweite Beobachtung ("die Daten sind nicht
     vollstaendig"): IBAN/USt-IdNr/Adresse eines Lieferanten kommen NUR per
     ``pipeline._inject_library_fields`` aus der Bibliothek, und die wird nur

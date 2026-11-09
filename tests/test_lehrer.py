@@ -265,6 +265,26 @@ def test_cli_ohne_claude_code(monkeypatch):
     assert "nicht gefunden" in lehrer.bereit()
 
 
+def test_lokale_ki_bleibt_beim_anlernen_aus(tmp_path, monkeypatch):
+    """Claude ist der Pruefer -- die lokale KI (Ollama) wuerde je Rechnung nur
+    Minuten kosten. Jeder Pipeline-Lauf des Lehrers geht mit use_llm=False."""
+    from rechnung import pipeline
+    gesehen = []
+    echt = pipeline.process
+
+    def mitgeschnitten(path, store, use_llm=True, **kw):
+        gesehen.append(use_llm)
+        return echt(path, store, use_llm=use_llm, **kw)
+
+    monkeypatch.setattr(pipeline, "process", mitgeschnitten)
+    store, ordner, src = _store(tmp_path)
+    r = lehrer.anlernen_datei(store, src, post=_claude(RICHTIG))
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT, r
+    assert gesehen and all(u is False for u in gesehen), gesehen
+    monkeypatch.setenv("RECHNUNG_CLAUDE_LOKALE_KI", "1")
+    assert lehrer.lokale_ki()
+
+
 def test_rechnung_im_menschordner_bleibt_erhalten(tmp_path):
     """Lehrer arbeitet direkt im Ordner "Menschliche Bearbeitung": eine von
     Claude bestaetigte Rechnung darf dort NICHT geloescht werden."""
@@ -283,3 +303,19 @@ def test_rechnung_im_menschordner_bleibt_erhalten(tmp_path):
     calls = []
     lehrer.anlernen(store, kopie.parent, post=_claude(RICHTIG, calls=calls))
     assert not calls
+
+
+def test_zeitbudget_beendet_runde_zwischen_zwei_rechnungen(tmp_path):
+    """Hintergrundrunde (windows/anlernen.cmd --minuten): nach Ablauf des
+    Budgets wird keine weitere Rechnung angefangen, die laufende aber zu Ende
+    gebracht -- kein Abschuss durch die Aufgabenplanung mitten in einer
+    Rechnung."""
+    store, ordner, src = _store(tmp_path)
+    make_invoice(ordner / "b.pdf", rechnungsnr="RE-2026-00043")
+    calls = []
+    res = lehrer.anlernen(store, ordner, post=_claude(RICHTIG, calls=calls), zeitbudget_s=1e-9)
+    assert len(res) == 1 and res[0]["datei"] == "a.pdf"
+    assert len(calls) == 1
+    # ohne Budget: beide
+    res = lehrer.anlernen(store, ordner, post=_claude(RICHTIG, calls=calls))
+    assert {r["datei"] for r in res} == {"a.pdf", "b.pdf"}

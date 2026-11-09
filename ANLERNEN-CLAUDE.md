@@ -14,6 +14,7 @@ RECHNUNG_CLAUDE_API_KEY=sk-ant-...        # aus der Claude Console (Firmenkonto)
 # RECHNUNG_CLAUDE_MODELL=claude-sonnet-5-5
 # RECHNUNG_CLAUDE_STICHPROBE=10           # % Kontrolle durch einen Menschen
 # RECHNUNG_CLAUDE_TIMEOUT=120
+# RECHNUNG_CLAUDE_LOKALE_KI=1          # lokale KI (Ollama) beim Anlernen mitlaufen lassen
 ```
 
 ### Alternativ: über Claude Code statt API-Schlüssel
@@ -48,6 +49,7 @@ Voraussetzungen und Hinweise:
 ```
 python -m rechnung.lehrer --data <data-Ordner> <ordner-mit-uebungsrechnungen>
 python -m rechnung.lehrer --data <data-Ordner> <ordner> --limit 10   # erst mal 10
+python -m rechnung.lehrer --data <data-Ordner> <ordner> --minuten 50 # Zeitbudget
 python -m rechnung.lehrer --data <data-Ordner> --bilanz              # Stand
 ```
 
@@ -63,12 +65,17 @@ powershell -ExecutionPolicy Bypass -File C:\Rechnung\app\windows\anlernen-einric
 ```
 
 Das legt die Aufgabe „Rechnung Anlernen“ an: Montag bis Freitag ab 08:00,
-neun Stunden lang alle 30 Minuten eine Runde (`windows\anlernen.cmd`), ohne
+neun Stunden lang alle 10 Minuten eine Runde (`windows\anlernen.cmd`), ohne
 sichtbares Fenster, nur solange du angemeldet bist. Je Runde höchstens
-`RECHNUNG_CLAUDE_LIMIT` Rechnungen (Standard 10) aus `RECHNUNG_UEBUNG`
-(Standard `C:\Rechnung\uebung`). Bereits von Claude bestätigte Rechnungen
-werden übersprungen und kosten nichts. Ohne `RECHNUNG_CLAUDE_LEHRER=1` tut
-die Aufgabe nichts; läuft gerade der Nachtlauf, setzt sie eine Runde aus.
+`RECHNUNG_CLAUDE_LIMIT` Rechnungen (Standard 40) und höchstens
+`RECHNUNG_CLAUDE_MINUTEN` Minuten (Standard 50; danach endet die Runde
+zwischen zwei Rechnungen) aus `RECHNUNG_UEBUNG` (Standard
+`C:\Rechnung\uebung`). Läuft eine Runde noch, fällt der nächste Start aus,
+so arbeitet der Lehrer praktisch durch, solange etwas zu tun ist. Bereits
+von Claude bestätigte Rechnungen werden übersprungen und kosten nichts.
+Ohne `RECHNUNG_CLAUDE_LEHRER=1` tut die Aufgabe nichts; läuft gerade der
+Nachtlauf, setzt sie eine Runde aus. Nach einer Änderung der Zeiten das
+Einrichtungsskript erneut ausführen, erst dann gilt der neue Takt.
 
 Protokoll: `C:\Rechnung\data\anlernen.log`. Sofort testen:
 `Start-ScheduledTask -TaskName 'Rechnung Anlernen'`. Entfernen: dasselbe
@@ -76,7 +83,12 @@ Skript mit `-Entfernen`.
 
 ## Was passiert
 
-Je Rechnung liest das Programm wie immer aus. Claude bekommt das Original und
+Je Rechnung liest das Programm wie immer aus – nur **ohne die lokale KI**
+(Ollama): Claude ist hier der Prüfer, und die lokale KI würde auf dem Laptop
+je Rechnung bis zu zwei Minuten kosten, auch für Rechnungen, die danach nur
+übersprungen werden. Der Schattenbetrieb misst in der Anlernphase also das
+Programm ohne KI; `RECHNUNG_CLAUDE_LOKALE_KI=1` schaltet sie wieder dazu.
+Claude bekommt das Original und
 die Werte des Programms, nennt je Feld den richtigen Wert (mit „sicher ja/nein“),
 und das Programm gleicht ab. Abweichungen werden als Korrektur gespeichert
 (Operator `claude`, im Audit und im Fehlerbericht sichtbar), die Rechnung wird

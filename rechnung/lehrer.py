@@ -4,7 +4,10 @@ Ersetzt in der Anlernphase den Menschen beim Pruefen/Korrigieren/Bestaetigen
 von UEBUNGS-Rechnungen, damit die Vorlagen (Stufe 1, learn.py) schneller
 reifen. Ablauf je Rechnung:
 
-1. Das Programm liest die Rechnung wie immer aus (``pipeline.process``).
+1. Das Programm liest die Rechnung wie immer aus (``pipeline.process``),
+   aber ohne die lokale KI (Ollama): Claude ist hier der Pruefer, und die
+   lokale KI kostet auf dem Laptop je Rechnung bis zu zwei Minuten
+   (``RECHNUNG_CLAUDE_LOKALE_KI=1`` schaltet sie wieder dazu).
 2. Claude bekommt das Original (PDF/Bild) und die Werte des Programms und
    gibt je Feld den richtigen Wert zurueck, samt "sicher ja/nein".
 3. Gegen Halluzination gilt dieselbe Regel wie fuer die lokale KI
@@ -155,6 +158,18 @@ def timeout_s() -> int:
         return max(10, int(os.environ.get("RECHNUNG_CLAUDE_TIMEOUT", "120")))
     except ValueError:
         return 120
+
+
+def lokale_ki() -> bool:
+    """Lokale KI (Ollama, semantic.py) beim Anlernen mitlaufen lassen?
+    Standard NEIN: Claude prueft ohnehin jedes Feld, die lokale KI kostet
+    auf einem Laptop ohne Grafikkarte je Rechnung bis zu
+    ``RECHNUNG_LLM_TIMEOUT`` Sekunden -- auch fuer Rechnungen, die danach
+    nur uebersprungen werden (Lieferant noch Entwurf) -- und ihre Werte
+    gelten ohnehin als unsicher. Der Schattenbetrieb misst dann das
+    Programm ohne KI. ``RECHNUNG_CLAUDE_LOKALE_KI=1`` schaltet sie zu."""
+    return os.environ.get("RECHNUNG_CLAUDE_LOKALE_KI", "").strip().lower() in (
+        "1", "true", "yes", "on", "ja")
 
 
 def stichprobe(sha256: str) -> bool:
@@ -483,7 +498,7 @@ def _bestaetigen(store, path: Path, res, doc):
             tpl.confirmations += 1
             store.save_template(tpl)
             if tpl.secured != was_secured:
-                res = process(path, store)
+                res = process(path, store, use_llm=lokale_ki())
     shadow.record(store, res, OPERATOR)
     eventlog.record(store, res, OPERATOR)
     gelernt = learn.learn_from_confirmed(_LernStore(store, res.sha256), res, doc, OPERATOR)
@@ -542,7 +557,7 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
                    gruende=[f"{MAX_FEHLVERSUCHE}x gescheitert -- siehe lehrer.jsonl"])
         return rec
 
-    res = process(path, store)
+    res = process(path, store, use_llm=lokale_ki())
     if res.aborted:
         rec.update(ergebnis=ERG_FEHLER, gruende=list(res.hold_reasons or ["abgebrochen"]))
         _protokoll(store, rec)
@@ -600,7 +615,7 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
                                    file=path.name, template_id=res.template_id,
                                    quelle_vorher=quelle)
     if ab.korrekturen:
-        res = process(path, store)
+        res = process(path, store, use_llm=lokale_ki())
 
     gruende = [f"{n}: {g}" for n, g in sorted(ab.unsicher.items())]
     if gruende:
@@ -623,13 +638,21 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
 
 
 def anlernen(store, ordner: str | Path, *, limit: int = 0, post=None,
-             fortschritt=None) -> list[dict]:
-    """Alle Rechnungen eines Ordners nacheinander anlernen."""
+             fortschritt=None, zeitbudget_s: float = 0.0) -> list[dict]:
+    """Alle Rechnungen eines Ordners nacheinander anlernen. ``limit``:
+    hoechstens so viele nicht uebersprungene Rechnungen; ``zeitbudget_s``:
+    nach Ablauf keine weitere Rechnung mehr anfangen (0 = unbegrenzt) --
+    so endet eine Hintergrundrunde (windows/anlernen.cmd) sauber zwischen
+    zwei Rechnungen, statt von der Aufgabenplanung abgeschossen zu werden."""
     from .pipeline import invoice_files
 
+    start = time.monotonic()
     out = []
     for p in invoice_files(ordner):
         if limit and len([r for r in out if r["ergebnis"] != ERG_UEBERSPRUNGEN]) >= limit:
+            break
+        # die erste Rechnung faengt immer an, danach zaehlt das Budget
+        if zeitbudget_s and out and time.monotonic() - start >= zeitbudget_s:
             break
         r = anlernen_datei(store, p, post=post)
         out.append(r)
@@ -715,7 +738,10 @@ def main(argv=None) -> int:
                                 description="Anlernphase: Claude prueft Uebungsrechnungen")
     p.add_argument("ordner", nargs="?", help="Ordner mit Uebungsrechnungen")
     p.add_argument("--data", default=os.environ.get("RECHNUNG_DATA", "./data"))
-    p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--limit", type=int, default=0,
+                   help="hoechstens so viele Rechnungen je Lauf (0 = alle)")
+    p.add_argument("--minuten", type=float, default=0,
+                   help="nach so vielen Minuten keine weitere Rechnung anfangen (0 = aus)")
     p.add_argument("--bilanz", action="store_true")
     p.add_argument("--json", action="store_true")
     a = p.parse_args(argv)
@@ -761,7 +787,8 @@ def main(argv=None) -> int:
             extra += "  (" + "; ".join(r["gruende"]) + ")"
         print(f"[{r['ergebnis']:13s}] {r['datei']}{extra}")
 
-    res = anlernen(store, a.ordner, limit=a.limit, fortschritt=_zeige)
+    res = anlernen(store, a.ordner, limit=a.limit, fortschritt=_zeige,
+                   zeitbudget_s=max(0.0, a.minuten) * 60)
     if a.json:
         print(json.dumps(res, indent=2, ensure_ascii=False, default=str))
         return 0
