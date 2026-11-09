@@ -447,8 +447,11 @@ _DATUM_JAHRE_ZURUECK = 2
 _DATUM_TAGE_VORAUS = 1
 
 
-def _datum_plausibel(iso: str) -> str | None:
-    """``None`` = plausibel, sonst der Ablehnungsgrund."""
+def _datum_plausibel(iso: str, jahre_zurueck: int = _DATUM_JAHRE_ZURUECK) -> str | None:
+    """``None`` = plausibel, sonst der Ablehnungsgrund. ``jahre_zurueck``:
+    wie weit ein Datum zurueckliegen darf (Standard 2 fuer die lokale KI;
+    der Lehrer uebergibt 10 wie validate.check_date, weil Uebungs-
+    rechnungen oft Jahre alt sind)."""
     try:
         d = date.fromisoformat(iso)
     except ValueError:
@@ -457,15 +460,16 @@ def _datum_plausibel(iso: str) -> str | None:
     if d > heute + timedelta(days=_DATUM_TAGE_VORAUS):
         return f"Datum {iso} liegt in der Zukunft"
     try:
-        grenze = heute.replace(year=heute.year - _DATUM_JAHRE_ZURUECK)
+        grenze = heute.replace(year=heute.year - jahre_zurueck)
     except ValueError:  # 29. Februar
-        grenze = heute.replace(year=heute.year - _DATUM_JAHRE_ZURUECK, day=28)
+        grenze = heute.replace(year=heute.year - jahre_zurueck, day=28)
     if d < grenze:
-        return f"Datum {iso} liegt mehr als {_DATUM_JAHRE_ZURUECK} Jahre zurueck"
+        return f"Datum {iso} liegt mehr als {jahre_zurueck} Jahre zurueck"
     return None
 
 
-def _check_value(text: str, name: str, val, vtype: str) -> tuple[object, str]:
+def _check_value(text: str, name: str, val, vtype: str,
+                 datum_jahre_zurueck: int = _DATUM_JAHRE_ZURUECK) -> tuple[object, str]:
     """-> (geparster Wert, "") oder (None, Grund fuer das Verwerfen)."""
     if isinstance(val, bool) or not isinstance(val, (str, int, float)):
         return None, "Schema: kein Text/Zahl"
@@ -476,7 +480,7 @@ def _check_value(text: str, name: str, val, vtype: str) -> tuple[object, str]:
         # coerce() hat nur einen Teil uebernommen ("RE 2026 1" -> "RE")
         return None, "Nummer nicht eindeutig lesbar"
     if vtype == "date":
-        grund = _datum_plausibel(value)
+        grund = _datum_plausibel(value, datum_jahre_zurueck)
         if grund:
             return None, grund
     if not verify_in_text(text, value, vtype):
