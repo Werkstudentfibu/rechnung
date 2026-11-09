@@ -1,7 +1,9 @@
 <#
   Legt die Windows-Aufgabe "Rechnung Anlernen" an (ANLERNEN-CLAUDE.md):
-  Montag bis Freitag von 08:00 bis 17:00 alle 30 Minuten eine kleine
-  Anlern-Runde mit Claude (windows\anlernen.cmd), ohne sichtbares Fenster.
+  Montag bis Freitag von 08:00 bis 17:00 alle 10 Minuten eine Anlern-Runde
+  mit Claude (windows\anlernen.cmd), ohne sichtbares Fenster. Laeuft eine
+  Runde noch (bis RECHNUNG_CLAUDE_MINUTEN, Standard 50 min), faellt der
+  naechste Start aus -- der Lehrer arbeitet so praktisch durch.
   Laeuft nur, wenn der Benutzer angemeldet ist -- keine Adminrechte noetig.
 
   Aufruf (PowerShell):
@@ -13,7 +15,7 @@ param(
     [string]$Ziel = "C:\Rechnung",
     [string]$Von = "08:00",
     [int]$Stunden = 9,
-    [int]$AlleMinuten = 30,
+    [int]$AlleMinuten = 10,
     [switch]$Entfernen
 )
 $ErrorActionPreference = "Stop"
@@ -48,7 +50,7 @@ $Trigger.Repetition = $Wiederholung.Repetition
 
 $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 25)
+    -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 
 Register-ScheduledTask -TaskName $Name -Action $Action -Trigger $Trigger -Settings $Settings `
     -Description "Anlernen mit Claude (ANLERNEN-CLAUDE.md). Tut nichts ohne RECHNUNG_CLAUDE_LEHRER=1." `
