@@ -234,15 +234,17 @@ def record_keine_rechnung(store, rec: dict, aktion: str, operator: str = "") -> 
 
 
 def record_supplier(store, supplier_id: str, supplier_name: str, aktion: str,
-                    operator: str = "") -> dict:
-    """Lieferanten-Entwurf bestaetigt/verworfen (``aktion``:
-    "bestaetigt"/"verworfen")."""
+                    operator: str = "", detail: dict | None = None) -> dict:
+    """Lieferanten-Entwurf bestaetigt/verworfen/uebernommen (``aktion``:
+    "bestaetigt"/"verworfen"/"uebernommen" -- bei "uebernommen" ist
+    ``supplier_id`` das Ziel, ``detail`` nennt den Entwurf)."""
     ev = {
         "type": TYPE_SUPPLIER,
         "aktion": aktion,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "supplier_id": supplier_id,
         "supplier_name": supplier_name,
+        **(detail or {}),
         "operator": operator or "?",
     }
     store.event_append(ev)

@@ -263,6 +263,11 @@ class PositionsmodusPost(BaseModel):
     bezeichnung: str = ""
 
 
+class UebernehmenPost(BaseModel):
+    # Entwurf in bestehenden Lieferanten uebernehmen (entwurf_uebernahme.py)
+    ziel_id: str
+
+
 class AddressPost(BaseModel):
     id: str
     name: str = ""
@@ -2076,6 +2081,27 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         except ValueError as e:
             raise HTTPException(409, str(e))
         return JSONResponse({"ok": True})
+
+    @app.post("/api/suppliers/{supplier_id}/uebernehmen")
+    def uebernehmen_supplier_ep(supplier_id: str, body: UebernehmenPost) -> JSONResponse:
+        """Lieferanten-Entwurf in einen bestehenden, bestaetigten Lieferanten
+        uebernehmen (entwurf_uebernahme.py) -- statt ihn als eigenen
+        Lieferanten zu bestaetigen (Dublette zum Excel-Import). Nur auf
+        bewussten Klick, nie automatisch."""
+        from .. import entwurf_uebernahme
+        from ..config import operator as _operator
+
+        try:
+            erg = entwurf_uebernahme.uebernehmen(store, supplier_id, body.ziel_id, _operator())
+        except KeyError as e:
+            raise HTTPException(404, str(e.args[0] if e.args else e))
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        liste.vergessen(supplier_id)
+        return JSONResponse({"ok": True, "supplier": erg["ziel"].to_dict(),
+                             "uebernommen": erg["uebernommen"],
+                             "umgehaengt": erg["umgehaengt"],
+                             "vorlagen": [{"alt": a, "neu": n} for a, n in erg["vorlagen"]]})
 
     @app.delete("/api/templates/{template_id}")
     def delete_template_ep(template_id: str) -> JSONResponse:
