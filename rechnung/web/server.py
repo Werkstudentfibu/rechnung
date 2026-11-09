@@ -38,6 +38,8 @@ from .. import vorlernen
 from ..billing import BillingAddress
 from ..guard import Guard
 from ..ocr import IMAGE_SUFFIXES
+from ..config import namenserkennung as _namenserkennung
+from ..identify import empfaenger_namen as _empfaenger_namen
 from ..identify import (FIXED_FIELD_TYPES, POSITIONSMODI, POSITIONSMODUS_EINE_POSITION,
                         POSITIONSMODUS_EINZELN, Supplier,
                         identify, supplier_from_doc)
@@ -995,7 +997,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         suggestion = supplier_from_doc(doc, "", "").to_dict()
         addr_match, address_id, has_addr = _address_scope(doc, override=address)
         match = identify(doc, store.suppliers(), index=store.supplier_index(address_id),
-                         address_id=address_id, has_addresses=has_addr)
+                         address_id=address_id, has_addresses=has_addr,
+                         einzelkandidat_namensschwelle=_namenserkennung(),
+                         empfaenger=_empfaenger_namen(store.addresses()))
         current = {}
         tid = None
         # Vorbelegt mit der erkannten/uebersteuerten Adresse, damit das
@@ -1715,7 +1719,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             doc = _load(path)
             _addr_match, address_id, has_addr = _address_scope(doc)
             match = identify(doc, store.suppliers(), index=store.supplier_index(address_id),
-                             address_id=address_id, has_addresses=has_addr)
+                             address_id=address_id, has_addresses=has_addr,
+                         einzelkandidat_namensschwelle=_namenserkennung(),
+                         empfaenger=_empfaenger_namen(store.addresses()))
             if match:
                 sup_id, sup_name = match[0].id, match[0].name
         except HTTPException:
@@ -1748,7 +1754,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             doc = _load(path)
             _addr_match, address_id, has_addr = _address_scope(doc)
             match = identify(doc, store.suppliers(), index=store.supplier_index(address_id),
-                             address_id=address_id, has_addresses=has_addr)
+                             address_id=address_id, has_addresses=has_addr,
+                         einzelkandidat_namensschwelle=_namenserkennung(),
+                         empfaenger=_empfaenger_namen(store.addresses()))
             if match:
                 sup_id, sup_name = match[0].id, match[0].name
         except HTTPException:
@@ -1797,7 +1805,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             doc = _load(path)
             _addr_match, address_id, has_addr = _address_scope(doc)
             match = identify(doc, store.suppliers(), index=store.supplier_index(address_id),
-                             address_id=address_id, has_addresses=has_addr)
+                             address_id=address_id, has_addresses=has_addr,
+                         einzelkandidat_namensschwelle=_namenserkennung(),
+                         empfaenger=_empfaenger_namen(store.addresses()))
             if match:
                 sup_id, sup_name = match[0].id, match[0].name
         except HTTPException:
@@ -1850,7 +1860,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             doc = _load(path)
             _addr_match, address_id, has_addr = _address_scope(doc)
             match = identify(doc, store.suppliers(), index=store.supplier_index(address_id),
-                             address_id=address_id, has_addresses=has_addr)
+                             address_id=address_id, has_addresses=has_addr,
+                         einzelkandidat_namensschwelle=_namenserkennung(),
+                         empfaenger=_empfaenger_namen(store.addresses()))
             if match:
                 sup_id, sup_name = match[0].id, match[0].name
         except HTTPException:
