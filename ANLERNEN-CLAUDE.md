@@ -48,6 +48,7 @@ Voraussetzungen und Hinweise:
 ```
 python -m rechnung.lehrer --data <data-Ordner> <ordner-mit-uebungsrechnungen>
 python -m rechnung.lehrer --data <data-Ordner> <ordner> --limit 10   # erst mal 10
+python -m rechnung.lehrer --data <data-Ordner> <ordner> --minuten 50 # Zeitbudget
 python -m rechnung.lehrer --data <data-Ordner> --bilanz              # Stand
 ```
 
@@ -63,12 +64,17 @@ powershell -ExecutionPolicy Bypass -File C:\Rechnung\app\windows\anlernen-einric
 ```
 
 Das legt die Aufgabe „Rechnung Anlernen“ an: Montag bis Freitag ab 08:00,
-neun Stunden lang alle 30 Minuten eine Runde (`windows\anlernen.cmd`), ohne
+neun Stunden lang alle 10 Minuten eine Runde (`windows\anlernen.cmd`), ohne
 sichtbares Fenster, nur solange du angemeldet bist. Je Runde höchstens
-`RECHNUNG_CLAUDE_LIMIT` Rechnungen (Standard 10) aus `RECHNUNG_UEBUNG`
-(Standard `C:\Rechnung\uebung`). Bereits von Claude bestätigte Rechnungen
-werden übersprungen und kosten nichts. Ohne `RECHNUNG_CLAUDE_LEHRER=1` tut
-die Aufgabe nichts; läuft gerade der Nachtlauf, setzt sie eine Runde aus.
+`RECHNUNG_CLAUDE_LIMIT` Rechnungen (Standard 40) und höchstens
+`RECHNUNG_CLAUDE_MINUTEN` Minuten (Standard 50; danach endet die Runde
+zwischen zwei Rechnungen) aus `RECHNUNG_UEBUNG` (Standard
+`C:\Rechnung\uebung`). Läuft eine Runde noch, fällt der nächste Start aus,
+so arbeitet der Lehrer praktisch durch, solange etwas zu tun ist. Bereits
+von Claude bestätigte Rechnungen werden übersprungen und kosten nichts.
+Ohne `RECHNUNG_CLAUDE_LEHRER=1` tut die Aufgabe nichts; läuft gerade der
+Nachtlauf, setzt sie eine Runde aus. Nach einer Änderung der Zeiten das
+Einrichtungsskript erneut ausführen, erst dann gilt der neue Takt.
 
 Protokoll: `C:\Rechnung\data\anlernen.log`. Sofort testen:
 `Start-ScheduledTask -TaskName 'Rechnung Anlernen'`. Entfernen: dasselbe

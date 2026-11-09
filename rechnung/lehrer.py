@@ -623,13 +623,21 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
 
 
 def anlernen(store, ordner: str | Path, *, limit: int = 0, post=None,
-             fortschritt=None) -> list[dict]:
-    """Alle Rechnungen eines Ordners nacheinander anlernen."""
+             fortschritt=None, zeitbudget_s: float = 0.0) -> list[dict]:
+    """Alle Rechnungen eines Ordners nacheinander anlernen. ``limit``:
+    hoechstens so viele nicht uebersprungene Rechnungen; ``zeitbudget_s``:
+    nach Ablauf keine weitere Rechnung mehr anfangen (0 = unbegrenzt) --
+    so endet eine Hintergrundrunde (windows/anlernen.cmd) sauber zwischen
+    zwei Rechnungen, statt von der Aufgabenplanung abgeschossen zu werden."""
     from .pipeline import invoice_files
 
+    start = time.monotonic()
     out = []
     for p in invoice_files(ordner):
         if limit and len([r for r in out if r["ergebnis"] != ERG_UEBERSPRUNGEN]) >= limit:
+            break
+        # die erste Rechnung faengt immer an, danach zaehlt das Budget
+        if zeitbudget_s and out and time.monotonic() - start >= zeitbudget_s:
             break
         r = anlernen_datei(store, p, post=post)
         out.append(r)
@@ -715,7 +723,10 @@ def main(argv=None) -> int:
                                 description="Anlernphase: Claude prueft Uebungsrechnungen")
     p.add_argument("ordner", nargs="?", help="Ordner mit Uebungsrechnungen")
     p.add_argument("--data", default=os.environ.get("RECHNUNG_DATA", "./data"))
-    p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--limit", type=int, default=0,
+                   help="hoechstens so viele Rechnungen je Lauf (0 = alle)")
+    p.add_argument("--minuten", type=float, default=0,
+                   help="nach so vielen Minuten keine weitere Rechnung anfangen (0 = aus)")
     p.add_argument("--bilanz", action="store_true")
     p.add_argument("--json", action="store_true")
     a = p.parse_args(argv)
@@ -761,7 +772,8 @@ def main(argv=None) -> int:
             extra += "  (" + "; ".join(r["gruende"]) + ")"
         print(f"[{r['ergebnis']:13s}] {r['datei']}{extra}")
 
-    res = anlernen(store, a.ordner, limit=a.limit, fortschritt=_zeige)
+    res = anlernen(store, a.ordner, limit=a.limit, fortschritt=_zeige,
+                   zeitbudget_s=max(0.0, a.minuten) * 60)
     if a.json:
         print(json.dumps(res, indent=2, ensure_ascii=False, default=str))
         return 0
