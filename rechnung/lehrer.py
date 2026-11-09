@@ -388,6 +388,31 @@ def _gleich(a, b, vtype: str) -> bool:
     return norm(str(a)) == norm(str(b))
 
 
+# Uebungsrechnungen sind oft Jahre alt: fuer den Lehrer gilt dieselbe Grenze
+# wie fuer die Pruefung des Programms (validate.check_date: 10 Jahre), nicht
+# die enge 2-Jahres-Grenze der lokalen KI (Befund Proberunde 09.11.2026).
+DATUM_JAHRE_ZURUECK = 10
+
+# Waehrung steht auf der Rechnung meist als Zeichen, nicht als ISO-Code.
+_WAEHRUNG_BELEGE = {
+    "EUR": ("eur", "euro", "\u20ac"),
+    "CHF": ("chf", "fr.", "sfr", "franken"),
+    "USD": ("usd", "$", "us-dollar"),
+    "GBP": ("gbp", "\u00a3", "pfund"),
+}
+
+
+def _waehrung_belegt(text: str, wert) -> str | None:
+    """ISO-Code der Waehrung, wenn Code oder Zeichen im Text stehen
+    ("EUR" ist auch durch "\u20ac" belegt); sonst ``None``."""
+    code = str(wert or "").strip().upper()
+    belege = _WAEHRUNG_BELEGE.get(code)
+    if not belege:
+        return None
+    t = (text or "").lower()
+    return code if any(b in t for b in belege) else None
+
+
 def abgleichen(text: str, felder: dict[str, str], programm: dict, antwort: dict) -> Abgleich:
     from .semantic import _check_value
     from .shadow import REQUIRED
@@ -413,7 +438,11 @@ def abgleichen(text: str, felder: dict[str, str], programm: dict, antwort: dict)
             # einfach loeschen -- das entscheidet ein Mensch.
             out.unsicher[name] = "Claude findet keinen Wert, Programm schon"
             continue
-        value, grund = _check_value(text, name, wert, vtype)
+        if name == "waehrung" and _waehrung_belegt(text, wert):
+            value, grund = _waehrung_belegt(text, wert), ""
+        else:
+            value, grund = _check_value(text, name, wert, vtype,
+                                        datum_jahre_zurueck=DATUM_JAHRE_ZURUECK)
         if grund:
             out.unsicher[name] = f"Claude-Wert {wert!r}: {grund}"
             continue
@@ -535,7 +564,21 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
     rec: dict = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "datei": path.name,
                  "weg": backend(), "modell": modell()}
 
-    doc, o = load_document(path, store)
+    try:
+        doc, o = load_document(path, store)
+    except Exception as e:  # kaputte Datei (z.B. kein PDF): Runde nicht abbrechen
+        sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        rec["sha256"] = sha
+        fehl = [r for r in protokoll(store)
+                if r.get("sha256") == sha and r.get("ergebnis") == ERG_FEHLER]
+        if len(fehl) >= MAX_FEHLVERSUCHE:
+            rec.update(ergebnis=ERG_UEBERSPRUNGEN,
+                       gruende=[f"{MAX_FEHLVERSUCHE}x nicht lesbar -- siehe lehrer.jsonl"])
+            return rec
+        rec.update(ergebnis=ERG_FEHLER,
+                   gruende=[f"nicht lesbar: {type(e).__name__}: {str(e)[:120]}"])
+        _protokoll(store, rec)
+        return rec
     if doc is None:
         rec.update(ergebnis=ERG_MENSCH, gruende=[f"nicht lesbar: {getattr(o, 'error', '')}"])
         return rec

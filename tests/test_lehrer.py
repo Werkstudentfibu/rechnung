@@ -319,3 +319,45 @@ def test_zeitbudget_beendet_runde_zwischen_zwei_rechnungen(tmp_path):
     # ohne Budget: beide
     res = lehrer.anlernen(store, ordner, post=_claude(RICHTIG, calls=calls))
     assert {r["datei"] for r in res} == {"a.pdf", "b.pdf"}
+
+
+def test_kaputte_datei_bricht_runde_nicht_ab(tmp_path):
+    """Proberunde 09.11.2026: eine Datei, die kein PDF ist, liess die ganze
+    Runde mit einer Ausnahme sterben -- die restlichen Rechnungen kamen nie
+    dran. Jetzt: Fehler protokollieren, weitermachen, nach 3 Versuchen ruhen."""
+    store, ordner, src = _store(tmp_path)
+    kaputt = ordner / "0_kaputt.pdf"          # sortiert VOR a.pdf
+    kaputt.write_bytes(b"%PDF-1.4 das ist kein echtes PDF\n")
+    calls = []
+    res = lehrer.anlernen(store, ordner, post=_claude(RICHTIG, calls=calls))
+    nach_datei = {r["datei"]: r["ergebnis"] for r in res}
+    assert nach_datei["0_kaputt.pdf"] == lehrer.ERG_FEHLER
+    assert nach_datei["a.pdf"] == lehrer.ERG_BESTAETIGT
+    assert len(calls) == 1
+    for _ in range(2):
+        lehrer.anlernen_datei(store, kaputt)
+    r = lehrer.anlernen_datei(store, kaputt)
+    assert r["ergebnis"] == lehrer.ERG_UEBERSPRUNGEN
+    assert "nicht lesbar" in r["gruende"][0]
+
+
+def test_altes_rechnungsdatum_ist_fuer_den_lehrer_kein_grund(tmp_path):
+    """Uebungsrechnungen sind oft Jahre alt (2024): die 2-Jahres-Grenze der
+    lokalen KI darf Claudes belegtes Datum nicht als unsicher verwerfen."""
+    store, ordner, src = _store(tmp_path)
+    alt = make_invoice(ordner / "alt.pdf", datum="17.10.2024", rechnungsnr="RE-2024-0017")
+    werte = dict(RICHTIG, rechnungsdatum="2024-10-17", rechnungsnummer="RE-2024-0017")
+    r = lehrer.anlernen_datei(store, alt, post=_claude(werte))
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT, r
+
+
+def test_waehrung_eur_ist_durch_eurozeichen_belegt():
+    felder = {"waehrung": "text"}
+    antwort = {"felder": {"waehrung": {"wert": "EUR", "sicher": True}}}
+    ab = lehrer.abgleichen("Gesamtbetrag 1.190,00 \u20ac zahlbar bis", felder, {"waehrung": "EUR"}, antwort)
+    assert "waehrung" not in ab.unsicher and ab.werte["waehrung"] == "EUR"
+    ab = lehrer.abgleichen("Total CHF 1'190.00", felder, {"waehrung": "EUR"}, antwort)
+    assert "waehrung" in ab.unsicher            # EUR steht nirgends
+    ab = lehrer.abgleichen("Total CHF 1'190.00", felder, {"waehrung": "EUR"},
+                           {"felder": {"waehrung": {"wert": "CHF", "sicher": True}}})
+    assert ab.korrekturen.get("waehrung") == "CHF"
