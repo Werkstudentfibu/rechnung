@@ -151,6 +151,20 @@ class Listencache:
             except OSError as e:
                 self.fehler = f"Listenspeicher nicht schreibbar: {e}"
 
+    def vergessen(self, sid: str) -> int:
+        """Eintraege eines Lieferanten verwerfen (entwurf_uebernahme.py: der
+        Entwurf ist weg, seine Rechnungen gehoeren jetzt zum Ziel) -> Anzahl.
+        Ueber ``_Kontext.stand`` veralten sie ohnehin, so stehen sie aber
+        sofort als "wird gelesen" statt mit dem alten Lieferanten."""
+        with self._lock:
+            weg = [sha for sha, e in self._e.items() if sid and e.get("sid") == sid]
+            for sha in weg:
+                del self._e[sha]
+            self._ungespeichert += len(weg)
+        if weg:
+            self.speichern()
+        return len(weg)
+
     # ---- Momentaufnahmen (je mit Merker nach Dateistand: billig) --------------
     def _lieferanten(self) -> tuple[dict[str, str], str]:
         p = self.root / "suppliers.json"

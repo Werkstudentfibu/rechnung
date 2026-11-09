@@ -217,6 +217,23 @@ mit Audit-/Ereigniseintrag. Ein unbestätigter Entwurf verdrängt nie einen
 bereits bestätigten Lieferanten; zeigen USt-IdNr/IBAN auf einen bestätigten
 UND einen unbestätigten Lieferanten, ist das ein Widerspruch → Mensch.
 
+**Entwurf in bestehenden Lieferanten übernehmen** (Aaron, 09.11.2026): die
+Lieferanten aus dem Excel-Import haben weder USt-IdNr noch IBAN, deshalb legt
+jede ihrer Rechnungen einen Entwurf „Unbekannt (DE…)“ an – „bestätigen“ ergäbe
+einen zweiten Lieferanten neben dem Excel-Eintrag (Dublette). Dritter Knopf
+„In bestehenden Lieferanten übernehmen…“ (Prüfmaske Abschnitt Lieferant und
+Reiter „Lieferanten“, `POST /api/suppliers/{entwurf_id}/uebernehmen` mit
+`ziel_id`, Modul `entwurf_uebernahme.py`): USt-IdNr/IBAN/Domain/Fingerprint,
+Bank/BIC, Anschrift des Entwurfs wandern in den gewählten bestätigten
+Lieferanten (Listen vereinigt, vorhandene Werte des Ziels bleiben), seine
+Vorlagen hängen danach am Ziel, der Entwurf wird gelöscht und alles, was seine
+`supplier_id` gespeichert hat (`processed.jsonl`, `events.jsonl`,
+`shadow.jsonl`, `lehrer.jsonl`, `menschlich/*.grund.json`, `vorlernen/*.json`),
+zeigt auf das Ziel; Audit-Eintrag `lieferant_uebernommen` mit Operator. Steht
+der Name eines bestehenden Lieferanten auf der Rechnung (Hinweis
+„Lieferanten-Entwurf: …“), ist dieser in der Auswahl vorbelegt – entschieden
+wird trotzdem nur per Klick, nie automatisch.
+
 Im Training-UI zeigt der Reiter **„Menschliche Bearbeitung“** die Liste mit
 diesen Gründen (`GET /api/menschlich`, CLI `rechnung menschlich`). Klick auf
 eine Zeile öffnet die Rechnung; nach Korrektur und **Bestätigung** verlässt

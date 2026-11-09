@@ -469,6 +469,41 @@ class Store:
     def events(self) -> list[dict]:
         return _read_jsonl_safe(self._events)
 
+    # ---- Lieferant in den Protokollen umhaengen (entwurf_uebernahme.py) ----
+    def lieferant_umhaengen(self, alt_id: str, neu_id: str, neu_name: str) -> dict[str, int]:
+        """Alle Eintraege mit ``supplier_id == alt_id`` in ``processed.jsonl``,
+        ``events.jsonl``, ``shadow.jsonl`` und ``lehrer.jsonl`` auf ``neu_id``/
+        ``neu_name`` umschreiben -> Anzahl je Datei. Einzige Stelle, die diese
+        append-only-Protokolle nachtraeglich aendert -- bewusst nur fuer die
+        Uebernahme eines Lieferanten-Entwurfs in einen bestehenden Lieferanten
+        (ein Entwurf ``Unbekannt (DE...)`` war nie ein eigener Lieferant, seine
+        Rechnungen gehoeren fachlich zum Ziel, z.B. fuer die Dublettenpruefung
+        ueber ``seen_invoice``). ``audit.jsonl`` bleibt unberuehrt (GoBD)."""
+        zaehler: dict[str, int] = {}
+        for pfad, id_key, name_key in (
+            (self._processed, "supplier_id", "supplier_name"),
+            (self._events, "supplier_id", "supplier_name"),
+            (self._shadow, "supplier_id", "supplier_name"),
+            (self.root / "lehrer.jsonl", "lieferant", None),
+        ):
+            n = 0
+            if not pfad.exists():
+                zaehler[pfad.name] = 0
+                continue
+            zeilen = _read_jsonl_safe(pfad)
+            for rec in zeilen:
+                if rec.get(id_key) == alt_id:
+                    rec[id_key] = neu_id if name_key else neu_name
+                    if name_key:
+                        rec[name_key] = neu_name
+                    n += 1
+            if n:
+                _atomic_write(pfad, "".join(json.dumps(r, ensure_ascii=False) + "\n"
+                                            for r in zeilen))
+            zaehler[pfad.name] = n
+        self._processed_cache = None
+        return zaehler
+
     # ---- Kategorie-Lerntabelle (Positionstext -> Kategorie) ---------
     # Gilt lieferantenuebergreifend: einmal gelernte Zuordnungen ("Porto" ->
     # "Buerobedarf") schlagen bei jedem Lieferanten wieder vor. Ueber das
