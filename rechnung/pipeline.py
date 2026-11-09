@@ -33,6 +33,9 @@ from . import zahlung
 from .timing import StageTimer
 from .config import jobrouter as _jr_cfg
 from .config import operator as _operator
+from .config import namenserkennung as _namenserkennung
+from .identify import empfaenger_namen as _empfaenger_namen
+from .identify import namenstreffer as _namenstreffer
 from .identify import (DEFAULT_CURRENCY, EXPECTED_RATES, FIXED_FIELD_TYPES, IBAN_DEVIATES,
                        NEW_SUPPLIER_HOLD, POSITIONSMODI, POSITIONSMODUS_EINE_POSITION,
                        POSITIONSMODUS_EINZELN, POSITIONSMODUS_ZUSAMMENFASSUNG, Supplier,
@@ -49,6 +52,10 @@ from .validate import Check, run_all
 # Status
 AUTO = "auto"                    # kann automatisch weitergeleitet werden
 REVIEW = "review"                # Template da, aber Konfidenz/Prüfung schwach
+NAME_HINWEIS = ("Lieferant nur ueber den Namen erkannt (Namens-Erkennung) -- "
+                "bitte beim Bestaetigen pruefen")
+ENTWURF_HINWEIS = ("Lieferanten-Entwurf: der Name des bestehenden Lieferanten '{name}' "
+                   "steht auf der Rechnung -- vermutlich ist er gemeint")
 NO_TEMPLATE = "no_template"      # Lieferant bekannt, kein Template -> anlernen
 # Kein eindeutiger Lieferant / keine eindeutige Rechnungsadresse aus der
 # Bibliothek, IBAN weicht von den Stammdaten ab, ... -> ein Mensch muss die
@@ -1516,11 +1523,14 @@ def _process(path: str | Path, store: Store, use_llm: bool = True,
     with timer.stage("lieferant"):
         addr_check = _billing_check(doc.text, store, res)
         _mailbox_mandant_check(res, store)
-        has_addr = bool(store.addresses())
+        adressen = store.addresses()
+        has_addr = bool(adressen)
+        empfaenger = _empfaenger_namen(adressen)
         match, why = identify_with_reason(
             doc, store.suppliers(), index=store.supplier_index(res.billing_address_id),
             address_id=res.billing_address_id, has_addresses=has_addr,
-            address_name=res.billing_address_name or "")
+            address_name=res.billing_address_name or "",
+            einzelkandidat_namensschwelle=_namenserkennung(), empfaenger=empfaenger)
         if not match and create_draft_supplier:
             match = _auto_draft_pdf(res, doc, store, use_llm, timer)
     if not match:
@@ -1538,6 +1548,22 @@ def _process(path: str | Path, store: Store, use_llm: bool = True,
     res.supplier_name = supplier.name
     _setze_lieferantennummer(res, supplier, land_aus_beleg_text(supplier, doc.text))
     res.match_score = score
+    if score < 0.5:
+        # Nur der Name hat gepasst (identify.py, Namens-Erkennung): der
+        # Mensch soll das beim Bestaetigen sehen. USt-IdNr/IBAN werden dabei
+        # NICHT automatisch an den Lieferanten uebernommen (Stammdaten pflegt
+        # ein Mensch im Reiter Lieferanten) -- bis dahin bleibt es bei der
+        # Erkennung ueber den Namen.
+        res.hinweise.append(NAME_HINWEIS)
+    if not supplier.bestaetigt and _namenserkennung() is not None:
+        # Entwurf "Unbekannt (DE...)" ueber USt-IdNr/IBAN getroffen, aber der
+        # Name GENAU EINES bestaetigten Lieferanten (Excel-Import ohne
+        # Kennungen) steht auf der Rechnung: dem Menschen sagen, welcher
+        # gemeint ist. Stammdaten entscheidet weiter der Mensch.
+        treffer = _namenstreffer([s for s in store.suppliers() if s.bestaetigt],
+                                 norm(doc.text), empfaenger)
+        if len(treffer) == 1:
+            res.hinweise.append(ENTWURF_HINWEIS.format(name=treffer[0].name))
     if not supplier.bestaetigt:
         # Entwurf (frisch angelegt oder ein vorhandener, noch nicht
         # bestaetigter) -- die Extraktion laeuft normal weiter, die Rechnung

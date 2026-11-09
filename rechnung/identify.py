@@ -256,6 +256,71 @@ def extract_identifiers(doc: Document) -> dict:
     }
 
 
+# Namens-Erkennung (config.namenserkennung, Aaron 09.11.2026): kuerzere
+# normalisierte Namen zaehlen nie als Namenstreffer ("ewz", "ada" ...).
+MIN_NAMENSLAENGE = 4
+
+
+def name_auf_rechnung(name: str | None, text_n: str) -> bool:
+    """Steht der normalisierte Lieferantenname als GANZE Wortfolge im
+    normalisierten Rechnungstext? ``norm`` trennt Woerter mit '-', deshalb
+    wird an Wortgrenzen verglichen: "hotel" trifft nicht in "hotelbedarf",
+    "gema" nicht in "allgemein". Zu kurze Namen (< MIN_NAMENSLAENGE)
+    zaehlen nie."""
+    n = norm(name or "")
+    if len(n) < MIN_NAMENSLAENGE:
+        return False
+    return f"-{n}-" in f"-{text_n}-"
+
+
+def empfaenger_namen(addresses) -> set[str]:
+    """Normalisierte Namen und Suchbegriffe der Rechnungsadressen (Mandanten,
+    ``billing.BillingAddress``). Ein Lieferant, der so heisst, zaehlt bei der
+    Namens-Erkennung nie als Treffer: die eigenen Gesellschaften stehen als
+    Empfaenger auf jeder Rechnung und teils zugleich als Lieferant in der
+    Bibliothek (Befund Trockenlauf 09.11.2026: ein Versicherungsschreiben
+    waere sonst dem Empfaenger als Lieferant zugeordnet worden)."""
+    out: set[str] = set()
+    for a in addresses or ():
+        for s in [getattr(a, "name", "")] + list(getattr(a, "match_terms", None) or []):
+            n = norm(s or "")
+            if len(n) >= MIN_NAMENSLAENGE:
+                out.add(n)
+    return out
+
+
+# Ab dieser Laenge gilt ein gemeinsamer Anfang als derselbe Name -- die
+# Adressnamen aus dem Excel-Import sind oft abgeschnitten
+# ("...Betreuungsgesellschaf" statt "...Betreuungsgesellschaft mbH").
+_EMPFAENGER_PRAEFIX = 12
+
+
+def _ist_empfaenger(name_n: str, empfaenger: set[str]) -> bool:
+    for e in empfaenger:
+        if e == name_n or f"-{e}-" in f"-{name_n}-" or f"-{name_n}-" in f"-{e}-":
+            return True
+        kurz, lang = sorted((e, name_n), key=len)
+        if len(kurz) >= _EMPFAENGER_PRAEFIX and lang.startswith(kurz):
+            return True
+    return False
+
+
+def namenstreffer(suppliers: list["Supplier"], text_n: str,
+                  empfaenger: set[str] | None = None) -> list["Supplier"]:
+    """Lieferanten, deren Name als ganze Wortfolge im normalisierten Text
+    steht -- ohne Dummy und ohne Lieferanten, die wie eine Rechnungsadresse
+    heissen (``empfaenger_namen``)."""
+    emp = empfaenger or set()
+    out = []
+    for s in suppliers:
+        if s.dummy or not name_auf_rechnung(s.name, text_n):
+            continue
+        if emp and _ist_empfaenger(norm(s.name), emp):
+            continue
+        out.append(s)
+    return out
+
+
 def _jaccard(a: set, b: set) -> float:
     if not a or not b:
         return 0.0
@@ -330,18 +395,20 @@ def _address_scope_reason(has_addresses: bool, address_id: str | None,
 def identify(doc: Document, suppliers: list[Supplier], threshold: float = 0.5,
             min_margin: float = 0.15, index: dict | None = None,
             address_id: str | None = None, has_addresses: bool = False,
-            address_name: str = "", einzelkandidat_namensschwelle: float | None = None):
+            address_name: str = "", einzelkandidat_namensschwelle: float | None = None,
+            empfaenger: set[str] | None = None):
     """-> (Supplier, score) oder None. Kurzform von ``identify_with_reason``."""
     return identify_with_reason(doc, suppliers, threshold, min_margin, index,
                                 address_id, has_addresses, address_name,
-                                einzelkandidat_namensschwelle)[0]
+                                einzelkandidat_namensschwelle, empfaenger)[0]
 
 
 def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: float = 0.5,
                          min_margin: float = 0.15, index: dict | None = None,
                          address_id: str | None = None, has_addresses: bool = False,
                          address_name: str = "",
-                         einzelkandidat_namensschwelle: float | None = None):
+                         einzelkandidat_namensschwelle: float | None = None,
+                         empfaenger: set[str] | None = None):
     """-> ((Supplier, score) oder None, Grund).
 
     Die Lieferanten-Identitaet kommt ausschliesslich aus der Bibliothek
@@ -381,23 +448,28 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
     eine stille Verwechslung zwischen zwei Lieferanten mit aehnlichem
     Kopf-Layout, z.B. derselben Buchhaltungssoftware).
 
-    ``einzelkandidat_namensschwelle`` -- VORSCHLAG, NICHT in der echten
-    Verarbeitung aktiv (pipeline.py ruft diese Funktion ohne dieses Argument
-    auf, Standard ``None`` aendert am bisherigen Verhalten nichts; braucht
-    Aarons Bestaetigung an echten Daten, siehe
-    worker/bericht-lieferant-erkennung-1106.md Teil C). Befund Aaron
-    06.11.2026: Lieferanten aus dem Excel-Stammdatenimport
-    (stammdaten_import.py) haben oft nur ``name`` (+ ggf. ``address_lines``),
-    keine IBAN/USt-IdNr/Fingerprint/Domain -- ein reiner Namens-Teiltreffer
-    bringt dann nur 0.2 Score und erreicht die globale ``threshold`` (0.5)
-    nie, SELBST WENN nach ``kandidaten()`` ueberhaupt kein zweiter Kandidat
-    uebrig ist (also keine Verwechslungsgefahr). Ist dieser Wert gesetzt UND
-    bleibt nach ``kandidaten()`` GENAU EIN Lieferant uebrig UND steht sein
-    Name als Teilstring auf der Rechnung, gilt fuer IHN dieser (niedrigere)
-    Wert statt ``threshold``. Bei zwei oder mehr Kandidaten bleibt die
-    normale ``threshold``-/``min_margin``-Pruefung unveraendert streng --
-    dieser Parameter beeinflusst nie den Mehrdeutigkeits-/Betrugsschutz-Pfad
-    weiter unten."""
+    ``einzelkandidat_namensschwelle`` -- Namens-Erkennung (aktiv seit
+    09.11.2026 ueber ``config.namenserkennung()``, Entscheidung Aaron; davor
+    nur ein Vorschlag, siehe worker/bericht-lieferant-erkennung-1106.md
+    Teil C). Befund Aaron 06.11.2026: Lieferanten aus dem Excel-
+    Stammdatenimport (stammdaten_import.py) haben nur ``name`` (+ ggf.
+    ``address_lines``), keine IBAN/USt-IdNr/Fingerprint/Domain -- und fast
+    alle (11.218 von 11.219 am 09.11.2026) keine Rechnungsadresse, gelten
+    also global: nach ``kandidaten()`` bleibt praktisch IMMER die ganze
+    Bibliothek uebrig, ein reiner Namens-Teiltreffer bringt 0.2 Score und
+    erreicht die globale ``threshold`` (0.5) nie. Ist dieser Wert gesetzt
+    UND steht von allen Kandidaten GENAU EIN Lieferantenname als ganze
+    Wortfolge auf der Rechnung (``name_auf_rechnung``, kein Dummy) UND ist
+    dieser Lieferant der bestbewertete, gilt fuer IHN dieser (niedrigere)
+    Wert statt ``threshold``. Stehen zwei oder mehr Lieferantennamen auf
+    der Rechnung (z.B. "Muster Handels GmbH" und "Muster Handels"), bleibt
+    die normale ``threshold``-/``min_margin``-Pruefung unveraendert streng
+    -> Mensch. Der Mehrdeutigkeits-/Betrugsschutz-Pfad ueber USt-IdNr/IBAN
+    weiter oben bleibt unberuehrt. pipeline.py vermerkt einen so erkannten
+    Lieferanten als Hinweis (``NAME_HINWEIS``), damit der Mensch beim
+    Bestaetigen weiss, dass nur der Name gepasst hat. ``empfaenger``
+    (``empfaenger_namen(store.addresses())``): Lieferanten, die wie eine
+    Rechnungsadresse heissen, zaehlen nie als Namenstreffer."""
     suppliers = kandidaten(suppliers, address_id, has_addresses)
     if not suppliers:
         if has_addresses:
@@ -426,7 +498,7 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
             score += 0.5
         if ids["domains"] & set(s.domains):
             score += 0.3
-        if s.name and norm(s.name) in text_n:
+        if name_auf_rechnung(s.name, text_n):
             score += 0.2
         score += 0.3 * _jaccard(ids["fingerprint"], set(s.fingerprint))
         return (s, round(score, 3)), ""
@@ -437,18 +509,21 @@ def identify_with_reason(doc: Document, suppliers: list[Supplier], threshold: fl
         score = 0.0
         if ids["domains"] & set(s.domains):
             score += 0.3
-        if s.name and norm(s.name) in text_n:
+        if name_auf_rechnung(s.name, text_n):
             score += 0.2
         score += 0.3 * _jaccard(ids["fingerprint"], set(s.fingerprint))
         scored.append((s, round(score, 3)))
     scored.sort(key=lambda x: x[1], reverse=True)
     best_s, best_score = scored[0]
     eff_threshold = threshold
-    # Vorschlag (siehe Docstring oben) -- nur wirksam, wenn der Aufrufer ihn
-    # ausdruecklich anfordert UND wirklich nur ein Kandidat zur Auswahl stand.
-    if (einzelkandidat_namensschwelle is not None and len(scored) == 1
-            and best_s.name and norm(best_s.name) in text_n):
-        eff_threshold = min(threshold, einzelkandidat_namensschwelle)
+    # Namens-Erkennung (siehe Docstring): nur wenn der Aufrufer sie anfordert
+    # UND von allen Kandidaten GENAU EINER mit seinem Namen auf der Rechnung
+    # steht -- und das ist der beste. Stehen zwei Namen auf der Rechnung oder
+    # keiner, bleibt alles unveraendert streng.
+    if einzelkandidat_namensschwelle is not None:
+        treffer = namenstreffer([s for s, _ in scored], text_n, empfaenger)
+        if len(treffer) == 1 and treffer[0] is best_s:
+            eff_threshold = min(threshold, einzelkandidat_namensschwelle)
     if best_score < eff_threshold:
         return None, _address_scope_reason(has_addresses, address_id, address_name,
                                            "kein Lieferant aus der Bibliothek passt")

@@ -58,19 +58,32 @@ def test_flag_verhindert_keinen_treffer_ohne_jede_uebereinstimmung(tmp_path: Pat
     assert "passt" in why
 
 
-def test_flag_lockert_mehrdeutigkeit_bei_zwei_kandidaten_nicht(tmp_path: Path):
-    """Kernbedingung aus dem Auftrag: bleiben nach ``kandidaten()`` ZWEI oder
-    mehr Kandidaten uebrig, bleibt die normale threshold-/min_margin-Pruefung
-    unveraendert streng -- der Vorschlag darf die Mehrdeutigkeits-Erkennung
-    nicht aufweichen, auch wenn beide Namen aehnlich genug waeren, um ohne
-    Adress-Einschraenkung als Teiltreffer zu zaehlen."""
+def test_flag_lockert_mehrdeutigkeit_bei_zwei_namenstreffern_nicht(tmp_path: Path):
+    """Kernbedingung: stehen ZWEI Lieferantennamen auf der Rechnung, bleibt
+    die normale threshold-/min_margin-Pruefung unveraendert streng -- die
+    Namens-Erkennung darf die Mehrdeutigkeits-Erkennung nicht aufweichen.
+    (Seit 09.11.2026 zaehlt nicht mehr "genau ein Kandidat", sondern "genau
+    ein Namenstreffer": Excel-Lieferanten ohne Adresse gelten global, die
+    Kandidatenmenge ist in der Praxis immer die ganze Bibliothek.)"""
     doc = pdfmod.load(make_invoice(tmp_path / "re.pdf", lieferant="Muster Handels GmbH"))
     a = Supplier(id="a", name="Muster Handels GmbH", addresses=["adr-1"])
-    b = Supplier(id="b", name="Muster Handels Nord GmbH", addresses=["adr-1"])
+    b = Supplier(id="b", name="Muster Handels", addresses=["adr-1"])
     match, why = identify_with_reason(doc, [a, b], address_id="adr-1", has_addresses=True,
                                       einzelkandidat_namensschwelle=0.2)
     assert match is None
     assert "passt" in why   # beide unter der Schwelle, keiner gewinnt
+
+
+def test_flag_zwei_kandidaten_nur_einer_steht_auf_der_rechnung(tmp_path: Path):
+    """Der Praxisfall: viele Kandidaten (Excel-Import, alle ohne Adresse),
+    aber nur EIN Name steht auf der Rechnung -> dieser gilt als erkannt."""
+    doc = pdfmod.load(make_invoice(tmp_path / "re.pdf", lieferant="Muster Handels GmbH"))
+    a = Supplier(id="a", name="Muster Handels GmbH")
+    b = Supplier(id="b", name="Ganz Andere Firma AG")
+    c = Supplier(id="c", name="Muster Handels Nord GmbH")
+    match, why = identify_with_reason(doc, [a, b, c], einzelkandidat_namensschwelle=0.2)
+    assert match is not None and match[0].id == "a"
+    assert why == ""
 
 
 def test_flag_aendert_betrugsschutz_bei_widerspruechlichen_kennungen_nicht(tmp_path: Path):

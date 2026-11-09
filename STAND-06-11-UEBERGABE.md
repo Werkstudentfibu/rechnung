@@ -87,7 +87,11 @@ nicht um Geschwindigkeit, sondern darum, dass die Erkennung möglichst richtig w
 
 ## Offene / unbestätigte Punkte – nicht einfach weitermachen, sondern mit Aaron klären
 
-1. **Lieferanten-Erkennung, Teil C (Vorschlag, inaktiv)**: `rechnung/identify.py` hat einen
+1. **Lieferanten-Erkennung, Teil C** – *aktiviert am 09.11.2026 (Entscheidung Aaron,
+   `RECHNUNG_NAMENSERKENNUNG`, Standard an; Regel geändert auf „genau ein Namenstreffer
+   als ganze Wortfolge“, weil 11.218 von 11.219 Excel-Lieferanten ohne Adresse global
+   gelten und „genau ein Kandidat“ nie eintritt; Prüfung an echten Fällen siehe
+   Dry-Run-Bericht in der Sitzung vom 09.11.)*. Ursprünglicher Text: `rechnung/identify.py` hat einen
    neuen optionalen Parameter `einzelkandidat_namensschwelle` (Standard `None`). Ist er gesetzt
    UND bleibt nach der Adress-Einschränkung genau EIN Kandidat übrig UND steht sein Name als
    Teilstring im Rechnungstext, gilt für ihn eine niedrigere Schwelle als die globale
