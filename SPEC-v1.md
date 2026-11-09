@@ -1161,7 +1161,17 @@ automatisch durch, was ein Mensch nicht bestaetigt hat.
    `addresses=[erkannte Rechnungsadresse]`, leer bei keiner erkannten
    Adresse -- ein Entwurf ohne Adresse gilt dann ueber `identify.kandidaten`
    nur fuer Rechnungen ohne erkannte Adresse, nie global. Id: Slug aus dem
-   Namen, sonst `neu-<USt-IdNr/IBAN>`, kollisionsfrei (`_unique_supplier_id`).
+   Namen, sonst `neu-<USt-IdNr/IBAN>`, kollisionsfrei (`_unique_supplier_id`);
+   ohne beide Kennungen `neu` und Platzhalter "Unbekannt" (keine harte
+   Kennung, bindet ueber den Index nie weitere Rechnungen). Als USt-IdNr
+   gilt dabei nur ein echtes Format (`textnorm.find_ustids`, 09.11.2026:
+   Laenderpraefix + landesspezifische Struktur fuer EU/XI, CHE mit
+   Pruefziffer; nie etwas, das wie ein BIC aussieht oder hinter "BIC"/
+   "SWIFT" steht). Vorher galten BICs wie `COKSDE33XXX` als USt-IdNr und
+   ein Entwurf "Unbekannt (COKSDE33XXX)" buendelte Rechnungen verschiedener
+   Lieferanten derselben Sparkasse; solche Entwuerfe verwirft man im
+   Programm unter Lieferanten -> Entwurf -> "Entwurf verwerfen"
+   (`POST /api/suppliers/<id>/verwerfen`).
    Keine Duplikate: ein vorhandener unbestaetigter Entwurf mit derselben
    Kennung unter derselben Adresse wird gefunden (sowohl ueber den normalen
    Index-Abgleich als auch zusaetzlich `_find_draft_by_identifiers` als
