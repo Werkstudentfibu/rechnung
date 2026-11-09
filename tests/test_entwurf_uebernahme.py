@@ -14,7 +14,7 @@ import pytest
 from rechnung import entwurf_uebernahme, eventlog, human, shadow, vorlernen
 from rechnung.entwurf_uebernahme import uebernehmen, zusammenfuehren
 from rechnung.identify import NEW_SUPPLIER_HOLD, Supplier
-from rechnung.pipeline import dispatch, process
+from rechnung.pipeline import ENTWURF_HINWEIS, dispatch, process
 from rechnung.store import Store
 from rechnung.template import Template
 
@@ -110,17 +110,31 @@ def test_uebernehmen_loescht_entwurf_und_fuellt_ziel(tmp_path: Path):
     assert not [a for a in store.audit_log() if a["action"] == "lieferant_bestaetigt"]
 
 
-def test_naechste_rechnung_findet_ziel_ohne_entwurfs_hold(tmp_path: Path):
-    """Der Kern: nach der Uebernahme erkennt die Pipeline die Rechnung ueber
-    die harte Kennung als den bestehenden Lieferanten -- kein neuer Entwurf,
-    kein NEW_SUPPLIER_HOLD, keine Dublette."""
-    store = Store(tmp_path / "data")
+def _entwurf_aus_rechnung(tmp_path: Path, store: Store, name: str = "a.pdf",
+                          rechnungsnr: str = "RE-1"):
+    """Praxisfall: der Entwurf "Unbekannt (DE...)" entstand, BEVOR der
+    Lieferant aus dem Excel-Import (nur Name) in der Bibliothek stand bzw.
+    die Namens-Erkennung lief. Ab dann trifft jede Rechnung ueber die
+    USt-IdNr den Entwurf, nicht den Excel-Lieferanten."""
+    inv = make_invoice(tmp_path / name, ustid=USTID, iban=IBAN, rechnungsnr=rechnungsnr)
+    res = process(inv, store, create_draft_supplier=True)
+    assert store.supplier(res.supplier_id).bestaetigt is False
     store.save_supplier(_ziel())
-    inv1 = make_invoice(tmp_path / "a.pdf", ustid=USTID, iban=IBAN, rechnungsnr="RE-1")
+    return inv, res
+
+
+def test_naechste_rechnung_findet_ziel_ohne_entwurfs_hold(tmp_path: Path):
+    """Der Kern: Hinweis nennt den bestehenden Lieferanten -> Mensch klickt
+    "uebernehmen" -> die naechste Rechnung wird ueber die harte Kennung als
+    der bestehende Lieferant erkannt (kein Entwurf, kein NEW_SUPPLIER_HOLD,
+    keine Dublette)."""
+    store = Store(tmp_path / "data")
+    inv1, _ = _entwurf_aus_rechnung(tmp_path, store)
     res1 = process(inv1, store, create_draft_supplier=True)
     assert res1.supplier_id != "muster-handels-gmbh"
     assert store.supplier(res1.supplier_id).bestaetigt is False
     assert NEW_SUPPLIER_HOLD in res1.hold_reasons
+    assert ENTWURF_HINWEIS.format(name="Muster Handels GmbH") in res1.hinweise
 
     uebernehmen(store, res1.supplier_id, "muster-handels-gmbh", operator="aaron")
 
@@ -135,9 +149,7 @@ def test_naechste_rechnung_findet_ziel_ohne_entwurfs_hold(tmp_path: Path):
 # ---- Alles, was die supplier_id des Entwurfs gespeichert hat --------------------
 def test_uebernehmen_haengt_rechnungen_und_protokolle_um(tmp_path: Path):
     store = Store(tmp_path / "data")
-    store.save_supplier(_ziel())
-    inv = make_invoice(tmp_path / "a.pdf", ustid=USTID, iban=IBAN, rechnungsnr="RE-1")
-    res = process(inv, store, create_draft_supplier=True)
+    _inv, res = _entwurf_aus_rechnung(tmp_path, store)
     eid = res.supplier_id
     # Spuren wie im echten Betrieb: Ordner "Menschliche Bearbeitung" (dispatch,
     # vor dem Verarbeitungs-Log -- uebernommene Rechnungen legt er nicht ab),
@@ -245,12 +257,13 @@ def test_pipeline_ruft_uebernehmen_nie_selbst(tmp_path: Path):
     des bestehenden Lieferanten auf der Rechnung steht, bleibt der Entwurf
     bestehen, bis jemand klickt."""
     store = Store(tmp_path / "data")
-    store.save_supplier(_ziel())
-    inv = make_invoice(tmp_path / "a.pdf", lieferant="Muster Handels GmbH",
-                       ustid=USTID, iban=IBAN)
-    res = process(inv, store, create_draft_supplier=True)
-    assert store.supplier(res.supplier_id).bestaetigt is False
+    inv, _ = _entwurf_aus_rechnung(tmp_path, store)
+    for _ in range(2):                    # auch bei wiederholter Verarbeitung
+        res = process(inv, store, create_draft_supplier=True)
+        assert ENTWURF_HINWEIS.format(name="Muster Handels GmbH") in res.hinweise
+        assert store.supplier(res.supplier_id).bestaetigt is False
     assert len(store.suppliers()) == 2
+    assert store.supplier("muster-handels-gmbh").ustids == []
     assert not [a for a in store.audit_log() if a["action"] == entwurf_uebernahme.AUDIT_AKTION]
     # Kein Modul ausser dem Endpunkt importiert die Uebernahme (Docstrings
     # duerfen sie erwaehnen, Code nicht aufrufen).
@@ -262,6 +275,22 @@ def test_pipeline_ruft_uebernehmen_nie_selbst(tmp_path: Path):
         assert "import entwurf_uebernahme" not in text, py.name
         assert "from .entwurf_uebernahme" not in text, py.name
     assert "import entwurf_uebernahme" in (src / "web" / "server.py").read_text("utf-8")
+
+
+def test_oberflaeche_liest_den_namen_aus_dem_echten_hinweis():
+    """Die Vorbelegung im Dialog (index.html, ``entwurfHinweisName``) parst
+    den Text von ``pipeline.ENTWURF_HINWEIS``. Aendert sich der Wortlaut dort,
+    muss die Regex mitziehen -- sonst faellt die Vorbelegung still weg."""
+    import re
+
+    html = (Path(entwurf_uebernahme.__file__).parent / "web" / "static" / "index.html").read_text("utf-8")
+    m = re.search(r"const m = /(.+?)/\.exec\(h \|\| ''\);", html)
+    assert m, "Regex in entwurfHinweisName nicht gefunden"
+    rx = re.compile(m.group(1))       # JS-Regex ist hier auch gueltiges Python
+    for name in ("Muster Handels GmbH", "Mueller & Soehne KG", "O'Brien Ltd."):
+        treffer = rx.search(ENTWURF_HINWEIS.format(name=name))
+        assert treffer and treffer.group(1) == name
+    assert rx.search("Langer Beleg: ...") is None
 
 
 # ---- Endpunkt -------------------------------------------------------------------
