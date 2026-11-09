@@ -1,6 +1,6 @@
 # IT-Freigabe „rechnung“ – Entwurf v2
 
-*Entwurf zur Abstimmung mit der IT · Stand: 2026-10-04*
+*Entwurf zur Abstimmung mit der IT · Stand: 2026-10-04 · ergänzt 2026-11-06 um die Anlernphase mit Claude (`IT-FREIGABE-AENDERUNG-CLAUDE.md`)*
 *Ersetzt nach Abstimmung die Kurzbeschreibung `IT-FREIGABE.md` (Stand 2026-09-18). Diese bleibt bis dahin unverändert gültig.*
 
 ## 1. Zweck dieses Dokuments
@@ -25,6 +25,7 @@ der IT benötigt wird (Abschnitt 13).
 | Unsichere Rechnungen | Anzeige „review“ | eigener Ordner „Menschliche Bearbeitung“, nichts wird geraten |
 | Zeitgesteuerter Lauf | keiner | optional: Windows-Aufgabenplanung („Nachtlauf“) |
 | Vorab-Lernen | – | alte Rechnungen eines lokalen Ordners werden ausgewertet, um Vorlagen vorzuschlagen; aktiv erst nach Bestätigung durch einen Menschen; keine Übergabe an JobRouter |
+| Anlernphase mit Claude | – | Übungsrechnungen prüft Claude (Anthropic, Cloud-KI) statt eines Menschen; Rechnungen werden dazu an Anthropic übertragen; nichts davon geht ins Journal, Archiv oder an JobRouter. Einzelheiten: `IT-FREIGABE-AENDERUNG-CLAUDE.md` |
 | Installation | Einzeldatei, keine Adminrechte | Betrieb weiterhin ohne Adminrechte; Build und Installation von Tesseract/Ollama mit Adminrechten |
 
 ## 3. Einsatzszenario
@@ -70,6 +71,13 @@ Abschnitt 11.
    ein Mensch prüft alle Werte der Gruppe und bestätigt; erst dann ist die
    Vorlage aktiv. Diese Alt-Rechnungen werden nicht an JobRouter übergeben
    und nicht als Live-Rechnungen gezählt.
+   **Anlernphase mit Claude (seit 2026-11-06):** Statt eines Menschen prüft
+   Claude (Anthropic) die Übungsrechnungen, korrigiert Werte und bestätigt
+   sie – aber nur in einem eigenen Protokoll, nicht im Bestätigungs-Protokoll
+   des Menschen; daraus lernt das Programm die Vorlagen. Jeder Wert muss im
+   Text der Rechnung stehen; Stammdaten bestätigt weiterhin ein Mensch; 10 %
+   der Rechnungen prüft zusätzlich ein Mensch. Einzelheiten und Datenfluss:
+   `IT-FREIGABE-AENDERUNG-CLAUDE.md`.
 6. **Übergabe:** an JobRouter (REST, mit Originaldatei als Anhang). In
    JobRouter gibt ein Mensch die Rechnung frei; Korrekturen von dort
    werden zurückgelesen und fließen in Fehlerprotokoll und Lernen ein.
@@ -120,10 +128,14 @@ Abschnitt 11.
 | JobRouter | ausgehend | JobRouter-Server der Firma (HTTPS, REST) | Übergabe (`rechnung push`), Abruf von Rückmeldungen im Nachtlauf | **aus** (`RECHNUNG_JOBROUTER_ENABLED=0`, nur Trockenlauf) |
 | Ollama (Sprachmodell) | lokal | `127.0.0.1:11434` | nur wenn die KI eingeschaltet ist | **aus** |
 | Installation | ausgehend | pypi.org, python.org/winget, github.com (Tesseract-Sprachdaten), ollama.com (Programm und Modell) | nur beim Build/Installieren | – |
+| Claude (Anlernphase) | ausgehend | `api.anthropic.com:443` (HTTPS) über Claude Code bzw. direkt; Übertragung der Übungsrechnung als Datei | Windows-Aufgabe „Rechnung Anlernen“ Mo–Fr 08:00–17:00 alle 30 min, max. 10 Rechnungen je Runde; nur mit `RECHNUNG_CLAUDE_LEHRER=1` | **aus** (auf dem Laptop für die Anlernphase eingeschaltet, siehe `IT-FREIGABE-AENDERUNG-CLAUDE.md`) |
 
-Es gibt keine Telemetrie, keine automatischen Updates und keine
-Verbindung zu Cloud-KI-Anbietern. Rechnungsinhalte verlassen den Rechner
-nur in Richtung des firmeneigenen JobRouter (und nur, wenn eingeschaltet).
+Es gibt keine Telemetrie und keine automatischen Updates. Rechnungsinhalte
+verlassen den Rechner nur in Richtung des firmeneigenen JobRouter (und nur,
+wenn eingeschaltet) – und, **seit 2026-11-06 und nur in der Anlernphase**, in
+Richtung Anthropic (Claude als Prüfer der Übungsrechnungen; Umfang, Weg und
+Sicherungen in `IT-FREIGABE-AENDERUNG-CLAUDE.md`). Weitere Cloud-KI-Anbieter
+werden nicht angesprochen.
 
 Hinweis: Das Programm unterstützt alternativ einen OpenAI-kompatiblen
 Modellserver im Firmennetz (`RECHNUNG_LLM_BACKEND=openai`). Dann gehen
@@ -153,6 +165,7 @@ für die Weitergabe gebauter Programme; nur Build-Werkzeug).
 | Tesseract OCR (Build UB Mannheim) mit deutschem Sprachpaket | Texterkennung für Scans | Apache-2.0 | installiert unter `C:\Program Files\Tesseract-OCR`, Adminrechte nötig, kein Netzwerk |
 | Ollama | lokale Ausführung des Sprachmodells | MIT | Installation im Benutzerprofil; richtet einen Autostart-Eintrag ein und lauscht nur auf `127.0.0.1:11434` |
 | Modell `qwen2.5:1.5b-instruct` | Sprachmodell für unbekannte Layouts | Apache-2.0 (laut Herausgeber) | ca. 1 GB; das im Programm voreingestellte größere Modell `qwen2.5:3b-instruct` steht unter einer abweichenden Lizenz des Herausgebers und sollte vor einer Nutzung geprüft werden |
+| Claude Code (`claude.exe`, Anthropic) – nur Anlernphase | Übergabe der Übungsrechnung an Claude, nur Lesezugriff auf Dateien | proprietär (Nutzungsbedingungen Anthropic) | Installation ohne Adminrechte im Benutzerprofil (`C:\Users\<name>\.local\bin`), selbstaktualisierend, Anmeldung mit dem Firmen-Login; Alternative ohne Zusatzprogramm: API-Schlüssel (`RECHNUNG_CLAUDE_BACKEND=api`) |
 
 ## 8. Installation und Rechte
 
@@ -264,6 +277,11 @@ Nicht Teil dieser Freigabe; wird gesondert vorgelegt. Absehbar nötig:
    Behandlung abweichender IBANs (Empfehlung: Standard „zum Menschen“).
 7. Vorgaben zu Verschlüsselung, Sicherung und Aufbewahrungsfristen
    (Abschnitt 9).
+8. Zustimmung zur Anlernphase mit Claude (Übertragung von Übungsrechnungen
+   an Anthropic; ausgehend HTTPS zu `api.anthropic.com`) einschließlich der
+   Prüfung der vertraglichen Grundlage des Firmen-Logins (Datenschutz,
+   Auftragsverarbeitung, keine Nutzung zum Training) – offene Punkte in
+   `IT-FREIGABE-AENDERUNG-CLAUDE.md`, Abschnitt 6.
 
 Die technische Spezifikation (`SPEC-v1.md`), die Installationsanleitung
 (`INSTALL-WINDOWS.md`) und der Quellcode liegen bei.
