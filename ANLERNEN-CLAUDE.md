@@ -17,6 +17,22 @@ RECHNUNG_CLAUDE_API_KEY=sk-ant-...        # aus der Claude Console (Firmenkonto)
 # RECHNUNG_CLAUDE_LOKALE_KI=1          # lokale KI (Ollama) beim Anlernen mitlaufen lassen
 ```
 
+### Über Langdock (EU-Hosting, Firmenvertrag)
+
+Langdock bietet eine Anthropic-kompatible Schnittstelle. Dafür in
+`rechnung.env`:
+
+```
+RECHNUNG_CLAUDE_BACKEND=api
+RECHNUNG_CLAUDE_API_URL=https://api.langdock.com/anthropic/eu/v1/messages
+RECHNUNG_CLAUDE_API_KEY=<Langdock-Schlüssel mit Berechtigung Completion API>
+RECHNUNG_CLAUDE_MODELL=<Modellname laut Langdock-Modellliste>
+```
+
+Angemeldet wird bei Langdock-Adressen automatisch per `Authorization: Bearer`
+(`RECHNUNG_CLAUDE_API_AUTH` erzwingt sonst `bearer` oder `x-api-key`).
+Abgerechnet wird über das Langdock-Budget der Firma, nicht über das Abo.
+
 ### Alternativ: über Claude Code statt API-Schlüssel
 
 Statt eines API-Schlüssels kann der Lehrer Claude Code (`claude -p`) benutzen.

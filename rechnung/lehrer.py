@@ -118,6 +118,25 @@ def api_key() -> str:
             or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
 
 
+def api_url() -> str:
+    """Adresse der Messages-API. Standard Anthropic; ``RECHNUNG_CLAUDE_API_URL``
+    z.B. fuer Langdock (Anthropic-kompatibel, EU-Hosting, Firmenvertrag):
+    ``https://api.langdock.com/anthropic/eu/v1/messages`` (Aaron 12.11.2026)."""
+    return os.environ.get("RECHNUNG_CLAUDE_API_URL", "").strip() or API_URL
+
+
+def _auth_header() -> dict:
+    """Anthropic erwartet ``x-api-key``, Langdock ``Authorization: Bearer``.
+    ``RECHNUNG_CLAUDE_API_AUTH=bearer|x-api-key`` erzwingt eine Art; ohne
+    Angabe Bearer fuer Langdock-Adressen, sonst ``x-api-key``."""
+    art = os.environ.get("RECHNUNG_CLAUDE_API_AUTH", "").strip().lower()
+    if not art:
+        art = "bearer" if "langdock" in api_url().lower() else "x-api-key"
+    if art == "bearer":
+        return {"Authorization": f"Bearer {api_key()}"}
+    return {"x-api-key": api_key()}
+
+
 def backend() -> str:
     """``api`` (Standard) oder ``cli`` (Claude Code, ``claude -p``)."""
     v = os.environ.get("RECHNUNG_CLAUDE_BACKEND", "api").strip().lower()
@@ -413,9 +432,9 @@ def _prompt(felder: dict[str, str], programm: dict) -> str:
 
 def _post(body: dict) -> dict:
     req = urllib.request.Request(
-        API_URL, data=json.dumps(body).encode("utf-8"), method="POST",
-        headers={"content-type": "application/json", "x-api-key": api_key(),
-                 "anthropic-version": API_VERSION})
+        api_url(), data=json.dumps(body).encode("utf-8"), method="POST",
+        headers={"content-type": "application/json", "anthropic-version": API_VERSION,
+                 **_auth_header()})
     with urllib.request.urlopen(req, timeout=timeout_s()) as resp:
         return json.loads(resp.read().decode("utf-8"))
 

@@ -682,3 +682,39 @@ def test_unbekannter_lieferant_bekommt_entwurf_und_claude_klaert_ihn(tmp_path, m
     sup = store.supplier(r["stammdaten"]["id"])
     assert sup.bestaetigt and sup.name == "Muster Handels GmbH"
     assert r["ergebnis"] == lehrer.ERG_BESTAETIGT, r
+
+
+def test_langdock_adresse_und_bearer(monkeypatch):
+    """Langdock (Aaron 12.11.2026): Anthropic-kompatible Adresse, Anmeldung per
+    Bearer statt x-api-key; der Schluessel geht nie in die Adresse."""
+    gesehen = {}
+
+    class _Antwort:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"content": [{"type": "text", "text": "{}"}]}).encode()
+
+    def fake_urlopen(req, timeout=None):
+        gesehen["url"] = req.full_url
+        gesehen["kopf"] = {k.lower(): v for k, v in req.header_items()}
+        return _Antwort()
+
+    monkeypatch.setattr(lehrer.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("RECHNUNG_CLAUDE_API_KEY", "test-schluessel")
+    monkeypatch.setenv("RECHNUNG_CLAUDE_API_URL", "https://api.langdock.com/anthropic/eu/v1/messages")
+    lehrer._post({"model": "x", "max_tokens": 1, "messages": []})
+    assert gesehen["url"] == "https://api.langdock.com/anthropic/eu/v1/messages"
+    assert gesehen["kopf"]["authorization"] == "Bearer test-schluessel"
+    assert "x-api-key" not in gesehen["kopf"]
+    assert "test-schluessel" not in gesehen["url"]
+
+    monkeypatch.delenv("RECHNUNG_CLAUDE_API_URL")
+    lehrer._post({"model": "x", "max_tokens": 1, "messages": []})
+    assert gesehen["url"] == lehrer.API_URL
+    assert gesehen["kopf"]["x-api-key"] == "test-schluessel"
+    assert "authorization" not in gesehen["kopf"]
