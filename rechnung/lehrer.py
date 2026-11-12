@@ -242,6 +242,91 @@ def stammdaten_klaeren(store, entwurf, doc, antwort: dict) -> tuple[dict | None,
             "alter_name": alt_name}, ""
 
 
+def _claude_wert(antwort: dict, name: str) -> tuple[str, bool]:
+    e = (antwort.get("felder") or {}).get(name)
+    if not isinstance(e, dict):
+        return "", False
+    return str(e.get("wert") or "").strip(), e.get("sicher") is True
+
+
+def kennungen_pruefen(store, supplier_id: str | None, doc, antwort: dict) -> dict | None:
+    """C (Plan 12.11.2026): IBAN/USt-IdNr des Lieferanten mit Claude abgleichen
+    (nur mit ``stammdaten_an()``). Ungueltige IBANs (Pruefziffer falsch, z.B.
+    eine als IBAN gelesene franzoesische USt-IdNr) fliegen aus den
+    Stammdaten. Claudes IBAN/USt-IdNr wird NUR eingetragen, wenn der
+    Lieferant danach noch KEINE gueltige hat -- eine zweite, abweichende
+    IBAN bleibt Sache des Menschen (Betrugsschutz). Wert muss im PDF-Text
+    stehen und Claude sicher sein. -> Aenderungen oder ``None``."""
+    from .semantic import _check_value
+    from .textnorm import iban_valid
+
+    sup = store.supplier(supplier_id) if supplier_id else None
+    if sup is None or sup.dummy:
+        return None
+    aend: dict = {}
+    kaputt = [i for i in sup.ibans if not iban_valid(i)]
+    if kaputt:
+        sup.ibans = [i for i in sup.ibans if iban_valid(i)]
+        aend["iban_entfernt"] = kaputt
+    for feld, liste, typ in (("iban", "ibans", "iban"), ("ustid", "ustids", "ustid")):
+        wert, sicher = _claude_wert(antwort, feld)
+        if not wert or not sicher or getattr(sup, liste):
+            continue
+        value, grund = _check_value(doc.text, feld, wert, typ)
+        if grund or not value:
+            continue
+        setattr(sup, liste, [str(value)])
+        aend[f"{feld}_neu"] = str(value)
+    if not aend:
+        return None
+    store.save_supplier(sup)
+    _vermerk_lieferant(store, sup)
+    store.audit("lieferant_kennungen_claude", dict(aend, id=sup.id, name=sup.name), OPERATOR)
+    return dict(aend, id=sup.id, name=sup.name)
+
+
+def _adress_begriffe(a) -> set[str]:
+    from .textnorm import norm
+    namen = [a.name, a.name.split(" - ", 1)[-1]] + list(a.match_terms or [])
+    return {norm(n) for n in namen if len(norm(n)) >= 4}
+
+
+def mandant_klaeren(store, doc, antwort: dict, vorschlag_id: str | None = None
+                    ) -> tuple[dict | None, str]:
+    """B (Plan 12.11.2026): keine Rechnungsadresse erkannt -> Claudes
+    Rechnungsempfaenger GENAU EINER Rechnungsadresse der Bibliothek zuordnen
+    und den Empfaengertext als Suchbegriff ergaenzen; ab dann erkennt das
+    Programm den Mandanten selbst. Nur mit ``stammdaten_an()``.
+    Widerspricht der Postfach-Mandant (``vorschlag_id``), entscheidet der
+    Mensch. -> (Aktion, "") oder (None, Grund)."""
+    from .identify import _ist_empfaenger, name_auf_rechnung
+    from .textnorm import norm
+
+    name, sicher = _claude_wert(antwort, "rechnungsempfaenger")
+    if not name or not sicher:
+        return None, "Claude nennt keinen sicheren Rechnungsempfaenger"
+    if not name_auf_rechnung(name, norm(doc.text)):
+        return None, f"Rechnungsempfaenger {name!r} steht nicht im PDF-Text"
+    name_n = norm(name)
+    treffer = [a for a in store.addresses() if _ist_empfaenger(name_n, _adress_begriffe(a))]
+    if not treffer:
+        return None, f"Rechnungsempfaenger {name!r} passt zu keiner Rechnungsadresse"
+    if len(treffer) > 1:
+        return None, (f"Rechnungsempfaenger {name!r} passt zu mehreren Rechnungsadressen: "
+                      + ", ".join(a.name for a in treffer[:4]))
+    a = treffer[0]
+    if vorschlag_id and vorschlag_id != a.id:
+        return None, (f"Claude sagt {a.name}, das Postfach gehoert zu einem anderen "
+                      "Mandanten -- bitte entscheiden")
+    if name_n not in {norm(t) for t in a.match_terms}:
+        a.match_terms = list(a.match_terms) + [name]
+        store.save_address(a)
+        store.audit("rechnungsadresse_suchbegriff_claude",
+                    {"id": a.id, "name": a.name, "suchbegriff": name}, OPERATOR)
+    return {"aktion": "suchbegriff", "id": a.id, "name": a.name,
+            "suchbegriff": name}, ""
+
+
 def _vermerk_lieferant(store, sup) -> None:
     vermerk = STAMMDATEN_VERMERK.format(datum=time.strftime("%d.%m.%Y"))
     if "von Claude bestaetigt" in (sup.notes or ""):
@@ -462,6 +547,9 @@ class Abgleich:
     korrekturen: dict[str, str] = field(default_factory=dict)  # Feld -> Rohwert
     unsicher: dict[str, str] = field(default_factory=dict)     # Feld -> Grund
     werte: dict[str, object] = field(default_factory=dict)     # Claudes Werte (geparst)
+    # freiwillige Felder, bei denen Claude unsicher war: kein Grund fuer den
+    # Menschen, der Wert des Programms bleibt (Plan Aaron 12.11.2026, D)
+    hinweise: dict[str, str] = field(default_factory=dict)
 
 
 def _gleich(a, b, vtype: str) -> bool:
@@ -547,6 +635,8 @@ def abgleichen(text: str, felder: dict[str, str], programm: dict, antwort: dict)
             continue
         if not _gleich(prog, value, vtype):
             out.korrekturen[name] = str(wert)
+    for name in [n for n in out.unsicher if n not in REQUIRED]:
+        out.hinweise[name] = out.unsicher.pop(name)
     return out
 
 
@@ -734,6 +824,18 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
         # Uebungsphase: Claude nennt auch den Lieferanten (stammdaten_klaeren)
         frage["lieferant_name"] = "name"
         programm["lieferant_name"] = None
+    ohne_mandant = (stammdaten_an() and not res.billing_address_id
+                    and bool(store.addresses()))
+    if stammdaten_an():
+        # C: Kennungen des Lieferanten mitpruefen
+        for kenn in ("iban", "ustid"):
+            frage[kenn] = kenn
+            fr = res.fields.get(kenn)
+            programm[kenn] = fr.value if fr is not None and fr.source != "missing" else None
+    if ohne_mandant:
+        # B: Rechnungsempfaenger (Mandant)
+        frage["rechnungsempfaenger"] = "name"
+        programm["rechnungsempfaenger"] = None
     try:
         antwort = frage_claude(store, path, doc.sha256, frage, programm, post=post)
     except ClaudeNichtErreichbar as e:
@@ -753,12 +855,31 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
         rec["stammdaten"] = aktion
         res = process(path, store, use_llm=lokale_ki())
         rec["lieferant"] = res.supplier_name or res.supplier_id
-        programm = {n: (res.fields[n].value if n in res.fields
-                        and res.fields[n].source != "missing" else None) for n in felder}
+
+    neu_rechnen = False
+    if ohne_mandant:
+        m_aktion, m_grund = mandant_klaeren(
+            store, doc, antwort, getattr(res, "billing_address_suggestion_id", None))
+        if m_aktion is not None:
+            rec["mandant"] = m_aktion
+            neu_rechnen = True
+        else:
+            rec["mandant_offen"] = m_grund
+    if stammdaten_an():
+        k = kennungen_pruefen(store, res.supplier_id, doc, antwort)
+        if k:
+            rec["kennungen"] = k
+            neu_rechnen = True
+    if neu_rechnen:
+        res = process(path, store, use_llm=lokale_ki())
+    programm = {n: (res.fields[n].value if n in res.fields
+                    and res.fields[n].source != "missing" else None) for n in felder}
 
     ab = abgleichen(doc.text, felder, programm, antwort)
     rec["claude"] = {k: v for k, v in ab.werte.items()}
     rec["korrigiert"] = sorted(ab.korrekturen)
+    if ab.hinweise:
+        rec["hinweise_felder"] = dict(ab.hinweise)
     rec["hinweis"] = antwort.get("hinweis") or ""
 
     vorher = store.corrections(doc.sha256)

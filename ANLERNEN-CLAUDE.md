@@ -120,6 +120,23 @@ behandelte Lieferant trägt einen Vermerk, `--bilanz` zählt sie. Vor dem
 Wechsel auf „autonom“ siehst du sie durch (IBAN!) und nimmst den Schalter
 wieder heraus.
 
+Mit demselben Schalter prüft Claude außerdem:
+
+- **Rechnungsadresse (Mandant):** Erkennt das Programm keine, nennt Claude
+  den Rechnungsempfänger. Passt er zu genau einer Rechnungsadresse der
+  Bibliothek, wird der Empfängertext dort als Suchbegriff ergänzt; ab dann
+  erkennt das Programm den Mandanten selbst. Widerspricht der Postfach-
+  Mandant, entscheidest du.
+- **IBAN und USt-IdNr des Lieferanten:** Ungültige IBANs (falsche
+  Prüfziffer) fliegen aus den Stammdaten. Claudes IBAN wird nur
+  eingetragen, wenn der Lieferant danach keine gültige hat; eine zweite,
+  abweichende IBAN entscheidest immer du (Betrugsschutz).
+
+Ist Claude bei einem **freiwilligen Feld** (z. B. Kostenstelle,
+Zahlungsreferenz) unsicher, bleibt der Wert des Programms stehen und die
+Rechnung geht deswegen nicht an dich. Bei Pflichtfeldern (Nummer, Datum,
+Beträge) bleibt es streng.
+
 ## Übung bleibt Übung
 
 Claude bestätigt nur im eigenen Protokoll (`data/lehrer.jsonl`), nie im

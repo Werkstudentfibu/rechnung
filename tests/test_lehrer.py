@@ -357,7 +357,9 @@ def test_waehrung_eur_ist_durch_eurozeichen_belegt():
     ab = lehrer.abgleichen("Gesamtbetrag 1.190,00 \u20ac zahlbar bis", felder, {"waehrung": "EUR"}, antwort)
     assert "waehrung" not in ab.unsicher and ab.werte["waehrung"] == "EUR"
     ab = lehrer.abgleichen("Total CHF 1'190.00", felder, {"waehrung": "EUR"}, antwort)
-    assert "waehrung" in ab.unsicher            # EUR steht nirgends
+    # EUR steht nirgends: freiwilliges Feld -> nur Hinweis, kein Grund fuer
+    # den Menschen (Plan 12.11.2026, D); der Programmwert bleibt
+    assert "waehrung" in ab.hinweise and "waehrung" not in ab.korrekturen
     ab = lehrer.abgleichen("Total CHF 1'190.00", felder, {"waehrung": "EUR"},
                            {"felder": {"waehrung": {"wert": "CHF", "sicher": True}}})
     assert ab.korrekturen.get("waehrung") == "CHF"
@@ -452,3 +454,107 @@ def test_eigene_gesellschaft_wird_nie_lieferant(tmp_path, monkeypatch):
     assert r["ergebnis"] == lehrer.ERG_MENSCH
     assert "eigene Gesellschaft" in r["gruende"][0]
     assert not store.supplier("neu-de123456789").bestaetigt
+
+
+# ---- Plan 12.11.2026: B (Mandant), C (Kennungen), D (Nebenfelder) ----------
+
+def _claude_roh(felder: dict, calls: list | None = None):
+    """Antwort mit frei gesetztem sicher/wert je Feld."""
+    def post(body):
+        if calls is not None:
+            calls.append(body)
+        return {"content": [{"type": "text", "text": json.dumps({"felder": felder})}]}
+    return post
+
+
+def _felder_aus(werte: dict, sicher: bool = True, **sonder) -> dict:
+    out = {k: {"wert": v, "sicher": sicher, "beleg": str(v)} for k, v in werte.items()}
+    out.update(sonder)
+    return out
+
+
+def test_unsicheres_nebenfeld_blockiert_nicht(tmp_path):
+    store, ordner, src = _store(tmp_path)
+    felder = _felder_aus(RICHTIG, kostenstelle={"wert": "4711", "sicher": False, "beleg": ""})
+    r = lehrer.anlernen_datei(store, src, post=_claude_roh(felder))
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT, r
+    assert "kostenstelle" in r.get("hinweise_felder", {})
+
+
+def test_unsicheres_pflichtfeld_bleibt_streng(tmp_path):
+    store, ordner, src = _store(tmp_path)
+    felder = _felder_aus(RICHTIG, brutto={"wert": "1190.00", "sicher": False, "beleg": ""})
+    r = lehrer.anlernen_datei(store, src, post=_claude_roh(felder))
+    assert r["ergebnis"] == lehrer.ERG_MENSCH
+
+
+def test_kaputte_iban_in_stammdaten_wird_durch_claudes_ersetzt(tmp_path, monkeypatch):
+    monkeypatch.setenv("RECHNUNG_CLAUDE_STAMMDATEN", "1")
+    store, ordner, src = _store(tmp_path)
+    sup = store.supplier("muster")
+    sup.ibans = ["FR52327460341"]           # franzoesische USt-IdNr als "IBAN"
+    store.save_supplier(sup)
+    werte = dict(RICHTIG, iban="DE89370400440532013000", ustid="DE123456789")
+    r = lehrer.anlernen_datei(store, src, post=_claude(werte))
+    assert r["kennungen"]["iban_entfernt"] == ["FR52327460341"]
+    assert store.supplier("muster").ibans == ["DE89370400440532013000"]
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT, r
+
+
+def test_zweite_abweichende_iban_traegt_claude_nie_ein(tmp_path, monkeypatch):
+    monkeypatch.setenv("RECHNUNG_CLAUDE_STAMMDATEN", "1")
+    store, ordner, src = _store(tmp_path)
+    sup = store.supplier("muster")
+    sup.ibans = ["DE02120300000000202051"]  # gueltige, aber andere IBAN
+    store.save_supplier(sup)
+    werte = dict(RICHTIG, iban="DE89370400440532013000")
+    r = lehrer.anlernen_datei(store, src, post=_claude(werte))
+    assert store.supplier("muster").ibans == ["DE02120300000000202051"]
+    assert "kennungen" not in r
+    assert r["ergebnis"] == lehrer.ERG_MENSCH        # Betrugsschutz: IBAN weicht ab
+
+
+def _mit_adressen(store):
+    from rechnung.billing import BillingAddress
+    # Suchbegriff passt NICHT zum Text der Rechnung ("Beispiel Kunde AG")
+    store.save_address(BillingAddress(id="7", name="BKA - Beispiel Kunde AG",
+                                      match_terms=["Beispiel Kunde Aktiengesellschaft"]))
+    store.save_address(BillingAddress(id="8", name="ZZZ - Ganz Andere Firma AG",
+                                      match_terms=["Ganz Andere Firma AG"]))
+
+
+def test_claude_ordnet_mandanten_zu_und_programm_lernt_suchbegriff(tmp_path, monkeypatch):
+    monkeypatch.setenv("RECHNUNG_CLAUDE_STAMMDATEN", "1")
+    store, ordner, src = _store(tmp_path)
+    _mit_adressen(store)
+    werte = dict(RICHTIG, rechnungsempfaenger="Beispiel Kunde AG")
+    r = lehrer.anlernen_datei(store, src, post=_claude(werte))
+    assert r["mandant"]["id"] == "7", r
+    assert "Beispiel Kunde AG" in store.address("7").match_terms
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT, r
+    # ab jetzt erkennt das Programm den Mandanten selbst
+    assert process(src, store).billing_address_id == "7"
+
+
+def test_mandant_mehrdeutig_oder_erfunden_geht_zum_menschen(tmp_path, monkeypatch):
+    monkeypatch.setenv("RECHNUNG_CLAUDE_STAMMDATEN", "1")
+    store, ordner, src = _store(tmp_path)
+    _mit_adressen(store)
+    werte = dict(RICHTIG, rechnungsempfaenger="Erfundene Holding GmbH")
+    r = lehrer.anlernen_datei(store, src, post=_claude(werte))
+    assert r["ergebnis"] == lehrer.ERG_MENSCH
+    assert "nicht im PDF-Text" in r["mandant_offen"]
+    assert store.address("7").match_terms == ["Beispiel Kunde Aktiengesellschaft"]
+
+
+def test_ohne_schalter_keine_stammdaten_aenderung(tmp_path):
+    store, ordner, src = _store(tmp_path)
+    _mit_adressen(store)
+    sup = store.supplier("muster")
+    sup.ibans = ["FR52327460341"]
+    store.save_supplier(sup)
+    werte = dict(RICHTIG, rechnungsempfaenger="Beispiel Kunde AG", iban="DE89370400440532013000")
+    r = lehrer.anlernen_datei(store, src, post=_claude(werte))
+    assert store.supplier("muster").ibans == ["FR52327460341"]
+    assert store.address("7").match_terms == ["Beispiel Kunde Aktiengesellschaft"]
+    assert "mandant" not in r and "kennungen" not in r
