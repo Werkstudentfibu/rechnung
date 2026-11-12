@@ -572,3 +572,52 @@ def test_erneut_prueft_menschfaelle_noch_einmal(tmp_path):
     assert r["ergebnis"] == lehrer.ERG_UEBERSPRUNGEN and not calls
     r = lehrer.anlernen_datei(store, src, post=_claude(RICHTIG, calls=calls), erneut=True)
     assert r["ergebnis"] == lehrer.ERG_BESTAETIGT and calls
+
+
+def _mandanten_mit_anderem_namen(store):
+    """Bibliothek fuehrt den Mandanten unter einem anderen Namen als die
+    Firma auf der Rechnung (Proberunde 12.11.2026)."""
+    from rechnung.billing import BillingAddress
+    store.save_address(BillingAddress(id="1", name="BKH - Beispielhaus Berlin",
+                                      match_terms=["Beispielhaus Berlin"]))
+    store.save_address(BillingAddress(id="2", name="ZZZ - Ganz Andere Firma AG",
+                                      match_terms=["Ganz Andere Firma AG"]))
+
+
+def test_claude_waehlt_mandanten_aus_der_liste(tmp_path, monkeypatch):
+    monkeypatch.setenv("RECHNUNG_CLAUDE_STAMMDATEN", "1")
+    store, ordner, src = _store(tmp_path)
+    _mandanten_mit_anderem_namen(store)
+    calls = []
+    werte = dict(RICHTIG, rechnungsempfaenger="Beispiel Kunde AG",
+                 mandant="BKH - Beispielhaus Berlin")
+    r = lehrer.anlernen_datei(store, src, post=_claude(werte, calls=calls))
+    prompt = json.dumps(calls[0])
+    assert "BKH - Beispielhaus Berlin" in prompt and "ZZZ - Ganz Andere Firma AG" in prompt
+    assert r["mandant"]["id"] == "1", r
+    assert "Beispiel Kunde AG" in store.address("1").match_terms
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT, r
+    assert process(src, store).billing_address_id == "1"
+
+
+def test_mandant_nicht_aus_der_liste_wird_nicht_uebernommen(tmp_path, monkeypatch):
+    monkeypatch.setenv("RECHNUNG_CLAUDE_STAMMDATEN", "1")
+    store, ordner, src = _store(tmp_path)
+    _mandanten_mit_anderem_namen(store)
+    werte = dict(RICHTIG, rechnungsempfaenger="Beispiel Kunde AG",
+                 mandant="Erfundenes Hotel")
+    r = lehrer.anlernen_datei(store, src, post=_claude(werte))
+    assert r["ergebnis"] == lehrer.ERG_MENSCH
+    assert "passt zu keiner" in r["mandant_offen"]
+    assert store.address("1").match_terms == ["Beispielhaus Berlin"]
+
+
+def test_mandant_unsicher_wird_nicht_uebernommen(tmp_path, monkeypatch):
+    monkeypatch.setenv("RECHNUNG_CLAUDE_STAMMDATEN", "1")
+    store, ordner, src = _store(tmp_path)
+    _mandanten_mit_anderem_namen(store)
+    felder = _felder_aus(dict(RICHTIG, rechnungsempfaenger="Beispiel Kunde AG"),
+                         mandant={"wert": "BKH - Beispielhaus Berlin", "sicher": False, "beleg": ""})
+    r = lehrer.anlernen_datei(store, src, post=_claude_roh(felder))
+    assert "mandant" not in r
+    assert store.address("1").match_terms == ["Beispielhaus Berlin"]

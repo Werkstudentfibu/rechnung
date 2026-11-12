@@ -308,7 +308,17 @@ def mandant_klaeren(store, doc, antwort: dict, vorschlag_id: str | None = None
     if not name_auf_rechnung(name, norm(doc.text)):
         return None, f"Rechnungsempfaenger {name!r} steht nicht im PDF-Text"
     name_n = norm(name)
-    treffer = [a for a in store.addresses() if _ist_empfaenger(name_n, _adress_begriffe(a))]
+    adressen = store.addresses()
+    # Proberunde 12.11.2026: Claude nennt den Firmennamen ("Hotel Regent
+    # GmbH"), die Bibliothek fuehrt den Mandanten anders ("HRI - Hotel Regent
+    # Koeln"). Deshalb waehlt Claude zuerst aus der mitgeschickten Liste;
+    # nur die Auswahl zaehlt, die exakt einem Listeneintrag entspricht.
+    wahl, wahl_sicher = _claude_wert(antwort, "mandant")
+    treffer = []
+    if wahl and wahl_sicher:
+        treffer = [a for a in adressen if norm(a.name) == norm(wahl)]
+    if not treffer:
+        treffer = [a for a in adressen if _ist_empfaenger(name_n, _adress_begriffe(a))]
     if not treffer:
         return None, f"Rechnungsempfaenger {name!r} passt zu keiner Rechnungsadresse"
     if len(treffer) > 1:
@@ -372,11 +382,15 @@ _SYSTEM = (
     "sicher=false. Antworte ausschliesslich mit JSON ohne Markdown."
 )
 
+MANDANT_FORMAT = ("die Rechnungsadresse (unser Unternehmen als Empfaenger) -- genau EINER "
+                  "dieser Eintraege, exakt so geschrieben, oder null, wenn keiner passt: ")
+
 _FORMAT = {
     "date": "Datum als JJJJ-MM-TT",
     "amount": "Betrag als Zahl mit Punkt als Dezimaltrenner, ohne Waehrung/Tausenderpunkte",
     "number": "genau wie auf der Rechnung geschrieben",
     "text": "genau wie auf der Rechnung geschrieben",
+    "name": "Firmenname genau wie auf der Rechnung geschrieben",
 }
 
 
@@ -835,9 +849,12 @@ def anlernen_datei(store, path: str | Path, *, post=None, erneut: bool = False) 
             fr = res.fields.get(kenn)
             programm[kenn] = fr.value if fr is not None and fr.source != "missing" else None
     if ohne_mandant:
-        # B: Rechnungsempfaenger (Mandant)
+        # B: Rechnungsempfaenger (wie auf der Rechnung) und Mandant (aus der Liste)
         frage["rechnungsempfaenger"] = "name"
         programm["rechnungsempfaenger"] = None
+        frage["mandant"] = MANDANT_FORMAT + " | ".join(
+            sorted(a.name for a in store.addresses()))
+        programm["mandant"] = None
     try:
         antwort = frage_claude(store, path, doc.sha256, frage, programm, post=post)
     except ClaudeNichtErreichbar as e:
