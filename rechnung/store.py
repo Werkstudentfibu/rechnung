@@ -44,6 +44,19 @@ def _atomic_write(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
+_UNZULAESSIG = '<>:"/\\|?*'
+
+
+def _dateiname(name: str) -> str:
+    """Id -> unter Windows zulaessiger Dateiname: unzulaessige Zeichen
+    (<>:"/\\|?*) und Steuerzeichen werden als %XX kodiert, Leerzeichen/
+    Punkte am Ende ebenso. Unveraendert, wenn nichts davon vorkommt."""
+    out = "".join(f"%{ord(c):02X}" if c in _UNZULAESSIG or ord(c) < 32 else c
+                  for c in name)
+    stamm = out.rstrip(" .")
+    return stamm + "".join(f"%{ord(c):02X}" for c in out[len(stamm):])
+
+
 def _file_sig(p: Path) -> tuple:
     """(mtime_ns, Groesse) -- (0, 0), wenn die Datei fehlt."""
     try:
@@ -269,7 +282,12 @@ class Store:
 
     # ---- Templates --------------------------------------------------
     def _tpl_path(self, tid: str) -> Path:
-        return self.root / "templates" / f"{tid}.json"
+        # Lieferanten-Ids aus dem Excel-Import enthalten teils "/" oder "\\"
+        # ("70000-Kreditoren CH / Kreditoren Stammdaten Schweiz-1") -- als
+        # Dateiname waere das ein Unterordner, das Speichern scheiterte
+        # (Proberunde 12.11.2026). Unzulaessige Zeichen werden kodiert; Ids
+        # ohne solche Zeichen behalten ihren bisherigen Dateinamen.
+        return self.root / "templates" / f"{_dateiname(tid)}.json"
 
     def template(self, tid: str) -> Template | None:
         data = _read_json_safe(self._tpl_path(tid), None)
@@ -280,7 +298,8 @@ class Store:
 
     def delete_template(self, tid: str) -> None:
         self._tpl_path(tid).unlink(missing_ok=True)
-        self._tpl_path(tid).with_name(f"{tid}.json.bak").unlink(missing_ok=True)
+        p = self._tpl_path(tid)
+        p.with_name(p.name + ".bak").unlink(missing_ok=True)
 
     def templates_for(self, supplier_id: str) -> list[Template]:
         return [t for t in self.all_templates() if t.supplier_id == supplier_id]

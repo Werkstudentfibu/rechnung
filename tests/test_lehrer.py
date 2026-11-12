@@ -621,3 +621,37 @@ def test_mandant_unsicher_wird_nicht_uebernommen(tmp_path, monkeypatch):
     r = lehrer.anlernen_datei(store, src, post=_claude_roh(felder))
     assert "mandant" not in r
     assert store.address("1").match_terms == ["Beispielhaus Berlin"]
+
+
+def test_lieferant_mit_schraegstrich_in_der_id_lernt_vorlage(tmp_path):
+    """Proberunde 12.11.2026: Excel-Ids wie '70000-Kreditoren CH / ...' liessen
+    das Speichern der Vorlage (und damit die ganze Runde) abstuerzen."""
+    store = Store(tmp_path / "data")
+    ordner = tmp_path / "in"
+    ordner.mkdir()
+    src = make_invoice(ordner / "a.pdf")
+    sup = supplier_from_doc(pdfmod.load(src), "70000-Kreditoren CH / Stamm\\daten:1",
+                            "Muster Handels GmbH")
+    store.save_supplier(sup)
+    r = lehrer.anlernen_datei(store, src, post=_claude(RICHTIG))
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT, r
+    tpls = store.templates_for(sup.id)
+    assert tpls and store.template(tpls[0].id) is not None
+
+
+def test_programmfehler_bei_einer_rechnung_beendet_runde_nicht(tmp_path, monkeypatch):
+    store, ordner, src = _store(tmp_path)
+    make_invoice(ordner / "0_erste.pdf", rechnungsnr="RE-1")
+    echt = lehrer.anlernen_datei
+
+    def mal_kaputt(store_, p, **kw):
+        if Path(p).name == "0_erste.pdf":
+            raise RuntimeError("simulierter Programmfehler")
+        return echt(store_, p, **kw)
+
+    monkeypatch.setattr(lehrer, "anlernen_datei", mal_kaputt)
+    res = lehrer.anlernen(store, ordner, post=_claude(RICHTIG))
+    nach = {r["datei"]: r for r in res}
+    assert nach["0_erste.pdf"]["ergebnis"] == lehrer.ERG_FEHLER
+    assert "simulierter Programmfehler" in nach["0_erste.pdf"]["gruende"][0]
+    assert nach["a.pdf"]["ergebnis"] == lehrer.ERG_BESTAETIGT

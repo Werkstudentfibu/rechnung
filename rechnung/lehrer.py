@@ -949,7 +949,17 @@ def anlernen(store, ordner: str | Path, *, limit: int = 0, post=None,
         # die erste Rechnung faengt immer an, danach zaehlt das Budget
         if zeitbudget_s and out and time.monotonic() - start >= zeitbudget_s:
             break
-        r = anlernen_datei(store, p, post=post, erneut=erneut)
+        try:
+            r = anlernen_datei(store, p, post=post, erneut=erneut)
+        except Exception as e:  # Programmfehler bei EINER Rechnung: Runde laeuft weiter
+            r = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "datei": Path(p).name,
+                 "weg": backend(), "modell": modell(), "ergebnis": ERG_FEHLER,
+                 "gruende": [f"Programmfehler: {type(e).__name__}: {str(e)[:160]}"]}
+            try:
+                r["sha256"] = hashlib.sha256(Path(p).read_bytes()).hexdigest()
+            except OSError:
+                pass
+            _protokoll(store, r)
         out.append(r)
         if fortschritt:
             fortschritt(r)

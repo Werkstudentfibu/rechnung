@@ -62,15 +62,22 @@ def match_text(text: str, addresses: list[BillingAddress], min_hits: int = 1):
         terms = [norm(t) for t in a.match_terms if t.strip()]
         if not terms:
             continue
-        hits = sum(1 for t in terms if t and t in text_n)
-        if hits >= min_hits:
-            scored.append((a, round(hits / len(terms), 3)))
+        getroffen = [t for t in terms if t and t in text_n]
+        if len(getroffen) >= min_hits:
+            # Gleichstand beim Anteil: mehr getroffene Begriffe, dann der
+            # laengere (genauere) Begriff gewinnt -- "Betriebsgesellschaft
+            # Hotel Frankfurt mbH" schlaegt "Hotel Frankfurt", das darin
+            # enthalten ist (Proberunde 12.11.2026). Erst bei Gleichstand in
+            # allem bleibt es "mehrdeutig".
+            schluessel = (round(len(getroffen) / len(terms), 3), len(getroffen),
+                          sum(len(t) for t in getroffen))
+            scored.append((a, schluessel))
     if not scored:
         return None, "keine Rechnungsadresse aus der Bibliothek passt"
     scored.sort(key=lambda x: x[1], reverse=True)
     if len(scored) > 1 and scored[0][1] == scored[1][1]:
         return None, (f"Rechnungsadresse mehrdeutig: {scored[0][0].id} / {scored[1][0].id}")
-    return scored[0], ""
+    return (scored[0][0], scored[0][1][0]), ""
 
 
 def suggest_terms(doc: Document, top_fraction: float = 0.45) -> list[str]:
