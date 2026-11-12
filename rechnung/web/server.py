@@ -970,12 +970,44 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         with _mensch():
             return _invoice(file, address)
 
+    def _mail_view(path: Path) -> dict:
+        """Mail (``.eml``) aus 'Menschliche Bearbeitung': Betreff, Absender,
+        Datum, Mailtext und Links -- schnell, ohne Texterkennung."""
+        import email as _email
+        import email.header as _eh
+
+        from ..ingest import mail_body
+
+        msg = _email.message_from_bytes(path.read_bytes())
+
+        def kopf(k: str) -> str:
+            roh = msg.get(k, "") or ""
+            try:
+                return str(_eh.make_header(_eh.decode_header(roh)))
+            except Exception:  # noqa: BLE001 -- z.B. unbekannte Kodierung
+                return str(roh)
+
+        try:
+            text, links = mail_body(msg)
+        except Exception as e:  # noqa: BLE001
+            text, links = f"(Mailtext nicht lesbar: {type(e).__name__})", []
+        rec = next((r for r in human.offen(store) if r.get("datei") == path.name), {})
+        return {"mail": True, "file": path.name, "betreff": kopf("Subject"),
+                "von": kopf("From"), "datum": kopf("Date"), "text": text[:20000],
+                "links": links[:40],
+                "gruende": [g.get("grund", "") for g in rec.get("gruende") or []]}
+
     def _invoice(file: str, address: str | None = None) -> JSONResponse:
         """``address`` (optional): Mensch uebersteuert die erkannte
         Rechnungsadresse im Reiter "1 Rechnungsadresse" (``#variant`` ->
         ``zeigeAdresse()``) -- die Lieferantensuche laeuft dann unter dieser
         Adresse neu (Lieferant je Rechnungsadresse, 09.10.2026)."""
         path = _resolve(file)
+        if path.suffix.lower() == ".eml":
+            # Mail ohne Rechnungsanhang (z.B. nur Link im Mailtext): eigene
+            # Ansicht statt PDF-Auslesen -- das lief sonst in die Zeitgrenze
+            # und endete mit 500 (Befund Aaron 12.11.2026, 126 Mails).
+            return JSONResponse(_mail_view(path))
         zuletzt_offen.append(path.name)       # Liste rechnet diese Datei immer sofort neu
         if einvoice.load(path) is not None:
             return JSONResponse(_einvoice_view(path))
@@ -2188,6 +2220,21 @@ def create_app(store: Store, samples: Path) -> FastAPI:
 
         threading.Timer(0.5, lambda: os._exit(selbstupdate.RESTART_EXIT_CODE)).start()
         return JSONResponse({"ok": True})
+
+    @app.post("/api/menschlich/erledigt")
+    def menschlich_erledigt(body: dict) -> JSONResponse:
+        """Eintrag ohne Rechnungs-Ergebnis von Hand erledigen (z.B. Mail nur
+        mit Link gesichtet, Rechnung geholt) -- Knopf 'Erledigt' in der
+        Mail-Ansicht. Gleiche Wirkung wie ``rechnung menschlich --erledigt``."""
+        from ..config import operator as _operator
+
+        name = human.file_name(body.get("file", ""))
+        hrec = next((r for r in human.offen(store) if r.get("datei") == name), None)
+        if hrec is None:
+            raise HTTPException(404, "Nicht in 'Menschliche Bearbeitung' gefunden")
+        human.erledigt_sha(store, hrec["sha256"], operator=_operator(),
+                           notiz=str(body.get("notiz") or "von Hand erledigt")[:200])
+        return JSONResponse({"ok": True, "datei": name})
 
     @app.get("/api/menschlich")
     def menschlich_ep() -> JSONResponse:

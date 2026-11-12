@@ -645,6 +645,7 @@ async function openInvoice(file, row) {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(`${r.status}: ${d.detail || r.statusText}`);
     if (LADE_DATEI !== file) return;   // inzwischen andere Rechnung gewaehlt
+    if (d.mail) { renderMail(d); return; }   // Mail ohne Rechnungsanhang
     applyInvoiceData(d);
   } catch (e) {
     if (LADE_DATEI !== file) return;
@@ -652,6 +653,46 @@ async function openInvoice(file, row) {
       <p><b>${esc(file)}</b></p><p>${esc(String(e && e.message || e))}</p>
       <p class="hint">Nach ${Math.round((Date.now() - t0) / 1000)} s. Bitte ein Foto davon an Emmy schicken.</p></div>`;
   } finally { clearInterval(tick); }
+}
+
+// Mail ohne Rechnungsanhang (.eml, z.B. nur Link im Mailtext; Aaron 12.11.2026):
+// eigene Ansicht mit Links und den Knoepfen Erledigt / Keine Rechnung /
+// Ueberspringen -- im Stapel "Menschliche Bearbeitung" geht es danach weiter.
+function renderMail(d) {
+  STATE = { file: d.file, mail: true };
+  const w = $('#work'); w.className = '';
+  const links = (d.links || []).map(u =>
+    `<li><a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(u)}</a></li>`).join('');
+  const gruende = (d.gruende || []).filter(Boolean);
+  w.innerHTML = `<div style="padding:12px">
+    <h3>Mail ohne Rechnungsanhang</h3>
+    <p><b>${esc(d.betreff || '(ohne Betreff)')}</b><br>Von: ${esc(d.von || '–')} · ${esc(d.datum || '')}</p>
+    ${gruende.length ? `<p class="hint">${gruende.map(esc).join('<br>')}</p>` : ''}
+    ${links ? `<p>Links in der Mail – die Rechnung dort herunterladen und in den Eingang legen:</p><ul>${links}</ul>` : '<p class="hint">Keine Links in der Mail.</p>'}
+    <details ${links ? '' : 'open'}><summary>Mailtext</summary>
+      <pre style="white-space:pre-wrap;max-height:50vh;overflow:auto">${esc(d.text || '')}</pre></details>
+    <div class="actionbar">
+      <button class="senden" onclick="mailErledigt()" title="Mail gesichtet, Rechnung geholt oder nicht nötig (Taste b)">✓ Erledigt</button>
+      <button class="ghost danger" onclick="keineRechnungVonHand()" title="Ist gar keine Rechnung – in den Ordner \'Keine Rechnung\'">Keine Rechnung</button>
+      <button class="ghost" onclick="mailUeberspringen()">Überspringen</button>
+    </div>
+    <div id="msg" class="hint"></div></div>`;
+  const m = $('#msg'); if (m && HUMAN_QUEUE) m.textContent = stapelStand(HUMAN_QUEUE, d.file);
+}
+async function mailErledigt() {
+  if (!STATE || !STATE.mail || !STATE.file) return;
+  const alt = STATE.file;
+  const r = await fetch('/api/menschlich/erledigt', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ file: alt, notiz: 'Mail gesichtet (Rechnung nur per Link)' }) });
+  if (!r.ok) { alert('Nicht möglich: ' + ((await r.json().catch(() => ({}))).detail || r.status)); return; }
+  STATE.file = null;
+  if (HUMAN_QUEUE) { await stapelWeiter(alt, '✓ Mail als erledigt markiert.'); return; }
+  $('#work').innerHTML = '<p class="hint" style="padding:12px">✓ Mail als erledigt markiert.</p>';
+}
+async function mailUeberspringen() {
+  const alt = STATE && STATE.file;
+  if (HUMAN_QUEUE) { await stapelWeiter(alt, 'Übersprungen.'); return; }
+  $('#work').innerHTML = '<p class="hint" style="padding:12px">Übersprungen.</p>';
 }
 
 function applyInvoiceData(d) {
@@ -2819,6 +2860,7 @@ document.addEventListener('keydown', (ev) => {
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
   if (!STATE || !STATE.file) return;
   ev.preventDefault();
+  if (STATE.mail) { mailErledigt(); return; }   // Mail-Ansicht: b = Erledigt
   sendeRechnung();
 });
 
