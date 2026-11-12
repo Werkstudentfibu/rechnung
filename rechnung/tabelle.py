@@ -512,6 +512,172 @@ def markiere_tabelle(doc: Document, boxes: list[dict], woerterbuch: dict | None 
     return {"columns": cols, "rows": rows}
 
 
+_BETRAG_RE = __import__("re").compile(r"\d[\d.,']*[.,]\d{2}(?!\d)")
+
+
+def _hat_betrag(line: list[Word]) -> bool:
+    return any(_BETRAG_RE.search(w.text) for w in line)
+
+
+def _box_bandgrenzen(doc: Document, box: dict, ist_erste: bool) -> tuple[list[float], bool]:
+    """Zeilengrenzen (y in PDF-Punkten, nur die inneren) einer per Rahmen
+    markierten Tabelle -> (Grenzen, erste Zeile ist Kopfzeile). Eine neue
+    Position beginnt mit einer Zeile, in der ein Betrag steht; Zeilen ohne
+    Betrag (z.B. zweite Beschreibungszeile) gehoeren zur vorigen Position --
+    dieselbe Annahme wie ``_merge_fortsetzungen``. Kopf-, Summen- und
+    Seitenwechselzeilen sind eigene Baender."""
+    words = sorted(_words_in_box(doc, box), key=lambda w: (w.cy, w.x0))
+    if not words:
+        return [], ist_erste
+    zeilen = _cluster_rows(words, _line_h(words))
+    hat = [_hat_betrag(z) for z in zeilen]
+    # Kopfzeile: als solche erkannt, oder erster Rahmen und oben steht kein
+    # Betrag (Rahmen ohne Kopf -> erste Zeile ist schon eine Position).
+    kopf = _ist_header_zeile(zeilen[0]) or (ist_erste and not hat[0])
+    # Mehrzeiliger Kopf (z.B. "Betrag / Netto / EUR" untereinander): alles bis
+    # zur ersten Zeile mit Betrag gehoert zum Kopf -- ohne Betraege nur Zeile 1.
+    erste_pos = next((i for i, z in enumerate(zeilen) if hat[i] or _ist_stop(z)), len(zeilen))
+    kopf_ende = (max(1, erste_pos) if any(hat) else 1) if kopf else 0
+    baender: list[list[list[Word]]] = []
+    for i, line in enumerate(zeilen):
+        if i < kopf_ende:
+            if baender:
+                baender[0].append(line)
+            else:
+                baender.append([line])
+            continue
+        eigenes_band = (
+            not baender
+            or i == kopf_ende
+            or not any(hat)
+            or _ist_stop(line) or _ist_seitenwechsel_zeile(line)
+            or _ist_stop(baender[-1][0]) or _ist_seitenwechsel_zeile(baender[-1][0])
+            or _hat_betrag(line)
+        )
+        if eigenes_band:
+            baender.append([line])
+        else:
+            baender[-1].append(line)
+    grenzen = []
+    for a, b in zip(baender, baender[1:]):
+        unten = max(w.bottom for line in a for w in line)
+        oben = min(w.top for line in b for w in line)
+        grenzen.append(round((unten + oben) / 2, 2))
+    return grenzen, kopf
+
+
+def _zelltext(zeilen: list[list[Word]], x0: float, x1: float) -> str:
+    """Text einer Zelle [x0, x1) -- Zeile fuer Zeile, je Zeile links nach rechts
+    (Woerter einer Zeile haben oft leicht verschiedene Hoehen)."""
+    teile = []
+    for z in zeilen:
+        cw = sorted((w for w in z if x0 <= w.cx < x1), key=lambda w: w.x0)
+        if cw:
+            teile.append(" ".join(w.text for w in cw))
+    return " ".join(teile).strip()
+
+
+def raster_vorschlag(doc: Document, boxes: list[dict], woerterbuch: dict | None = None,
+                     grid: dict | None = None) -> dict:
+    """Raster zum Anzeigen und Verschieben (Wunsch Aaron 12.11.2026):
+    ``{"spalten": [innere Spaltengrenzen als Anteil der Seitenbreite],
+    "zeilen": {"<seite>": [innere Zeilengrenzen in PDF-Punkten]},
+    "kopf": {"<seite>": erste Zeile ist Kopfzeile}}``. Spalten wie
+    ``markiere_tabelle`` (Wortluecken), Zeilen je Position."""
+    if not boxes:
+        return {"spalten": [], "zeilen": {}, "kopf": {}}
+    grid = grid or markiere_tabelle(doc, boxes, woerterbuch)
+    cols = grid["columns"]
+    raster = {"spalten": [c["x1"] for c in cols[:-1]], "zeilen": {}, "kopf": {}}
+    for i, box in enumerate(sorted(boxes, key=lambda b: (b["page"], b["top"]))):
+        g, k = _box_bandgrenzen(doc, box, i == 0)
+        raster["zeilen"][str(box["page"])] = g
+        raster["kopf"][str(box["page"])] = k
+    return raster
+
+
+def raster_lesen(doc: Document, boxes: list[dict], raster: dict,
+                 woerterbuch: dict | None = None) -> dict:
+    """Tabelle nach einem (vom Menschen angepassten) Raster lesen -> wie
+    ``markiere_tabelle`` ``{"columns", "rows"}`` plus ``"raster"`` (das
+    tatsaechlich benutzte, ergaenzt um Seiten ohne eigene Zeilengrenzen).
+    Spaltengrenzen gelten fuer alle Seiten; je Seite eigene Zeilengrenzen.
+    Kopfband der ersten Seite liefert die Spaltenbeschriftung; Summen-
+    zeilen beenden die Tabelle der Seite, Seitenwechselzeilen zaehlen nicht."""
+    if not boxes:
+        return {"columns": [], "rows": [], "raster": {"spalten": [], "zeilen": {}, "kopf": {}}}
+    boxes = sorted(boxes, key=lambda b: (b["page"], b["top"]))
+    spalten = sorted(float(s) for s in (raster.get("spalten") or []))
+    zeilen = {str(k): [float(y) for y in v] for k, v in (raster.get("zeilen") or {}).items()}
+    kopf = {str(k): bool(v) for k, v in (raster.get("kopf") or {}).items()}
+    n = len(spalten) + 1
+    kopf_woerter: list[list[Word]] = [[] for _ in range(n)]
+    rows: list[list[str]] = []
+    for bi, box in enumerate(boxes):
+        seite = str(box["page"])
+        if seite not in zeilen:
+            g, k = _box_bandgrenzen(doc, box, bi == 0)
+            zeilen[seite] = g
+            kopf.setdefault(seite, k)
+        ist_kopf = kopf.setdefault(seite, bi == 0)
+        breite = doc.pages[box["page"]].width
+        xs = ([box["x0"]] + [min(max(s * breite, box["x0"]), box["x1"]) for s in spalten]
+              + [box["x1"]])
+        ys = ([box["top"]] + sorted(y for y in zeilen[seite] if box["top"] < y < box["bottom"])
+              + [box["bottom"]])
+        woerter = _words_in_box(doc, box)
+        for ri in range(len(ys) - 1):
+            band = sorted((w for w in woerter if ys[ri] <= w.cy < ys[ri + 1]),
+                          key=lambda w: (w.cy, w.x0))
+            if not band:
+                continue
+            if ri == 0 and ist_kopf:
+                if bi == 0:
+                    for w in band:
+                        j = next((j for j in range(n) if xs[j] <= w.cx < xs[j + 1]), n - 1)
+                        kopf_woerter[j].append(w)
+                continue
+            # Summenzeile beendet die Tabelle -- auch wenn sie durch eine
+            # entfernte Zeilengrenze im Band der letzten Position steckt;
+            # Seitenwechselzeilen (Uebertrag) zaehlen nicht mit.
+            band_zeilen = _cluster_rows(band, _line_h(band))
+            stop = next((k for k, z in enumerate(band_zeilen) if _ist_stop(z)), None)
+            if stop is not None:
+                band_zeilen = band_zeilen[:stop]
+            band_zeilen = [z for z in band_zeilen if not _ist_seitenwechsel_zeile(z)]
+            cells = [_zelltext(band_zeilen, xs[j], xs[j + 1]) for j in range(n)]
+            if any(cells):
+                rows.append(cells)
+            if stop is not None:
+                break
+    b0 = boxes[0]
+    breite0 = doc.pages[b0["page"]].width
+    xs0 = [b0["x0"] / breite0] + spalten + [b0["x1"] / breite0]
+    columns = []
+    benutzt: set[str] = set()
+    for j in range(n):
+        hw = kopf_woerter[j]
+        hz = _cluster_rows(hw, _line_h(hw)) if hw else []
+        header_text = " ".join(" ".join(w.text for w in sorted(z, key=lambda w: w.x0)) for z in hz)
+        # Erster Treffer gewinnt: zwei Spalten mit demselben Vorschlag
+        # ("Betrag Netto" / "Betrag Brutto", "Pos. Nr." / "Beleg Nr.")
+        # wuerden sich sonst ueberschreiben; Brutto ist nie ein Nettopreis.
+        guess = None
+        for w in (w for z in hz for w in sorted(z, key=lambda w: w.x0)):
+            g = _match_header_word(w.text, woerterbuch)
+            if g and g not in benutzt:
+                guess = g
+                break
+        if guess in ("gesamt_netto", "einzelpreis_netto") and "brutto" in norm(header_text):
+            guess = None
+        if guess:
+            benutzt.add(guess)
+        columns.append({"index": j, "x0": round(xs0[j], 4), "x1": round(xs0[j + 1], 4),
+                        "header_text": header_text, "guess": guess})
+    return {"columns": columns, "rows": rows,
+            "raster": {"spalten": spalten, "zeilen": zeilen, "kopf": kopf}}
+
+
 def anwenden_markierung(grid: dict, mapping: list[str | None] | None = None) -> list[dict]:
     """Rohraster aus ``markiere_tabelle`` + Spalten-Zuordnung (Liste, Index
     wie ``grid["columns"]``; ``None``/fehlend = Vorschlag ``guess``
@@ -520,7 +686,8 @@ def anwenden_markierung(grid: dict, mapping: list[str | None] | None = None) -> 
     automatischen Erkennung zusammengefuehrt (Zeile ohne jeden Betrag =
     Fortsetzung der vorigen Position)."""
     cols = grid["columns"]
-    targets = list(mapping) if mapping is not None else [c["guess"] for c in cols]
+    # None/fehlend = Vorschlag (guess) der Spalte uebernehmen, wie oben beschrieben
+    targets = [(m if m else c["guess"]) for m, c in zip(list(mapping or []) + [None] * len(cols), cols)]
     while len(targets) < len(cols):
         targets.append(None)
     rows_raw: list[dict] = []

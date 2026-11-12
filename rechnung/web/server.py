@@ -192,6 +192,10 @@ class TabelleMarkierenPost(BaseModel):
     file: str
     boxes: list[dict]
     mapping: list[str | None] | None = None
+    # Raster (Aaron 12.11.2026): vom Menschen verschobene/ergaenzte Spalten-
+    # und Zeilengrenzen (tabelle.raster_vorschlag). Fehlt es, schlaegt das
+    # Programm eins vor und liest wie bisher.
+    raster: dict | None = None
 
 
 class ZeileVorschlagPost(BaseModel):
@@ -1924,9 +1928,19 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                      "x1": float(b["x1"]), "bottom": float(b["bottom"])} for b in body.boxes]
         except (KeyError, TypeError, ValueError):
             raise HTTPException(400, "Rahmen ungültig")
-        grid = tabelle.markiere_tabelle(doc, boxes, woerterbuch=store.spaltenwoerter())
+        woerter = store.spaltenwoerter()
+        if body.raster:
+            grid = tabelle.raster_lesen(doc, boxes, body.raster, woerterbuch=woerter)
+            raster = grid["raster"]
+        else:
+            # Vorschlag -- und gleich danach lesen, damit Anzeige und spaetere
+            # Anpassungen am Raster dieselbe Rechnung verwenden.
+            vorschlag = tabelle.raster_vorschlag(doc, boxes, woerterbuch=woerter)
+            grid = tabelle.raster_lesen(doc, boxes, vorschlag, woerterbuch=woerter)
+            raster = grid["raster"]
         items = tabelle.anwenden_markierung(grid, body.mapping)
-        return JSONResponse({"columns": grid["columns"], "rows": grid["rows"], "items": items})
+        return JSONResponse({"columns": grid["columns"], "rows": grid["rows"], "items": items,
+                             "raster": raster})
 
     @app.post("/api/tabelle/zeile_vorschlag")
     def zeile_vorschlag_ep(body: ZeileVorschlagPost) -> JSONResponse:

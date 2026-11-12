@@ -50,6 +50,23 @@
                    pointer-events: none; }
   .tabrahmen-box .tr-label { position: absolute; top: -1px; right: -1px; background: #9b59b6; color: #fff;
                              font-size: 11px; padding: 0 6px; border-radius: 0 0 0 6px; }
+  /* Raster (Aaron 12.11.2026): Spalten-/Zeilenlinien im Tabellenrahmen,
+     verschiebbar; Beschriftung je Spalte ueber dem Rahmen. */
+  /* --trz = 1/Seiten-Zoom (fitPages): Griffe, Knoepfe und Auswahllisten
+     bleiben auf dem Bildschirm gleich gross, egal wie klein die Seite ist. */
+  .tr-vlinie { position: absolute; width: calc(12px * var(--trz, 1)); margin-left: calc(-6px * var(--trz, 1));
+               cursor: col-resize; z-index: 6;
+               background: linear-gradient(to right, transparent 41%, #9b59b6 41%, #9b59b6 59%, transparent 59%); }
+  .tr-hlinie { position: absolute; height: calc(10px * var(--trz, 1)); margin-top: calc(-5px * var(--trz, 1));
+               cursor: row-resize; z-index: 6;
+               background: linear-gradient(to bottom, transparent 40%, rgba(155,89,182,.75) 40%, rgba(155,89,182,.75) 60%, transparent 60%); }
+  .tr-vlinie:hover, .tr-hlinie:hover, .tr-vlinie.zieht, .tr-hlinie.zieht { filter: brightness(.7); }
+  .tr-weg { position: absolute; z-index: 7; background: #9b59b6; color: #fff; border: 0;
+            border-radius: calc(8px * var(--trz, 1)); font-size: calc(11px * var(--trz, 1));
+            line-height: calc(15px * var(--trz, 1)); padding: 0 calc(4px * var(--trz, 1)); cursor: pointer; }
+  .tr-kopfband { position: absolute; background: rgba(155,89,182,.18); pointer-events: none; }
+  .tr-spaltenkopf { position: absolute; z-index: 7; transform: translateX(-50%); }
+  .tr-spaltenkopf select { font-size: calc(11px * var(--trz, 1)); }
   .tr-seiten { margin: 4px 0; display: flex; flex-wrap: wrap; gap: 4px; }
   .tr-seite { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border-radius: 8px;
               background: #eee; font-size: 12px; cursor: pointer; }
@@ -750,7 +767,7 @@ function applyInvoiceData(d) {
     // ``boxes``: ein Rahmen je Seite (PDF-Punkte), ``columns``/``mapping``
     // die zuletzt vom Server erkannte Spaltenaufteilung bzw. die davon
     // (ggf. vom Menschen geaenderte) Zielspalten-Zuordnung.
-    tabRahmen: { active: false, boxes: [], columns: [], mapping: null },
+    tabRahmen: { active: false, boxes: [], columns: [], mapping: null, raster: null },
     // Einzelne Positions-Zelle als Rahmen-Ziel ausgewaehlt (wie ein
     // Kopffeld, STATE.zielInput) -- {ri, col} oder null.
     zielLiCell: null,
@@ -795,7 +812,11 @@ function fitPages() {
   const avail = col.clientWidth - 40;
   col.querySelectorAll('.pdfwrap').forEach(wrap => {
     const img = wrap.querySelector('img');
-    if (img && img.naturalWidth) wrap.style.zoom = Math.min(1, avail / img.naturalWidth);
+    if (img && img.naturalWidth) {
+      const z = Math.min(1, avail / img.naturalWidth);
+      wrap.style.zoom = z;
+      wrap.style.setProperty('--trz', 1 / z);   // Raster-Griffe gleich gross halten
+    }
   });
 }
 window.addEventListener('resize', fitPages);
@@ -1844,11 +1865,11 @@ function wordText(page, i) {
    eine LI_STD-Zuordnung vor (Dropdown, sofort wirksam). */
 function toggleTabRahmen() {
   STATE.tabRahmen.active = !STATE.tabRahmen.active;
-  if (!STATE.tabRahmen.active) Object.assign(STATE.tabRahmen, { boxes: [], columns: [], mapping: null });
+  if (!STATE.tabRahmen.active) Object.assign(STATE.tabRahmen, { boxes: [], columns: [], mapping: null, raster: null });
   renderCurrent();
 }
 function tabRahmenZuruecksetzen() {
-  Object.assign(STATE.tabRahmen, { boxes: [], columns: [], mapping: null });
+  Object.assign(STATE.tabRahmen, { boxes: [], columns: [], mapping: null, raster: null });
   renderCurrent();
 }
 function tabRahmenSeiteZeigen(i) {
@@ -1856,13 +1877,19 @@ function tabRahmenSeiteZeigen(i) {
 }
 function tabRahmenSeiteLoeschen(i) {
   STATE.tabRahmen.boxes = STATE.tabRahmen.boxes.filter(b => b.page !== i);
+  rasterSeiteVergessen(i);
   if (!STATE.tabRahmen.boxes.length) {
-    Object.assign(STATE.tabRahmen, { columns: [], mapping: null });
+    Object.assign(STATE.tabRahmen, { columns: [], mapping: null, raster: null });
     renderCurrent();
   } else {
     renderCurrent();
     tabRahmenAktualisieren();
   }
+}
+// Wirksame Zuordnung einer Spalte: eigene Wahl, sonst Vorschlag, sonst ignorieren.
+function tabRahmenZiel(i) {
+  const c = STATE.tabRahmen.columns[i] || {};
+  return (STATE.tabRahmen.mapping || [])[i] || c.guess || 'ignorieren';
 }
 function tabRahmenMappingGeaendert(i, value) {
   STATE.tabRahmen.mapping[i] = value;
@@ -1879,6 +1906,14 @@ function renderTabRahmenPanel() {
       ein Rahmen ersetzt den vorigen auf derselben Seite. Esc bricht ab.</div>
     <div class="hint">Eine Rechnung, je Seite ein Rahmen – die Spalten gelten für alle Seiten.
       Seiten mit Rahmen sind lila; × löscht den Rahmen dieser Seite, ein neuer Rahmen ersetzt ihn.</div>
+    ${STATE.tabRahmen.raster ? `<div class="hint"><b>Raster anpassen:</b> lila Linien mit der Maus verschieben ·
+      Doppelklick in den Rahmen = neue Spalte, Umschalt+Doppelklick = neue Zeile · × an einer Linie entfernt sie ·
+      über jeder Spalte wählen, was drinsteht. Rechts siehst du sofort die gelesenen Positionen.</div>
+      <div class="tr-seiten">${STATE.tabRahmen.boxes.map(b => b.page).sort((a, b) => a - b).map(p => `
+        <label class="tr-seite"><input type="checkbox" ${STATE.tabRahmen.raster.kopf[p] ? 'checked' : ''}
+          onchange="rasterKopfzeile(${p}, this.checked)"> Seite ${p + 1}: erste Zeile ist Kopfzeile</label>`).join('')}</div>
+      ${STATE.lineItems && STATE.lineItems.length ? `<div style="margin:6px 0"><button class="senden" onclick="saveTabelle('positionen')"
+        title="Die ${STATE.lineItems.length} gelesenen Positionen als Tabelle der Rechnung speichern">✓ Raster stimmt – ${STATE.lineItems.length} Position(en) übernehmen</button></div>` : ''}` : ''}
     <div class="tr-seiten">${STATE.pages.map((_pg, i) => seiten.includes(i + 1)
       ? `<span class="tr-seite ok" onclick="tabRahmenSeiteZeigen(${i})" title="Zur Seite springen">Seite ${i + 1} ✓
            <button class="danger" style="padding:0 4px" title="Rahmen dieser Seite löschen"
@@ -1888,7 +1923,7 @@ function renderTabRahmenPanel() {
     ${cols.length ? `<div style="margin:6px 0">${cols.map((c, i) => `
       <span class="li-col">${esc(c.header_text || ('Spalte ' + (i + 1)))}:
         <select onchange="tabRahmenMappingGeaendert(${i}, this.value)">
-          ${ziele.map(([k, label]) => `<option value="${k}" ${STATE.tabRahmen.mapping[i] === k ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+          ${ziele.map(([k, label]) => `<option value="${k}" ${tabRahmenZiel(i) === k ? 'selected' : ''}>${esc(label)}</option>`).join('')}
         </select></span>`).join(' ')}</div>` : ''}`;
   return box;
 }
@@ -1899,6 +1934,7 @@ function tabRahmenBoxGezogen(wrap, page, r) {
                x1: (r.right - w.left) * fx, bottom: (r.bottom - w.top) * fy };
   STATE.tabRahmen.boxes = STATE.tabRahmen.boxes.filter(b => b.page !== page);
   STATE.tabRahmen.boxes.push(box);
+  rasterSeiteVergessen(page);
   renderCurrent();     // Seitenliste im Panel aktualisieren (zeichnet Rahmen mit)
   tabRahmenAktualisieren();
 }
@@ -1907,12 +1943,16 @@ async function tabRahmenAktualisieren() {
   $('#msg').textContent = 'Lese die markierte Tabelle …';
   const r = await api('/api/tabelle/markieren', {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ file: STATE.file, boxes: STATE.tabRahmen.boxes, mapping: STATE.tabRahmen.mapping }),
+    body: JSON.stringify({ file: STATE.file, boxes: STATE.tabRahmen.boxes, mapping: STATE.tabRahmen.mapping,
+                           raster: STATE.tabRahmen.raster }),
   });
   if (!r.columns) { $('#msg').textContent = '✗ ' + (r.detail || 'Rahmen konnte nicht gelesen werden'); return; }
   STATE.tabRahmen.columns = r.columns;
-  if (!STATE.tabRahmen.mapping || STATE.tabRahmen.mapping.length !== r.columns.length)
-    STATE.tabRahmen.mapping = r.columns.map(c => c.guess || 'ignorieren');
+  STATE.tabRahmen.raster = r.raster || null;
+  const altMap = STATE.tabRahmen.mapping || [];
+  // mapping = nur eigene Wahl des Menschen, null = Vorschlag des Programms
+  // (tabRahmenZiel); so greift nach Verschieben/Zusammenlegen der neue Vorschlag.
+  STATE.tabRahmen.mapping = r.columns.map((c, i) => altMap[i] || null);
   STATE.lineItems = r.items || [];
   STATE.zeilenStatus = STATE.lineItems.map(() => 'offen');
   STATE.tabDirty.positionen = true;
@@ -1921,7 +1961,7 @@ async function tabRahmenAktualisieren() {
     'dann „Positionen übernehmen“.';
 }
 function paintTabRahmen() {
-  document.querySelectorAll('.tabrahmen-box').forEach(e => e.remove());
+  document.querySelectorAll('.tabrahmen-box, .tabrahmen-box-teil').forEach(e => e.remove());
   const wraps = document.querySelectorAll('.pdfwrap');
   for (const b of STATE.tabRahmen.boxes) {
     const pg = STATE.pages[b.page]; const wrap = wraps[b.page];
@@ -1931,6 +1971,159 @@ function paintTabRahmen() {
     el.style.width = ((b.x1 - b.x0) * pg.scale) + 'px'; el.style.height = ((b.bottom - b.top) * pg.scale) + 'px';
     el.innerHTML = `<span class="tr-label">Tabelle · Seite ${b.page + 1}</span>`;
     wrap.appendChild(el);
+    paintRaster(wrap, pg, b);
+  }
+}
+
+/* -------- Raster im Tabellenrahmen (Aaron 12.11.2026) --------
+   Spalten- und Zeilenlinien so, wie das Programm die Tabelle aufteilt;
+   verschieben (ziehen), ergaenzen (Doppelklick / Umschalt+Doppelklick),
+   entfernen (×). Jede Aenderung liest die Tabelle sofort neu
+   (/api/tabelle/markieren mit raster) -- "Positionen uebernehmen"
+   speichert wie bisher. */
+function rasterSeiteVergessen(page) {
+  // Rahmen einer Seite neu gezogen/geloescht: deren Zeilen neu vorschlagen.
+  // Die erste Seite bestimmt die Spalten -- dann alles neu vorschlagen.
+  const r = STATE.tabRahmen.raster; if (!r) return;
+  const erste = Math.min(page, ...STATE.tabRahmen.boxes.map(x => x.page));
+  if (page <= erste) { Object.assign(STATE.tabRahmen, { raster: null, columns: [], mapping: null }); return; }
+  delete r.zeilen[String(page)]; delete r.kopf[String(page)];
+}
+function rasterKopfzeile(page, an) {
+  const r = STATE.tabRahmen.raster; if (!r) return;
+  r.kopf[String(page)] = !!an;
+  tabRahmenAktualisieren();
+}
+function rasterPdfPunkt(wrap, pg, ev) {
+  const w = wrap.getBoundingClientRect();
+  return { x: (ev.clientX - w.left) * pg.width / w.width, y: (ev.clientY - w.top) * pg.height / w.height };
+}
+function rasterSpalteHinzu(xAnteil) {
+  const r = STATE.tabRahmen.raster; if (!r) return;
+  const sp = r.spalten.slice().sort((a, b) => a - b);
+  const k = sp.filter(s => s < xAnteil).length;      // neue Grenze an Position k
+  sp.splice(k, 0, xAnteil); r.spalten = sp;
+  (STATE.tabRahmen.mapping || []).splice(k + 1, 0, null);   // neue Spalte rechts davon: Vorschlag
+  tabRahmenAktualisieren();
+}
+function rasterSpalteWeg(k) {
+  const r = STATE.tabRahmen.raster; if (!r) return;
+  r.spalten = r.spalten.slice().sort((a, b) => a - b); r.spalten.splice(k, 1);
+  // Spalten k und k+1 verschmelzen: eine echte Zuordnung bleibt erhalten,
+  // sonst entscheidet der Vorschlag fuer die neue Spalte (null).
+  const m = STATE.tabRahmen.mapping || [];
+  const echt = v => (v && v !== 'ignorieren') ? v : null;
+  const neu = echt(m[k]) || echt(m[k + 1]);
+  m.splice(k + 1, 1); m[k] = neu;
+  tabRahmenAktualisieren();
+}
+function rasterZeileHinzu(page, y) {
+  const r = STATE.tabRahmen.raster; if (!r) return;
+  const z = (r.zeilen[String(page)] || []).concat([y]).sort((a, b) => a - b);
+  r.zeilen[String(page)] = z; tabRahmenAktualisieren();
+}
+function rasterZeileWeg(page, i) {
+  const r = STATE.tabRahmen.raster; if (!r) return;
+  const z = (r.zeilen[String(page)] || []).slice().sort((a, b) => a - b); z.splice(i, 1);
+  r.zeilen[String(page)] = z; tabRahmenAktualisieren();
+}
+function rasterZiehen(ev, wrap, pg, b, art, i) {
+  ev.preventDefault(); ev.stopPropagation();   // kein neuer Rahmen, kein Wort-Klick
+  const el = ev.currentTarget; el.classList.add('zieht');
+  const r = STATE.tabRahmen.raster;
+  const bewegen = e => {
+    const p = rasterPdfPunkt(wrap, pg, e);
+    if (art === 'spalte') {
+      const x = Math.min(Math.max(p.x, b.x0 + 1), b.x1 - 1);
+      el.style.left = (x * pg.scale) + 'px'; el.dataset.wert = x / pg.width;
+    } else {
+      const y = Math.min(Math.max(p.y, b.top + 1), b.bottom - 1);
+      el.style.top = (y * pg.scale) + 'px'; el.dataset.wert = y;
+    }
+  };
+  const los = () => {
+    window.removeEventListener('mousemove', bewegen); window.removeEventListener('mouseup', los);
+    el.classList.remove('zieht');
+    RAHMEN_KLICK_SPERRE = true; setTimeout(() => { RAHMEN_KLICK_SPERRE = false; }, 50);
+    if (el.dataset.wert === undefined) return;
+    const v = parseFloat(el.dataset.wert);
+    if (art === 'spalte') { const sp = r.spalten.slice().sort((a, c) => a - c); sp[i] = v; r.spalten = sp.sort((a, c) => a - c); }
+    else { const z = (r.zeilen[String(b.page)] || []).slice().sort((a, c) => a - c); z[i] = v; r.zeilen[String(b.page)] = z.sort((a, c) => a - c); }
+    tabRahmenAktualisieren();
+  };
+  window.addEventListener('mousemove', bewegen); window.addEventListener('mouseup', los);
+}
+function paintRaster(wrap, pg, b) {
+  const r = STATE.tabRahmen.raster; if (!r) return;
+  const s = pg.scale, seite = String(b.page);
+  // Groessen/Abstaende der Bedienelemente in CSS mit var(--trz) (= 1/Zoom,
+  // gesetzt in fitPages) -- der Zoom steht erst nach dem Laden des Bildes fest.
+  const T = (px, d) => `calc(${px}px ${d < 0 ? '-' : '+'} ${Math.abs(d)}px * var(--trz, 1))`;
+  const spalten = r.spalten.slice().sort((a, c) => a - c);
+  const zeilen = (r.zeilen[seite] || []).slice().sort((a, c) => a - c);
+  const innen = zeilen.filter(y => y > b.top && y < b.bottom);
+  const neu = (cls, css) => { const e = document.createElement('div'); e.className = cls; Object.assign(e.style, css); wrap.appendChild(e); return e; };
+  // Kopfband sichtbar machen
+  if (r.kopf[seite]) {
+    const unten = innen.length ? innen[0] : b.bottom;
+    neu('tr-kopfband tabrahmen-box-teil', { left: (b.x0 * s) + 'px', top: (b.top * s) + 'px',
+      width: ((b.x1 - b.x0) * s) + 'px', height: ((unten - b.top) * s) + 'px' });
+  }
+  spalten.forEach((anteil, k) => {
+    const x = anteil * pg.width; if (x <= b.x0 || x >= b.x1) return;
+    const l = neu('tr-vlinie tabrahmen-box-teil', { left: (x * s) + 'px', top: (b.top * s) + 'px', height: ((b.bottom - b.top) * s) + 'px' });
+    l.title = 'Spaltengrenze verschieben';
+    l.addEventListener('mousedown', ev => rasterZiehen(ev, wrap, pg, b, 'spalte', k));
+    const x2 = document.createElement('button'); x2.className = 'tr-weg tabrahmen-box-teil'; x2.textContent = '×';
+    x2.title = 'Spaltengrenze entfernen (Spalten zusammenlegen)';
+    Object.assign(x2.style, { left: T(x * s, -8), top: T(b.bottom * s, 2) });
+    x2.addEventListener('mousedown', ev => ev.stopPropagation());
+    x2.onclick = ev => { ev.stopPropagation(); rasterSpalteWeg(k); };
+    wrap.appendChild(x2);
+  });
+  zeilen.forEach((y, i) => {
+    if (y <= b.top || y >= b.bottom) return;
+    const l = neu('tr-hlinie tabrahmen-box-teil', { left: (b.x0 * s) + 'px', top: (y * s) + 'px', width: ((b.x1 - b.x0) * s) + 'px' });
+    l.title = 'Zeilengrenze verschieben';
+    l.addEventListener('mousedown', ev => rasterZiehen(ev, wrap, pg, b, 'zeile', i));
+    const x2 = document.createElement('button'); x2.className = 'tr-weg tabrahmen-box-teil'; x2.textContent = '×';
+    x2.title = 'Zeilengrenze entfernen (Zeilen zusammenlegen)';
+    Object.assign(x2.style, { left: T(b.x0 * s, -20), top: T(y * s, -8) });
+    x2.addEventListener('mousedown', ev => ev.stopPropagation());
+    x2.onclick = ev => { ev.stopPropagation(); rasterZeileWeg(b.page, i); };
+    wrap.appendChild(x2);
+  });
+  // Beschriftung je Spalte ueber dem Rahmen (nur erste Seite der Tabelle)
+  const erste = Math.min(...STATE.tabRahmen.boxes.map(x => x.page));
+  if (b.page === erste && STATE.tabRahmen.columns.length === spalten.length + 1) {
+    const grenzen = [b.x0].concat(spalten.map(a => a * pg.width)).concat([b.x1]);
+    const ziele = [...LI_STD, ['pos', 'Pos.'], ['ignorieren', 'ignorieren']];
+    for (let j = 0; j < grenzen.length - 1; j++) {
+      const k = document.createElement('div'); k.className = 'tr-spaltenkopf tabrahmen-box-teil';
+      Object.assign(k.style, { left: (((grenzen[j] + grenzen[j + 1]) / 2) * s) + 'px', top: T(b.top * s, -24) });
+      const m = tabRahmenZiel(j);
+      k.innerHTML = `<select title="Was steht in dieser Spalte?">${ziele.map(([v, label]) =>
+        `<option value="${v}" ${m === v ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>`;
+      k.addEventListener('mousedown', ev => ev.stopPropagation());
+      const sel = k.querySelector('select');
+      // so breit wie die Spalte (mind. 34 px, hoechstens 130 px auf dem Bildschirm)
+      sel.style.width = `clamp(calc(34px * var(--trz, 1)), ${Math.max(1, (grenzen[j + 1] - grenzen[j]) * s - 2)}px, calc(130px * var(--trz, 1)))`;
+      sel.onchange = ev => tabRahmenMappingGeaendert(j, ev.target.value);
+      wrap.appendChild(k);
+    }
+  }
+  if (!wrap.dataset.rasterDbl) {
+    wrap.dataset.rasterDbl = '1';
+    wrap.addEventListener('dblclick', ev => {
+      if (!STATE.tabRahmen.active || !STATE.tabRahmen.raster) return;
+      const seite = [...document.querySelectorAll('.pdfwrap')].indexOf(wrap);
+      const pgx = STATE.pages[seite];
+      const bx = STATE.tabRahmen.boxes.find(x => x.page === seite); if (!bx || !pgx) return;
+      const p = rasterPdfPunkt(wrap, pgx, ev);
+      if (p.x < bx.x0 || p.x > bx.x1 || p.y < bx.top || p.y > bx.bottom) return;
+      ev.preventDefault();
+      if (ev.shiftKey) rasterZeileHinzu(seite, p.y); else rasterSpalteHinzu(p.x / pgx.width);
+    });
   }
 }
 
@@ -2459,7 +2652,7 @@ async function saveTabelle(art) {
   // Spaltenwoerterbuch -- nur wenn dieses Tool tatsaechlich benutzt wurde.
   const spaltenZuordnung = (art === 'positionen' && STATE.tabRahmen.columns.length)
     ? STATE.tabRahmen.columns
-        .map((c, i) => ({ header_text: c.header_text, ziel: STATE.tabRahmen.mapping[i] }))
+        .map((c, i) => ({ header_text: c.header_text, ziel: tabRahmenZiel(i) }))
         .filter(z => z.header_text && z.ziel && z.ziel !== 'ignorieren')
     : undefined;
   const r = await api('/api/tabelle', {
@@ -2535,6 +2728,7 @@ function clickWord(page, i, ev) {
     return;
   }
   if (RAHMEN_KLICK_SPERRE) return;   // Klick am Ende einer Rahmen-Auswahl
+  if (STATE.tabRahmen && STATE.tabRahmen.active) return;   // Raster-Modus: Klicks gehoeren dem Raster
   if (STATE.zielLiCell) { liZelleWortToggle(page, i); return; }
   if (STATE.zielTaxCell) { taxZelleWortToggle(page, i); return; }
   if (STATE.zielInput) { zielWoerter(page, [i], false); return; }
