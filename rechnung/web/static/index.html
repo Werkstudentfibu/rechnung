@@ -568,6 +568,37 @@ async function pollVorbereitung() {
 }
 setInterval(pollVorbereitung, 8000);
 
+// Stapel "Menschliche Bearbeitung" (Aaron 12.11.2026): wer eine Rechnung aus
+// diesem Reiter oeffnet, arbeitet den Stapel ab -- nach Senden / Keine Rechnung
+// kommt die naechste Rechnung DIESES Stapels, nicht die naechste der Hauptliste.
+let HUMAN_QUEUE = null;   // {dateien: [...], erledigt: [...]} oder null
+function naechsteImStapel(q, alt) {
+  if (!q || !q.dateien || !q.dateien.length) return null;
+  const erledigt = new Set(q.erledigt || []);
+  if (alt) erledigt.add(alt);
+  q.erledigt = [...erledigt];
+  const idx = q.dateien.indexOf(alt);
+  const offen = q.dateien.filter(f => !erledigt.has(f));
+  if (!offen.length) return null;
+  return q.dateien.slice(idx + 1).find(f => !erledigt.has(f)) || offen[0];
+}
+function stapelStand(q, file) {
+  if (!q) return '';
+  const rest = q.dateien.filter(f => !(q.erledigt || []).includes(f)).length;
+  return `Menschliche Bearbeitung: ${q.dateien.indexOf(file) + 1} von ${q.dateien.length} · noch ${rest} offen`;
+}
+async function stapelWeiter(alt, vorher) {
+  const next = naechsteImStapel(HUMAN_QUEUE, alt);
+  if (!next) {
+    HUMAN_QUEUE = null;
+    $('#work').innerHTML = `<p class="hint" style="padding:12px">${esc(vorher || '')} Menschliche Bearbeitung: alles abgearbeitet.</p>`;
+    return;
+  }
+  await openInvoice(next, null);
+  const m = $('#msg');
+  if (m) m.textContent = `${vorher || ''} ${stapelStand(HUMAN_QUEUE, next)}`.trim();
+}
+
 // Nach dem Senden/Bestaetigen: zur naechsten BEREITEN Rechnung, nicht zur naechsten
 // beliebigen -- sonst wartet der Mensch wieder auf die Texterkennung.
 function naechsteBereite(alteListe, alt) {
@@ -594,6 +625,7 @@ function keineBereite() {
 let LADE_DATEI = null;
 async function openInvoice(file, row) {
   LADE_DATEI = file;
+  if (row) HUMAN_QUEUE = null;   // Klick in der Hauptliste: kein Stapel mehr
   document.querySelectorAll('#list .row').forEach(x => x.classList.remove('active'));
   row && row.classList.add('active');
   // Sichtbar machen, dass gearbeitet wird -- Texterkennung + KI brauchen auf
@@ -2745,6 +2777,7 @@ async function sendeRechnung() {
     + (d.als_dummy ? ' (als Dummy Lieferant)' : '');
   STATE.file = null;
   await loadList();
+  if (HUMAN_QUEUE) { await stapelWeiter(alt, `✓ Vorige Rechnung ${wohin}.`); return; }
   const row = naechsteBereite(alteListe, alt);
   if (row) { await openInvoice(row.dataset.file, row); }
   else {
@@ -2765,6 +2798,7 @@ async function confirmTpl() {
   });
   STATE.file = null;
   await loadList();
+  if (HUMAN_QUEUE) { await stapelWeiter(alt, `bestätigt ${r.confirmations}×.`); return; }
   const row = naechsteBereite(alteListe, alt);
   const kopf = `bestätigt ${r.confirmations}× ${r.secured ? '· GESICHERT' : ''}${learnedMsg(r)}`;
   if (row) {
@@ -2880,10 +2914,12 @@ async function keineRechnungVonHand() {
   const r = await fetch('/api/keine-rechnung/von-hand', { method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ file: STATE.file }) });
   if (!r.ok) { alert('Nicht möglich: ' + ((await r.json()).detail || r.status)); return; }
+  const alt = STATE.file;
   STATE.file = null;
+  loadKeineRechnung();
+  if (HUMAN_QUEUE) { loadList(); await stapelWeiter(alt, 'Als "keine Rechnung" aussortiert.'); return; }
   $('#work').innerHTML = '<p class="hint">Als "keine Rechnung" aussortiert. Links eine Rechnung wählen.</p>';
   loadList();
-  loadKeineRechnung();
 }
 
 async function postfachBericht(nr = 0) {
@@ -3046,7 +3082,11 @@ async function loadHuman() {
       <td>${(r.gruende || []).map(g => esc(g.grund)).join('<br>')}</td>
       <td>${esc((r.felder || []).join(', '))}</td>
       <td>${vs.join('<br>')}</td>`;
-    tr.onclick = () => { show('scan'); openInvoice(r.datei, null); };
+    tr.onclick = async () => {
+      HUMAN_QUEUE = { dateien: d.offen.map(x => x.datei), erledigt: [] };
+      show('scan'); await openInvoice(r.datei, null);
+      const m = $('#msg'); if (m) m.textContent = stapelStand(HUMAN_QUEUE, r.datei);
+    };
     t.appendChild(tr);
   }
   $('#human-table').innerHTML = ''; $('#human-table').appendChild(t);
