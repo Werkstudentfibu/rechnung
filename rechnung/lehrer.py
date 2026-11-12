@@ -654,6 +654,11 @@ def abgleichen(text: str, felder: dict[str, str], programm: dict, antwort: dict)
             # einfach loeschen -- das entscheidet ein Mensch.
             out.unsicher[name] = "Claude findet keinen Wert, Programm schon"
             continue
+        if vtype == "number" and isinstance(wert, str):
+            # "R 811658": die Nummer-Pruefung nimmt sonst nur das erste Wort
+            # ("R") und verwirft Claudes richtigen Wert (Testrunde Langdock
+            # 12.11.2026). Ohne Leerzeichen wird sie gegen den Text belegt.
+            wert = re.sub(r"\s+", "", wert)
         if name == "waehrung" and _waehrung_belegt(text, wert):
             value, grund = _waehrung_belegt(text, wert), ""
         else:

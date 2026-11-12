@@ -38,10 +38,28 @@ def _atomic_write(path: Path, text: str) -> None:
     tmp.write_text(text, "utf-8")
     if path.exists():
         try:
-            path.replace(path.with_name(path.name + ".bak"))
+            _ersetzen(path, path.with_name(path.name + ".bak"))
         except OSError:
             pass
-    tmp.replace(path)
+    _ersetzen(tmp, path)
+
+
+# Windows: liest ein anderer Prozess die Datei gerade (z.B. das Programm-
+# fenster, waehrend der Lehrer schreibt), scheitert das Umbenennen mit
+# "Zugriff verweigert" (Testrunde 12.11.2026: 2 von 10 Rechnungen). Kurz
+# warten und erneut versuchen, statt die Verarbeitung abzubrechen.
+_ERSETZEN_VERSUCHE = 25
+
+
+def _ersetzen(quelle: Path, ziel: Path) -> None:
+    for versuch in range(_ERSETZEN_VERSUCHE):
+        try:
+            quelle.replace(ziel)
+            return
+        except PermissionError:
+            if versuch == _ERSETZEN_VERSUCHE - 1:
+                raise
+            time.sleep(min(0.05 * (versuch + 1), 0.5))
 
 
 _UNZULAESSIG = '<>:"/\\|?*'

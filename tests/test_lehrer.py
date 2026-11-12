@@ -718,3 +718,14 @@ def test_langdock_adresse_und_bearer(monkeypatch):
     assert gesehen["url"] == lehrer.API_URL
     assert gesehen["kopf"]["x-api-key"] == "test-schluessel"
     assert "authorization" not in gesehen["kopf"]
+
+
+def test_nummer_mit_leerzeichen_wird_belegt():
+    """Testrunde 12.11.2026: Claude liest 'R 811658' richtig, die Pruefung
+    verwarf es, weil sie nur das erste Wort nahm."""
+    felder = {"rechnungsnummer": "number"}
+    antwort = {"felder": {"rechnungsnummer": {"wert": "R 811658", "sicher": True}}}
+    ab = lehrer.abgleichen("Rechnung Nr. R 811658 vom 01.02.2025", felder,
+                           {"rechnungsnummer": "R"}, antwort)
+    assert "rechnungsnummer" not in ab.unsicher, ab.unsicher
+    assert ab.korrekturen["rechnungsnummer"] == "R811658"
