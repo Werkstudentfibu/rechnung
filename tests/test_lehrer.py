@@ -655,3 +655,30 @@ def test_programmfehler_bei_einer_rechnung_beendet_runde_nicht(tmp_path, monkeyp
     assert nach["0_erste.pdf"]["ergebnis"] == lehrer.ERG_FEHLER
     assert "simulierter Programmfehler" in nach["0_erste.pdf"]["gruende"][0]
     assert nach["a.pdf"]["ergebnis"] == lehrer.ERG_BESTAETIGT
+
+
+def _ohne_lieferant(tmp_path):
+    store = Store(tmp_path / "data")
+    ordner = tmp_path / "in"
+    ordner.mkdir()
+    return store, make_invoice(ordner / "a.pdf")
+
+
+def test_unbekannter_lieferant_wird_ohne_schalter_uebersprungen(tmp_path):
+    store, src = _ohne_lieferant(tmp_path)
+    calls = []
+    r = lehrer.anlernen_datei(store, src, post=_claude(RICHTIG, calls=calls))
+    assert r["ergebnis"] == lehrer.ERG_UEBERSPRUNGEN and not calls
+    assert store.suppliers() == []
+
+
+def test_unbekannter_lieferant_bekommt_entwurf_und_claude_klaert_ihn(tmp_path, monkeypatch):
+    monkeypatch.setenv("RECHNUNG_CLAUDE_STAMMDATEN", "1")
+    store, src = _ohne_lieferant(tmp_path)
+    werte = dict(RICHTIG, lieferant_name="Muster Handels GmbH")
+    r = lehrer.anlernen_datei(store, src, post=_claude(werte))
+    assert r.get("entwurf_angelegt"), r
+    assert r["stammdaten"]["aktion"] == "bestaetigt", r
+    sup = store.supplier(r["stammdaten"]["id"])
+    assert sup.bestaetigt and sup.name == "Muster Handels GmbH"
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT, r

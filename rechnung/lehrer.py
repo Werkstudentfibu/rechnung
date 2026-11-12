@@ -824,6 +824,16 @@ def anlernen_datei(store, path: str | Path, *, post=None, erneut: bool = False) 
     # (kostet nichts, zaehlt nicht zum Rundenlimit) -- sobald der Lieferant
     # bestaetigt ist, greift die naechste Runde die Rechnung von selbst auf.
     sup = store.supplier(res.supplier_id) if res.supplier_id else None
+    if sup is None and stammdaten_an():
+        # Uebungsphase: Lieferant ganz unbekannt -> Entwurf anlegen wie das
+        # Programmfenster (create_draft_supplier) und von Claude klaeren
+        # lassen. Bisher wurden solche Rechnungen nur uebersprungen, weil
+        # Entwuerfe nur bei offenem Programmfenster entstehen (Abholung
+        # 12.11.2026: 154 von 235 neuen Rechnungen).
+        res = process(path, store, use_llm=lokale_ki(), create_draft_supplier=True)
+        sup = store.supplier(res.supplier_id) if res.supplier_id else None
+        if sup is not None:
+            rec["entwurf_angelegt"] = sup.id
     entwurf = sup if (sup is not None and not getattr(sup, "bestaetigt", True)
                       and stammdaten_an()) else None
     if entwurf is None and (sup is None or not getattr(sup, "bestaetigt", True)):
