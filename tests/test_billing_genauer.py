@@ -34,3 +34,13 @@ def test_dateiname_kodiert_unzulaessige_zeichen():
     n = _dateiname("70000-Kreditoren CH / Stamm\\daten:1__2")
     assert "/" not in n and "\\" not in n and ":" not in n
     assert _dateiname("x.") == "x%2E"
+
+
+def test_zwei_verschiedene_firmen_bleiben_mehrdeutig():
+    """Laenge allein entscheidet nie: zwei unabhaengige Firmen auf derselben
+    Rechnung bleiben beim Menschen."""
+    abb = BillingAddress(id="5", name="ABB", match_terms=["Althoff Beratungs- und Betreuungsgesellschaf"])
+    bfn = BillingAddress(id="127", name="BFN", match_terms=["BFN Development Gesellschaft mbH EINS"])
+    text = "BFN Development Gesellschaft mbH EINS c/o Althoff Beratungs- und Betreuungsgesellschaft mbH"
+    hit, why = match_text(text, [abb, bfn])
+    assert hit is None and "mehrdeutig" in why

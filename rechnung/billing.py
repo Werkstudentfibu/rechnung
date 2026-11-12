@@ -64,18 +64,24 @@ def match_text(text: str, addresses: list[BillingAddress], min_hits: int = 1):
             continue
         getroffen = [t for t in terms if t and t in text_n]
         if len(getroffen) >= min_hits:
-            # Gleichstand beim Anteil: mehr getroffene Begriffe, dann der
-            # laengere (genauere) Begriff gewinnt -- "Betriebsgesellschaft
-            # Hotel Frankfurt mbH" schlaegt "Hotel Frankfurt", das darin
-            # enthalten ist (Proberunde 12.11.2026). Erst bei Gleichstand in
-            # allem bleibt es "mehrdeutig".
-            schluessel = (round(len(getroffen) / len(terms), 3), len(getroffen),
-                          sum(len(t) for t in getroffen))
-            scored.append((a, schluessel))
+            # Gleichstand beim Anteil: mehr getroffene Begriffe gewinnen.
+            schluessel = (round(len(getroffen) / len(terms), 3), len(getroffen))
+            scored.append((a, schluessel, getroffen))
     if not scored:
         return None, "keine Rechnungsadresse aus der Bibliothek passt"
     scored.sort(key=lambda x: x[1], reverse=True)
     if len(scored) > 1 and scored[0][1] == scored[1][1]:
+        # Gleichstand: nur aufloesen, wenn der eine Treffer im anderen
+        # ENTHALTEN ist -- "Betriebsgesellschaft Hotel Frankfurt mbH" schlaegt
+        # "Hotel Frankfurt" (Proberunde 12.11.2026). Zwei verschiedene Firmen
+        # auf derselben Rechnung (z.B. "BFN Development ... c/o Althoff
+        # Beratungs...") bleiben "mehrdeutig" -- nie nach Laenge raten.
+        gleich = [s for s in scored if s[1] == scored[0][1]]
+        enthaltend = [s for s in gleich
+                      if all(any(o in mine for mine in s[2]) for x in gleich if x is not s
+                             for o in x[2])]
+        if len(enthaltend) == 1:
+            return (enthaltend[0][0], enthaltend[0][1][0]), ""
         return None, (f"Rechnungsadresse mehrdeutig: {scored[0][0].id} / {scored[1][0].id}")
     return (scored[0][0], scored[0][1][0]), ""
 
