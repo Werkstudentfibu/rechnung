@@ -266,10 +266,13 @@ def test_pipeline_ruft_uebernehmen_nie_selbst(tmp_path: Path):
     assert store.supplier("muster-handels-gmbh").ustids == []
     assert not [a for a in store.audit_log() if a["action"] == entwurf_uebernahme.AUDIT_AKTION]
     # Kein Modul ausser dem Endpunkt importiert die Uebernahme (Docstrings
-    # duerfen sie erwaehnen, Code nicht aufrufen).
+    # duerfen sie erwaehnen, Code nicht aufrufen). Einzige Ausnahme: der
+    # Lehrer in der Uebungsphase, nur mit RECHNUNG_CLAUDE_STAMMDATEN=1
+    # (Entscheidung Aaron 12.11.2026, Standard aus -- siehe
+    # tests/test_lehrer.py::test_stammdaten_aus_ohne_schalter).
     src = Path(entwurf_uebernahme.__file__).parent
     for py in src.glob("*.py"):
-        if py.name == "entwurf_uebernahme.py":
+        if py.name in ("entwurf_uebernahme.py", "lehrer.py"):
             continue
         text = py.read_text("utf-8")
         assert "import entwurf_uebernahme" not in text, py.name
