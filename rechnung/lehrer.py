@@ -739,7 +739,7 @@ def _vermerk_im_ordner(store, sha256: str) -> None:
                             claude_geprueft=time.strftime("%Y-%m-%dT%H:%M:%S%z")))
 
 
-def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
+def anlernen_datei(store, path: str | Path, *, post=None, erneut: bool = False) -> dict:
     """Eine Uebungsrechnung von Claude pruefen, korrigieren und bestaetigen
     lassen (oder an den Menschen geben). -> Ergebnis-Datensatz."""
     from . import eventlog, human
@@ -777,7 +777,9 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
     frueher = [r.get("ergebnis") for r in protokoll(store)
                if r.get("sha256") == doc.sha256 and not r.get("claude_weg")
                and not _wartete_auf_lieferant(r)]
-    if ERG_MENSCH in frueher:
+    # ``erneut``: Rechnungen, die schon einmal an den Menschen gingen, noch
+    # einmal pruefen (z.B. nach neuen Regeln) -- bestaetigte bleiben unberuehrt.
+    if ERG_MENSCH in frueher and not erneut:
         rec.update(ergebnis=ERG_UEBERSPRUNGEN, gruende=["liegt beim Menschen"])
         return rec
     if frueher.count(ERG_FEHLER) >= MAX_FEHLVERSUCHE:
@@ -914,7 +916,7 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
 
 
 def anlernen(store, ordner: str | Path, *, limit: int = 0, post=None,
-             fortschritt=None, zeitbudget_s: float = 0.0) -> list[dict]:
+             fortschritt=None, zeitbudget_s: float = 0.0, erneut: bool = False) -> list[dict]:
     """Alle Rechnungen eines Ordners nacheinander anlernen. ``limit``:
     hoechstens so viele nicht uebersprungene Rechnungen; ``zeitbudget_s``:
     nach Ablauf keine weitere Rechnung mehr anfangen (0 = unbegrenzt) --
@@ -930,7 +932,7 @@ def anlernen(store, ordner: str | Path, *, limit: int = 0, post=None,
         # die erste Rechnung faengt immer an, danach zaehlt das Budget
         if zeitbudget_s and out and time.monotonic() - start >= zeitbudget_s:
             break
-        r = anlernen_datei(store, p, post=post)
+        r = anlernen_datei(store, p, post=post, erneut=erneut)
         out.append(r)
         if fortschritt:
             fortschritt(r)
@@ -1022,6 +1024,8 @@ def main(argv=None) -> int:
     p.add_argument("--data", default=os.environ.get("RECHNUNG_DATA", "./data"))
     p.add_argument("--limit", type=int, default=0,
                    help="hoechstens so viele Rechnungen je Lauf (0 = alle)")
+    p.add_argument("--erneut", action="store_true",
+                   help="auch Rechnungen pruefen, die schon beim Menschen liegen (einmalig nach neuen Regeln)")
     p.add_argument("--minuten", type=float, default=0,
                    help="nach so vielen Minuten keine weitere Rechnung anfangen (0 = aus)")
     p.add_argument("--bilanz", action="store_true")
@@ -1074,7 +1078,7 @@ def main(argv=None) -> int:
         print(f"[{r['ergebnis']:13s}] {r['datei']}{extra}")
 
     res = anlernen(store, a.ordner, limit=a.limit, fortschritt=_zeige,
-                   zeitbudget_s=max(0.0, a.minuten) * 60)
+                   zeitbudget_s=max(0.0, a.minuten) * 60, erneut=a.erneut)
     if a.json:
         print(json.dumps(res, indent=2, ensure_ascii=False, default=str))
         return 0

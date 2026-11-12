@@ -558,3 +558,17 @@ def test_ohne_schalter_keine_stammdaten_aenderung(tmp_path):
     assert store.supplier("muster").ibans == ["FR52327460341"]
     assert store.address("7").match_terms == ["Beispiel Kunde Aktiengesellschaft"]
     assert "mandant" not in r and "kennungen" not in r
+
+
+def test_erneut_prueft_menschfaelle_noch_einmal(tmp_path):
+    """Nach neuen Regeln (12.11.2026) muessen Rechnungen, die schon beim
+    Menschen liegen, einmal erneut durch den Lehrer koennen."""
+    store, ordner, src = _store(tmp_path)
+    felder = _felder_aus(RICHTIG, brutto={"wert": "1190.00", "sicher": False, "beleg": ""})
+    r = lehrer.anlernen_datei(store, src, post=_claude_roh(felder))
+    assert r["ergebnis"] == lehrer.ERG_MENSCH
+    calls = []
+    r = lehrer.anlernen_datei(store, src, post=_claude(RICHTIG, calls=calls))
+    assert r["ergebnis"] == lehrer.ERG_UEBERSPRUNGEN and not calls
+    r = lehrer.anlernen_datei(store, src, post=_claude(RICHTIG, calls=calls), erneut=True)
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT and calls
