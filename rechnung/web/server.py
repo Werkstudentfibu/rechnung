@@ -2240,8 +2240,15 @@ def create_app(store: Store, samples: Path) -> FastAPI:
     def menschlich_ep() -> JSONResponse:
         """Ordner "Menschliche Bearbeitung": was wartet auf wen und warum
         (Gruende, betroffene Felder, Vorschlagswerte mit Herkunft)."""
+        offen = human.nach_prioritaet(human.offen(store))
+        uebersicht = []
+        for stufe, (kategorie, aufgabe) in human.PRIORITAETEN.items():
+            n = sum(1 for r in offen if r["prioritaet"]["stufe"] == stufe)
+            if n:
+                uebersicht.append({"stufe": stufe, "kategorie": kategorie,
+                                   "aufgabe": aufgabe, "anzahl": n})
         return JSONResponse({"ordner": str(human.human_dir(store.root)),
-                             "offen": human.offen(store)})
+                             "offen": offen, "uebersicht": uebersicht})
 
     # ---- Ordner "Keine Rechnung" (Entscheidung Aaron 14.10.2026) -------
     @app.get("/api/keine-rechnung")

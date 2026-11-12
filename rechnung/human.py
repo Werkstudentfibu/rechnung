@@ -420,3 +420,64 @@ def erledigt(store, res, operator: str = "", freigabe: str = "mensch") -> dict |
         "sha256": res.sha256, "datei": rec["datei"], "korrigiert": rec["korrigiert"]}, op)
     eventlog.record_human(store, rec, eventlog.HUMAN_DONE, op)
     return rec
+
+
+# ---- Prioritaet fuer die Bearbeitung (Wunsch Aaron 12.11.2026) -------------
+# Was zuerst? Stichproben (messen Claudes Fehlerquote), dann schnelle Mails,
+# dann abweichende IBANs, dann echte Einzelfaelle. Rechnungen, die NUR an der
+# fehlenden Rechnungsadresse (Mandant) haengen, kommen zuletzt: sie loest eine
+# ergaenzte Mandantenliste gesammelt, ohne dass jemand jede einzeln oeffnet.
+PRIORITAETEN = {
+    1: ("Stichprobe", "Claudes Prüfung kontrollieren und senden (misst Claudes Fehlerquote)"),
+    2: ("Mail", "Mail ohne Rechnungsanhang sichten: Erledigt oder Keine Rechnung"),
+    3: ("IBAN", "Abweichende IBAN prüfen (Betrugsschutz)"),
+    4: ("Prüfen", "Felder prüfen, ergänzen und senden"),
+    5: ("Später", "Nur der Mandant fehlt in der Bibliothek – wird nach Ergänzung "
+                  "der Mandantenliste automatisch erneut geprüft"),
+}
+
+
+def _grund_teile(rec: dict) -> list[str]:
+    import re
+
+    teile = []
+    for g in rec.get("gruende") or []:
+        text = str(g.get("grund") or "")
+        text = text.replace("nach Claudes Pruefung noch offen: ", "")
+        teile += [x.strip() for x in re.split(r";\s*", text) if x.strip()]
+    return teile
+
+
+def prioritaet(rec: dict) -> dict:
+    """-> ``{"stufe": 1-5, "kategorie": ..., "aufgabe": ...}`` fuer einen
+    Eintrag aus ``offen``."""
+    datei = str(rec.get("datei") or "").lower()
+    arten = {str(g.get("art") or "") for g in rec.get("gruende") or []}
+    teile = _grund_teile(rec)
+    adresse = [x for x in teile if "Rechnungsadresse" in x or x.startswith("Postfach Mandant")]
+    generisch = [x for x in teile if x == "zurueckgestellt"]
+    rest = [x for x in teile if x not in adresse and x not in generisch]
+    if any("Stichprobe" in x for x in teile):
+        stufe = 1
+    elif datei.endswith(".eml") or "mail" in arten:
+        stufe = 2
+    elif "iban" in arten or any("IBAN weicht" in x for x in teile):
+        stufe = 3
+    elif rest or not adresse:
+        stufe = 4
+    else:
+        stufe = 5
+    kategorie, aufgabe = PRIORITAETEN[stufe]
+    if stufe == 4 and adresse:
+        aufgabe += " – dabei auch den Mandanten wählen"
+    return {"stufe": stufe, "kategorie": kategorie, "aufgabe": aufgabe}
+
+
+def nach_prioritaet(eintraege: list[dict]) -> list[dict]:
+    """Eintraege mit ``prioritaet`` versehen und sortieren: Stufe, dann
+    Lieferant (gleiche Lieferanten nacheinander), dann Datei."""
+    for r in eintraege:
+        r["prioritaet"] = prioritaet(r)
+    return sorted(eintraege, key=lambda r: (r["prioritaet"]["stufe"],
+                                            str(r.get("lieferant_name") or "~").lower(),
+                                            str(r.get("datei") or "").lower()))

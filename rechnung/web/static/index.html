@@ -3109,16 +3109,25 @@ async function loadHuman() {
     $('#human-table').innerHTML = '<p class="hint">Nichts offen – alle Rechnungen waren sicher oder sind bearbeitet.</p>';
     return;
   }
+  // Prioritaet (Aaron 12.11.2026): oben steht, was jetzt wichtig ist; die
+  // Tabelle ist danach sortiert, der Stapel folgt derselben Reihenfolge.
+  const PRIO_FARBE = {1: '#c0392b', 2: '#2471a3', 3: '#b9770e', 4: '#555', 5: '#999'};
+  const prioBadge = p => p ? `<span class="badge" style="background:${PRIO_FARBE[p.stufe]};color:#fff">${p.stufe} · ${esc(p.kategorie)}</span>` : '';
+  const ueb = (d.uebersicht || []).map(u =>
+    `<li>${prioBadge(u)} <b>${u.anzahl}</b> – ${esc(u.aufgabe)}</li>`).join('');
   const t = document.createElement('table');
-  t.innerHTML = `<tr><th>Datei</th><th>Lieferant</th><th>seit</th><th>Gründe</th>
+  t.innerHTML = `<tr><th>Priorität</th><th>Datei</th><th>Lieferant</th><th>seit</th><th>Gründe</th>
     <th>betroffene Felder</th><th>Vorschläge (Herkunft)</th></tr>`;
   for (const r of d.offen) {
     const tr = document.createElement('tr'); tr.className = 'clickable';
+    const p = r.prioritaet;
+    if (p && p.stufe === 5) tr.style.opacity = '0.6';
     const vs = Object.entries(r.vorschlaege || {})
       .filter(([n]) => (r.felder || []).includes(n))
       .map(([n, v]) => `${esc(n)}: ${esc(typeof v.wert === 'object' ? JSON.stringify(v.wert) : v.wert)}
         <span class="badge ${esc(v.herkunft)}">${esc(v.herkunft)}${v.via ? ' · ' + esc(v.via) : ''}</span>`);
-    tr.innerHTML = `<td>${esc(r.datei)}</td>
+    tr.innerHTML = `<td>${prioBadge(p)}${p ? `<div class="hint">${esc(p.aufgabe)}</div>` : ''}</td>
+      <td>${esc(r.datei)}</td>
       <td>${esc(r.lieferant_name || r.lieferant || '–')}</td>
       <td>${esc((r.abgelegt || '').slice(0, 16).replace('T', ' '))}</td>
       <td>${(r.gruende || []).map(g => esc(g.grund)).join('<br>')}</td>
@@ -3131,7 +3140,8 @@ async function loadHuman() {
     };
     t.appendChild(tr);
   }
-  $('#human-table').innerHTML = ''; $('#human-table').appendChild(t);
+  $('#human-table').innerHTML = ueb ? `<p><b>Reihenfolge:</b> oben anfangen, mit „b“ geht es zur nächsten.</p><ul>${ueb}</ul>` : '';
+  $('#human-table').appendChild(t);
 }
 
 /* ================= Keine Rechnung (Entscheidung Aaron 14.10.2026) ======= */
