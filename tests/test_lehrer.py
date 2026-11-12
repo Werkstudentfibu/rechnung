@@ -370,3 +370,85 @@ def test_waehrungszeichen_von_claude_wird_zum_code():
     ab = lehrer.abgleichen("Summe 1.190,00 €", felder, {"waehrung": "EUR"}, antwort)
     assert "waehrung" not in ab.unsicher and ab.werte["waehrung"] == "EUR"
     assert "waehrung" not in ab.korrekturen
+
+
+# ---- Uebungsphase: Claude klaert Lieferanten-Entwuerfe (Aaron 12.11.2026) --
+
+def _entwurf_und_excel(tmp_path, mit_excel=True):
+    """Entwurf 'Unbekannt (DE...)' mit den Kennungen der Rechnung, dazu
+    (optional) der gleichnamige Excel-Lieferant ohne Kennungen."""
+    store = Store(tmp_path / "data")
+    ordner = tmp_path / "in"
+    ordner.mkdir()
+    src = make_invoice(ordner / "a.pdf")
+    entwurf = supplier_from_doc(pdfmod.load(src), "neu-de123456789", "Unbekannt (DE123456789)")
+    entwurf.bestaetigt = False
+    store.save_supplier(entwurf)
+    if mit_excel:
+        from rechnung.identify import Supplier
+        store.save_supplier(Supplier(id="excel-1", name="Muster Handels GmbH", bestaetigt=True))
+    return store, src
+
+
+def test_stammdaten_aus_ohne_schalter(tmp_path):
+    store, src = _entwurf_und_excel(tmp_path)
+    calls = []
+    r = lehrer.anlernen_datei(store, src, post=_claude(RICHTIG, calls=calls))
+    assert r["ergebnis"] == lehrer.ERG_UEBERSPRUNGEN and not calls
+
+
+def test_entwurf_wird_in_gleichnamigen_lieferanten_uebernommen(tmp_path, monkeypatch):
+    monkeypatch.setenv("RECHNUNG_CLAUDE_STAMMDATEN", "1")
+    store, src = _entwurf_und_excel(tmp_path)
+    werte = dict(RICHTIG, lieferant_name="Muster Handels GmbH")
+    r = lehrer.anlernen_datei(store, src, post=_claude(werte))
+    assert r["stammdaten"]["aktion"] == "uebernommen", r
+    assert r["stammdaten"]["ziel"] == "excel-1"
+    assert store.supplier("neu-de123456789") is None
+    ziel = store.supplier("excel-1")
+    assert "DE123456789" in ziel.ustids and "von Claude bestaetigt" in ziel.notes
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT, r
+    assert any(a.get("action") == "lieferant_entwurf_uebernommen" or
+               a.get("operator") == "claude" for a in store.audit_log())
+    b = lehrer.bilanz(store)
+    assert b["stammdaten_von_claude"]["uebernommen"] == 1
+
+
+def test_entwurf_ohne_bestehenden_lieferanten_wird_bestaetigt(tmp_path, monkeypatch):
+    monkeypatch.setenv("RECHNUNG_CLAUDE_STAMMDATEN", "1")
+    store, src = _entwurf_und_excel(tmp_path, mit_excel=False)
+    werte = dict(RICHTIG, lieferant_name="Muster Handels GmbH")
+    r = lehrer.anlernen_datei(store, src, post=_claude(werte))
+    assert r["stammdaten"]["aktion"] == "bestaetigt", r
+    sup = store.supplier("neu-de123456789")
+    assert sup.bestaetigt and sup.name == "Muster Handels GmbH"
+    assert "von Claude bestaetigt" in sup.notes
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT, r
+
+
+def test_erfundener_lieferantenname_geht_zum_menschen(tmp_path, monkeypatch):
+    monkeypatch.setenv("RECHNUNG_CLAUDE_STAMMDATEN", "1")
+    store, src = _entwurf_und_excel(tmp_path)
+    werte = dict(RICHTIG, lieferant_name="Ganz Andere Firma AG")
+    r = lehrer.anlernen_datei(store, src, post=_claude(werte))
+    assert r["ergebnis"] == lehrer.ERG_MENSCH
+    assert "nicht im PDF-Text" in r["gruende"][0]
+    assert not store.supplier("neu-de123456789").bestaetigt
+    assert not lehrer._wartete_auf_lieferant(r)
+
+
+def test_eigene_gesellschaft_wird_nie_lieferant(tmp_path, monkeypatch):
+    from rechnung.billing import BillingAddress
+    monkeypatch.setenv("RECHNUNG_CLAUDE_STAMMDATEN", "1")
+    store, src = _entwurf_und_excel(tmp_path, mit_excel=False)
+    store.save_address(BillingAddress(id="kunde", name="Beispiel Kunde AG",
+                                      match_terms=["Beispiel Kunde AG"]))
+    # Entwurf gilt unter dieser Rechnungsadresse (sonst findet ihn kandidaten() nicht)
+    entwurf = store.supplier("neu-de123456789")
+    entwurf.addresses = ["kunde"]
+    store.save_supplier(entwurf)
+    werte = dict(RICHTIG, lieferant_name="Beispiel Kunde AG")
+    r = lehrer.anlernen_datei(store, src, post=_claude(werte))
+    assert r["ergebnis"] == lehrer.ERG_MENSCH
+    assert "eigene Gesellschaft" in r["gruende"][0]
+    assert not store.supplier("neu-de123456789").bestaetigt

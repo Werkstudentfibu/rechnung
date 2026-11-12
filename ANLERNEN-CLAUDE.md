@@ -108,9 +108,17 @@ wenn
   korrigieren musste.
 
 Rechnungen, deren Lieferant unbekannt oder nur ein **Entwurf** ist, fasst
-Claude nicht an: Stammdaten (z. B. die IBAN) gibt immer ein Mensch frei. Sie
-erscheinen im Protokoll als „uebersprungen“ und werden automatisch angelernt,
-sobald du den Lieferanten im Programm bestätigt hast.
+Claude standardmäßig nicht an: Stammdaten (z. B. die IBAN) gibt ein Mensch
+frei. Sie erscheinen im Protokoll als „uebersprungen“ und werden automatisch
+angelernt, sobald du den Lieferanten im Programm bestätigt hast.
+
+**Übungsphase:** Mit `RECHNUNG_CLAUDE_STAMMDATEN=1` klärt Claude Entwürfe
+selbst. Claude nennt den Lieferantennamen; steht er im PDF-Text und ist keine
+eigene Gesellschaft, wird der Entwurf in den gleichnamigen bestehenden
+Lieferanten übernommen oder, wenn es keinen gibt, bestätigt. Jeder so
+behandelte Lieferant trägt einen Vermerk, `--bilanz` zählt sie. Vor dem
+Wechsel auf „autonom“ siehst du sie durch (IBAN!) und nimmst den Schalter
+wieder heraus.
 
 ## Übung bleibt Übung
 

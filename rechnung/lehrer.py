@@ -23,8 +23,16 @@ reifen. Ablauf je Rechnung:
    vorhanden haelt, eine Pruefung rot bleibt -- oder die Rechnung in der
    Stichprobe liegt (Kontrolle des Lehrers).
 6. Ist der Lieferant unbekannt oder nur ein Entwurf, wird Claude gar nicht
-   gefragt: Stammdaten entscheidet immer ein Mensch. Die Rechnung wartet und
+   gefragt: Stammdaten entscheidet ein Mensch. Die Rechnung wartet und
    wird automatisch aufgegriffen, sobald der Lieferant bestaetigt ist.
+   AUSNAHME Uebungsphase (``RECHNUNG_CLAUDE_STAMMDATEN=1``, Entscheidung
+   Aaron 12.11.2026): Claude nennt zusaetzlich den Lieferantennamen; steht
+   er im PDF-Text und ist keine eigene Gesellschaft, wird der Entwurf in
+   den gleichnamigen bestehenden Lieferanten uebernommen
+   (entwurf_uebernahme.py) oder -- gibt es keinen -- selbst bestaetigt.
+   Jede solche Entscheidung steht mit Operator ``claude`` im Audit, als
+   ``stammdaten`` in lehrer.jsonl und als Vermerk im Lieferanten; die
+   Bilanz zaehlt sie, damit ein Mensch sie vor ``autonom`` durchsieht.
 
 Sicherungen:
 
@@ -158,6 +166,88 @@ def timeout_s() -> int:
         return max(10, int(os.environ.get("RECHNUNG_CLAUDE_TIMEOUT", "120")))
     except ValueError:
         return 120
+
+
+def stammdaten_an() -> bool:
+    """Darf der Lehrer Lieferanten-Entwuerfe selbst klaeren (bestaetigen
+    oder in einen bestehenden Lieferanten uebernehmen)? Standard NEIN.
+    ``RECHNUNG_CLAUDE_STAMMDATEN=1`` nur fuer die Uebungsphase (Entscheidung
+    Aaron 12.11.2026) -- vor dem Wechsel auf ``autonom`` sieht ein Mensch
+    alle so entstandenen Stammdaten durch (``--bilanz``)."""
+    return os.environ.get("RECHNUNG_CLAUDE_STAMMDATEN", "").strip().lower() in (
+        "1", "true", "yes", "on", "ja")
+
+
+STAMMDATEN_VERMERK = ("Stammdaten in der Uebungsphase von Claude bestaetigt "
+                      "({datum}) -- vor dem Wechsel auf 'autonom' pruefen")
+
+
+def _gleicher_name(a_n: str, b_n: str) -> bool:
+    """Normalisierte Namen gleich oder der eine als ganze Wortfolge im
+    anderen ("muster-handels" / "muster-handels-gmbh")."""
+    if not a_n or not b_n:
+        return False
+    return a_n == b_n or f"-{a_n}-" in f"-{b_n}-" or f"-{b_n}-" in f"-{a_n}-"
+
+
+def stammdaten_klaeren(store, entwurf, doc, antwort: dict) -> tuple[dict | None, str]:
+    """Lieferanten-Entwurf mit Claudes Lieferantennamen klaeren (nur mit
+    ``stammdaten_an()``). -> (Aktion, "") oder (None, Grund).
+
+    - Name fehlt / Claude unsicher / Name nicht im PDF-Text / Name ist eine
+      eigene Gesellschaft (Rechnungsadresse): nichts tun.
+    - genau EIN bestaetigter Lieferant, dessen Name auf der Rechnung steht
+      und zu Claudes Namen passt: Entwurf dorthin uebernehmen.
+    - mehrere passen: nichts tun (Mensch).
+    - keiner passt: Entwurf bestaetigen (Platzhaltername ersetzt)."""
+    from .entwurf_uebernahme import uebernehmen
+    from .identify import _ist_empfaenger, empfaenger_namen, name_auf_rechnung, namenstreffer
+    from .pipeline import _is_placeholder_name, confirm_supplier
+    from .textnorm import norm
+
+    eintrag = (antwort.get("felder") or {}).get("lieferant_name") or {}
+    name = str(eintrag.get("wert") or "").strip() if isinstance(eintrag, dict) else ""
+    if not name or not (isinstance(eintrag, dict) and eintrag.get("sicher") is True):
+        return None, "Claude nennt keinen sicheren Lieferantennamen"
+    text_n = norm(doc.text)
+    if not name_auf_rechnung(name, text_n):
+        return None, f"Lieferantenname {name!r} steht nicht im PDF-Text"
+    emp = empfaenger_namen(store.addresses())
+    name_n = norm(name)
+    if _ist_empfaenger(name_n, emp):
+        return None, f"{name!r} ist eine eigene Gesellschaft (Rechnungsadresse)"
+    bestaetigte = [s for s in store.suppliers()
+                   if s.bestaetigt and not s.dummy and s.id != entwurf.id]
+    passend = [s for s in namenstreffer(bestaetigte, text_n, emp)
+               if _gleicher_name(norm(s.name), name_n)]
+    if len(passend) > 1:
+        return None, ("mehrere bestehende Lieferanten passen: "
+                      + ", ".join(s.name for s in passend[:4]))
+    if len(passend) == 1:
+        ziel = passend[0]
+        uebernehmen(store, entwurf.id, ziel.id, OPERATOR)
+        ziel = store.supplier(ziel.id)
+        _vermerk_lieferant(store, ziel)
+        return {"aktion": "uebernommen", "entwurf": entwurf.id,
+                "entwurf_name": entwurf.name, "ziel": ziel.id,
+                "ziel_name": ziel.name}, ""
+    sup = store.supplier(entwurf.id)
+    alt_name = sup.name
+    if _is_placeholder_name(sup.name):
+        sup.name = name
+    store.save_supplier(sup)
+    _vermerk_lieferant(store, sup)
+    confirm_supplier(store, sup.id, OPERATOR)
+    return {"aktion": "bestaetigt", "id": sup.id, "name": sup.name,
+            "alter_name": alt_name}, ""
+
+
+def _vermerk_lieferant(store, sup) -> None:
+    vermerk = STAMMDATEN_VERMERK.format(datum=time.strftime("%d.%m.%Y"))
+    if "von Claude bestaetigt" in (sup.notes or ""):
+        return
+    sup.notes = (sup.notes + "\n" if sup.notes else "") + vermerk
+    store.save_supplier(sup)
 
 
 def lokale_ki() -> bool:
@@ -628,7 +718,9 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
     # (kostet nichts, zaehlt nicht zum Rundenlimit) -- sobald der Lieferant
     # bestaetigt ist, greift die naechste Runde die Rechnung von selbst auf.
     sup = store.supplier(res.supplier_id) if res.supplier_id else None
-    if sup is None or not getattr(sup, "bestaetigt", True):
+    entwurf = sup if (sup is not None and not getattr(sup, "bestaetigt", True)
+                      and stammdaten_an()) else None
+    if entwurf is None and (sup is None or not getattr(sup, "bestaetigt", True)):
         rec.update(ergebnis=ERG_UEBERSPRUNGEN, wartet_auf_lieferant=True, gruende=[
             "Lieferant unbekannt -- bitte im Programm anlegen" if sup is None else
             "Lieferant ist nur ein Entwurf -- bitte im Programm bestaetigen"])
@@ -637,8 +729,13 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
     felder = _felder()
     programm = {n: (res.fields[n].value if n in res.fields
                     and res.fields[n].source != "missing" else None) for n in felder}
+    frage = dict(felder)
+    if entwurf is not None:
+        # Uebungsphase: Claude nennt auch den Lieferanten (stammdaten_klaeren)
+        frage["lieferant_name"] = "name"
+        programm["lieferant_name"] = None
     try:
-        antwort = frage_claude(store, path, doc.sha256, felder, programm, post=post)
+        antwort = frage_claude(store, path, doc.sha256, frage, programm, post=post)
     except ClaudeNichtErreichbar as e:
         # liegt nicht an der Rechnung: nicht als Fehlversuch zaehlen
         rec.update(ergebnis=ERG_FEHLER, gruende=[str(e)], claude_weg=True)
@@ -648,6 +745,16 @@ def anlernen_datei(store, path: str | Path, *, post=None) -> dict:
         rec.update(ergebnis=ERG_FEHLER, gruende=[str(e)])
         _protokoll(store, rec)
         return rec
+
+    if entwurf is not None:
+        aktion, grund = stammdaten_klaeren(store, entwurf, doc, antwort)
+        if aktion is None:
+            return _zum_menschen(["Stammdaten: " + grund])
+        rec["stammdaten"] = aktion
+        res = process(path, store, use_llm=lokale_ki())
+        rec["lieferant"] = res.supplier_name or res.supplier_id
+        programm = {n: (res.fields[n].value if n in res.fields
+                        and res.fields[n].source != "missing" else None) for n in felder}
 
     ab = abgleichen(doc.text, felder, programm, antwort)
     rec["claude"] = {k: v for k, v in ab.werte.items()}
@@ -759,8 +866,14 @@ def bilanz(store) -> dict:
                 fehler += 1
                 for f in falsch:
                     fehler_felder[f] = fehler_felder.get(f, 0) + 1
+    stammdaten = {"bestaetigt": 0, "uebernommen": 0}
+    for r in log:
+        a = (r.get("stammdaten") or {}).get("aktion")
+        if a in stammdaten:
+            stammdaten[a] += 1
     return {
         "rechnungen": len(letzte),
+        "stammdaten_von_claude": stammdaten,
         "von_claude_bestaetigt": zaehl[ERG_BESTAETIGT],
         "an_menschen": zaehl[ERG_MENSCH],
         "fehler": zaehl[ERG_FEHLER],
@@ -814,6 +927,10 @@ def main(argv=None) -> int:
               f"Claude lag {le['claude_lag_falsch']}x falsch ({quote})")
         for f, n in sorted(le["felder"].items(), key=lambda x: -x[1]):
             print(f"   {f}: {n}x")
+        st = b["stammdaten_von_claude"]
+        if st["bestaetigt"] or st["uebernommen"]:
+            print(f"Stammdaten von Claude (vor 'autonom' pruefen): {st['bestaetigt']} "
+                  f"Entwuerfe bestaetigt, {st['uebernommen']} in bestehende uebernommen")
         print("Programm (Schattenbetrieb): " + modus_text(b["schueler"]))
         return 0
     if not a.ordner:
