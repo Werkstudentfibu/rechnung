@@ -1246,6 +1246,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                                 for k, v in res.gegencheck_abweichungen.items()},
             # Einzelbestaetigung je Position (offen/bestaetigt/korrigiert)
             "zeilen_status": positionen.zeilen_status(line_items, store.zeilen(doc.sha256)),
+            # Per Haken bestaetigte Felder: die Pruefmaske zeigt sie nach jedem
+            # Neuladen weiter als geprueft (sonst springen sie wieder auf rot).
+            "bestaetigte_felder": sorted(store.confirmed_fields(doc.sha256)),
             "positionen_grund": _positionen_grund(doc, line_items, supplier_obj, llm_rejected, store),
             # Vollstaendig aggregierte/ergaenzte USt-Aufstellung (SPEC
             # Baustein 2/3) -- je Zeile mit Herkunft (``_herkunft``), unabhaengig
@@ -1333,6 +1336,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             "identifiers": suggestion,
             "template_id": None,
             "variant": "standard",
+            "bestaetigte_felder": sorted(store.confirmed_fields(res.sha256)),
             "template_fields": [],
             "template_line_items": None,
             "line_items": res.line_items,

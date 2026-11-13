@@ -737,7 +737,9 @@ function applyInvoiceData(d) {
     langerBelegHinweis: (d.hinweise || []).find(h => h.startsWith('Langer Beleg')) || null,
     llmRejected: d.llm_rejected || {},
     kiPositionen: d.ki_positionen,
-    bestaetigt: {},   // Felder, die der Mensch per ✓ bestätigt hat (nur diese Ansicht)
+    // Felder, die der Mensch per ✓ bestätigt hat -- vom Server, damit die
+    // Bestätigung ein Neuladen (anderes Feld gespeichert) übersteht.
+    bestaetigt: Object.fromEntries((d.bestaetigte_felder || []).map(f => [f, true])),
     positionenGrund: d.positionen_grund || '',
     lineItems: (d.line_items || []).map(it => ({ ...it })),
     // je Position: 'offen' | 'bestaetigt' | 'korrigiert' (Aaron 05.11.2026)
@@ -961,7 +963,7 @@ function fBox(name, label, cls = '') {
   const rot = (STATE.roteFelder || {})[name] || [];
   // Gegencheck (gruendlicher Modus): KI liest etwas anderes als die Vorlage -> unsicher
   const kiAbw = (STATE.kiAbweichungen || {})[name];
-  const st = (rot.length || kiAbw) ? 'unsicher'
+  let st = (rot.length || kiAbw) ? 'unsicher'
     : !da ? '' : (cur.source === 'manual' || cur.confidence == null || cur.confidence >= 0.7) ? 'gut' : 'unsicher';
   const raw = da && cur.raw && String(cur.raw).trim() !== val && cur.source !== 'manual'
     ? `<div class="raw" title="gelesen (${esc(cur.source)})">${esc(String(cur.raw).slice(0, 60))}</div>` : '';
@@ -969,7 +971,12 @@ function fBox(name, label, cls = '') {
   // leeres Pflichtfeld. Tab springt nur zwischen diesen (siehe Tab-Handler).
   const ki = da && cur.source === 'llm' && st !== 'unsicher';
   const fehlt = !da && def.required;
-  const geprueft = !!(STATE.bestaetigt || {})[name];
+  // Vom Menschen bestätigt oder korrigiert: nicht wieder rot färben, auch wenn
+  // die (beim Neuzeichnen nicht neu berechneten) roten Prüfungen noch das
+  // Feld nennen -- sonst springt es nach dem Speichern eines ANDEREN Feldes
+  // zurück auf rot (Befund Aaron 13.11.2026). Gründe bleiben als Text sichtbar.
+  const geprueft = !!(STATE.bestaetigt || {})[name] || (da && cur.source === 'manual');
+  if (geprueft && da) st = 'gut';
   const uns = !geprueft && (st === 'unsicher' || ki || fehlt);
   const unsCls = uns ? ' uns' + (st === 'unsicher' ? '' : ' kuenstlich') : (da ? ' sicher' : '');
   return `<div class="af ${cls}${unsCls}" data-field="${esc(name)}" onclick="selectField('${esc(name)}', this)">
