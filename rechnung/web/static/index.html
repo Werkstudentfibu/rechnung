@@ -1954,6 +1954,13 @@ async function tabRahmenAktualisieren() {
   // (tabRahmenZiel); so greift nach Verschieben/Zusammenlegen der neue Vorschlag.
   STATE.tabRahmen.mapping = r.columns.map((c, i) => altMap[i] || null);
   STATE.lineItems = r.items || [];
+  // Keine Waehrungsspalte in der Tabelle: Kopf-Waehrung schon in der
+  // Vorschau zeigen (wird nicht als gelesener Wert gespeichert).
+  const kw = String(((STATE.current.waehrung || {}).value) || 'EUR').trim();
+  const kopfW = /^(€|euro?)$/i.test(kw) ? 'EUR' : kw.toUpperCase();
+  STATE.lineItems.forEach(it => {
+    if (!it.waehrung) { it.waehrung = kopfW; it._herkunft = Object.assign({}, it._herkunft, { waehrung: 'kopf' }); }
+  });
   STATE.zeilenStatus = STATE.lineItems.map(() => 'offen');
   STATE.tabDirty.positionen = true;
   renderCurrent();
@@ -2643,7 +2650,9 @@ function taxAddRow() { STATE.taxRows.push({ satz: '', netto: '', ust: '' }); tax
 async function saveTabelle(art) {
   const rows = art === 'ust' ? STATE.taxRows
     : STATE.lineItems.map(it => Object.fromEntries(Object.entries(it)
-        .filter(([k]) => !k.startsWith('_') && !LI_NICHT_SPEICHERN.includes(k))));
+        .filter(([k]) => !k.startsWith('_') && !LI_NICHT_SPEICHERN.includes(k)
+          // aus dem Kopf uebernommen = nicht gelesen -> nicht als Tabellenwert speichern
+          && !(k === 'waehrung' && ((it._herkunft || {}).waehrung === 'kopf')))));
   const quelleVorher = art === 'ust'
     ? ((STATE.current.ust_aufstellung || {}).source || null)
     : (STATE.positionenKorrigiert ? 'manual' : (STATE.tid ? 'template' : 'llm'));

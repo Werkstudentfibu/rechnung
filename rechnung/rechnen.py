@@ -43,7 +43,7 @@ from .identify import DEFAULT_CURRENCY, EXPECTED_RATES
 from .identify import nearest_valid_rate as _identify_nearest_valid_rate
 from .template import FieldResult
 from .textnorm import coerce
-from .validate import looks_like_brutto_prices
+from .validate import _norm_currency, looks_like_brutto_prices
 
 GELESEN = "gelesen"
 ERRECHNET = "errechnet"
@@ -239,6 +239,8 @@ def _ergaenze_item(it: dict, currency: str | None, satz_einzig: float | None,
     if _num(it, "mwst_satz") is None and satz_einzig is not None:
         it["mwst_satz"] = satz_einzig
         h["mwst_satz"] = KOPF
+    if it.get("waehrung"):
+        it["waehrung"] = _norm_currency(it["waehrung"])   # "€" -> "EUR"
     if not it.get("waehrung") and currency:
         it["waehrung"] = currency
         h["waehrung"] = KOPF
@@ -459,11 +461,26 @@ def rechne(fields: dict[str, FieldResult], line_items: list[dict] | None,
 
     waehrung_fr = _feld(fields, "waehrung")
     currency = waehrung_fr.value if waehrung_fr else None
+    if currency:
+        # "€"/"Euro" (z.B. per Markieren gelesen) -> "EUR" (Aaron 13.11.2026)
+        norm = _norm_currency(currency)
+        if norm != currency:
+            from dataclasses import replace as _replace
+            fields["waehrung"] = _replace(waehrung_fr, value=norm)
+            currency = norm
+    # Positionen ohne eigene Waehrungsspalte (der Normalfall) erben die
+    # Kopf-Waehrung; steht im Text gar kein Hinweis, gilt wie in
+    # waehrung.checks EUR als angenommen.
+    positions_waehrung = currency
+    if not positions_waehrung:
+        from . import waehrung as _waehrung
+        code, warum = _waehrung.detect(text)
+        positions_waehrung = code or (None if warum else DEFAULT_CURRENCY)
 
     _summen_aus_kontext(fields, currency, text, gruende, ergaenzt)
     _ergaenze_kopf(fields, currency, gruende, ergaenzt)
     rows = tax_breakdown(fields, line_items)
-    _ergaenze_positionen(line_items, fields, currency, text, gruende)
+    _ergaenze_positionen(line_items, fields, positions_waehrung, text, gruende)
     rows = tax_breakdown(fields, line_items)
     _ergaenze_aufstellung(rows, currency, gruende)
 

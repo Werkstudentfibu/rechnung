@@ -71,7 +71,9 @@ def checks(fields: dict, text: str) -> list[Check]:
     Text ist (wie bisher) kein Fehler -- stillschweigend EUR angenommen."""
     fr = fields.get("waehrung")
     if fr is not None and fr.source != "missing" and fr.value:
-        ok = fr.value in KNOWN
-        return [Check("waehrung", ok, str(fr.value) if ok else f"unbekannte Waehrung: {fr.value}")]
+        from .validate import _norm_currency
+        wert = _norm_currency(fr.value)      # "€"/"Euro" ist EUR
+        ok = wert in KNOWN
+        return [Check("waehrung", ok, wert if ok else f"unbekannte Waehrung: {fr.value}")]
     _, why = detect(text)
     return [Check("waehrung", not why, why or f"{DEFAULT_CURRENCY} (angenommen)")]
