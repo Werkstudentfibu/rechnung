@@ -1881,9 +1881,31 @@ function wordText(page, i) {
    statt Kopfwoerter einzeln anzuklicken -- das Programm erkennt Spalten
    ueber die Wortluecken (tabelle.markiere_tabelle) und schlaegt je Spalte
    eine LI_STD-Zuordnung vor (Dropdown, sofort wirksam). */
+/* Feld hat Vorrang vor dem Tabellen-Rahmen (Aaron 13.11.2026: "Wenn ich ein
+   Feld auswaehle und einen laengeren Text markieren moechte ... wird es
+   immer als Tabelle gewertet und springt zur Tabelle"): ist ein Feld bzw.
+   eine Zelle als Ziel gewaehlt, fuellen Rahmen und Wort-Klicks dieses Ziel,
+   auch wenn "Tabelle im PDF markieren" offen ist. Nur ohne Ziel gilt ein
+   Rahmen der Tabelle. */
+function feldZiel() {
+  return !!(STATE && (STATE.selField || STATE.zielInput || STATE.zielLiCell || STATE.zielTaxCell));
+}
+function feldZielLoesen() {
+  if (!STATE) return;
+  STATE.selField = null; STATE.zielInput = null; STATE.zielLiCell = null; STATE.zielTaxCell = null;
+  document.querySelectorAll('.li-cell-ziel, .tax-cell-ziel').forEach(x => x.classList.remove('li-cell-ziel', 'tax-cell-ziel'));
+  document.querySelectorAll('#fields .sel, #fields .ziel-sel').forEach(x => x.classList.remove('sel', 'ziel-sel'));
+  document.querySelectorAll('.w.ziel').forEach(e => e.classList.remove('ziel'));
+  document.querySelectorAll('.mk[data-field].active').forEach(e => e.classList.remove('active'));
+}
+function rahmenFuerTabelle() {
+  feldZielLoesen();
+  const m = $('#msg'); if (m) m.textContent = 'Der nächste Rahmen gilt der Tabelle.';
+}
 function toggleTabRahmen() {
   STATE.tabRahmen.active = !STATE.tabRahmen.active;
   if (!STATE.tabRahmen.active) Object.assign(STATE.tabRahmen, { boxes: [], columns: [], mapping: null, raster: null });
+  else feldZielLoesen();   // gerade eingeschaltet: der naechste Rahmen gilt der Tabelle
   renderCurrent();
 }
 function tabRahmenZuruecksetzen() {
@@ -1924,6 +1946,8 @@ function renderTabRahmenPanel() {
       ein Rahmen ersetzt den vorigen auf derselben Seite. Esc bricht ab.</div>
     <div class="hint">Eine Rechnung, je Seite ein Rahmen – die Spalten gelten für alle Seiten.
       Seiten mit Rahmen sind lila; × löscht den Rahmen dieser Seite, ein neuer Rahmen ersetzt ihn.</div>
+    <div class="hint">Ist ein Feld ausgewählt, füllt ein Rahmen dieses Feld – nicht die Tabelle.
+      <button class="ghost mini" onclick="rahmenFuerTabelle()" title="Feldauswahl aufheben – der nächste Rahmen markiert wieder die Tabelle">▭ Nächster Rahmen für die Tabelle</button></div>
     ${STATE.tabRahmen.raster ? `<div class="hint"><b>Raster anpassen:</b> lila Linien mit der Maus verschieben ·
       Doppelklick in den Rahmen = neue Spalte, Umschalt+Doppelklick = neue Zeile · × an einer Linie entfernt sie ·
       über jeder Spalte wählen, was drinsteht. Rechts siehst du sofort die gelesenen Positionen.</div>
@@ -2140,7 +2164,7 @@ function paintRaster(wrap, pg, b) {
   if (!wrap.dataset.rasterDbl) {
     wrap.dataset.rasterDbl = '1';
     wrap.addEventListener('dblclick', ev => {
-      if (!STATE.tabRahmen.active || !STATE.tabRahmen.raster) return;
+      if (!STATE.tabRahmen.active || !STATE.tabRahmen.raster || feldZiel()) return;
       const seite = [...document.querySelectorAll('.pdfwrap')].indexOf(wrap);
       const pgx = STATE.pages[seite];
       const bx = STATE.tabRahmen.boxes.find(x => x.page === seite); if (!bx || !pgx) return;
@@ -2755,7 +2779,7 @@ function clickWord(page, i, ev) {
     return;
   }
   if (RAHMEN_KLICK_SPERRE) return;   // Klick am Ende einer Rahmen-Auswahl
-  if (STATE.tabRahmen && STATE.tabRahmen.active) return;   // Raster-Modus: Klicks gehoeren dem Raster
+  if (STATE.tabRahmen && STATE.tabRahmen.active && !feldZiel()) return;   // Raster-Modus ohne Feldziel
   if (STATE.zielLiCell) { liZelleWortToggle(page, i); return; }
   if (STATE.zielTaxCell) { taxZelleWortToggle(page, i); return; }
   if (STATE.zielInput) { zielWoerter(page, [i], false); return; }
@@ -2884,7 +2908,7 @@ function rahmenAuswahl(wrap, page) {
     if (!box) return;
     const r = box.getBoundingClientRect(); box.remove(); box = null;
     RAHMEN_KLICK_SPERRE = true; setTimeout(() => { RAHMEN_KLICK_SPERRE = false; }, 50);
-    if (STATE.tabRahmen.active) { tabRahmenBoxGezogen(wrap, page, r); return; }
+    if (STATE.tabRahmen.active && !feldZiel()) { tabRahmenBoxGezogen(wrap, page, r); return; }
     const treffer = [];
     wrap.querySelectorAll('.w').forEach((el, i) => {
       const b = el.getBoundingClientRect();

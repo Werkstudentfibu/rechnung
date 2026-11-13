@@ -197,3 +197,14 @@ def test_rahmen_ohne_kopf_erste_zeile_ist_position():
     raster = tabelle.raster_vorschlag(doc, [box])
     assert raster["kopf"]["0"] is False
     assert len(tabelle.raster_lesen(doc, [box], raster)["rows"]) == 2
+
+
+def test_feld_hat_vorrang_vor_tabellenrahmen():
+    """Aaron 13.11.2026: mit offenem 'Tabelle im PDF markieren' landete ein
+    Rahmen fuer ein Feld in der Tabelle. Jetzt: gewaehltes Feld hat Vorrang."""
+    from pathlib import Path
+
+    html = (Path(__file__).resolve().parent.parent / "rechnung" / "web" / "static" / "index.html").read_text("utf-8")
+    assert "if (STATE.tabRahmen.active && !feldZiel()) { tabRahmenBoxGezogen(wrap, page, r); return; }" in html
+    assert "else feldZielLoesen();" in html and "function rahmenFuerTabelle()" in html
+    assert "Nächster Rahmen für die Tabelle" in html
