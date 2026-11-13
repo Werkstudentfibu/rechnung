@@ -1027,6 +1027,37 @@ def _llm_full(res: Result, doc, positionsmodus: str = POSITIONSMODUS_EINZELN,
 GEGENCHECK_BUDGET_MARGIN = 15.0
 
 
+def vorlagen_luecken(tpl: Template, fields: dict[str, FieldResult]) -> list[str]:
+    """Felder einer Rechnung MIT Vorlage, nach denen die KI gefragt wird
+    (semantischer Fallback, §7f): fehlend oder unter CONF_MIN.
+
+    SPEC Effizienz-Baustein 1: nur Pflichtfelder und die Felder, die die
+    Vorlage selbst kennt -- ein optionales Feld, das fuer diesen Lieferanten
+    nie angelernt wurde (z.B. Kostenstelle), kostet sonst bei JEDER Rechnung
+    einen Modellaufruf und laedt das Modell zum Raten ein."""
+    tpl_names = {f.name for f in tpl.fields}
+    return [
+        name for name, (_vtype, required) in STANDARD_FIELDS.items()
+        if (required or name in tpl_names)
+        and (fields.get(name) is None or fields[name].source == "missing"
+             or fields[name].confidence < CONF_MIN)
+    ]
+
+
+def ki_luecken_fuellen(doc, gaps: list[str], fields: dict[str, FieldResult],
+                       rejected: dict[str, str] | None = None) -> dict[str, FieldResult]:
+    """Die KI nach den Luecken ``gaps`` fragen; die schon gelesenen Werte
+    (``fields``: Vorlage + Stammdaten, VOR den Korrekturen) gehen als Hinweis
+    mit, nicht als Zwang.
+
+    EINE Stelle fuer Pipeline und Pruefansicht (``/api/invoice``): gleiche
+    Frage = gleicher Schluessel im KI-Zwischenspeicher. Was die Vorverarbeitung
+    im Hintergrund gelesen hat, ist beim Anklicken damit sofort da, statt die
+    Rechnung noch einmal lesen zu lassen (Befund Aaron 13.11.2026)."""
+    hints = {n: r.raw for n, r in fields.items() if r.source != "missing"}
+    return semantic.extract(extraction_text(doc), gaps, hints, rejected)
+
+
 def _gegencheck_active(tpl: Template, store: Store) -> bool:
     from . import modus
     from .config import gegencheck_autonom, gegencheck_min
@@ -1051,6 +1082,18 @@ def _gegencheck_felder(tpl: Template, fields: dict) -> list[str]:
         if (required or n in tpl_names)
         and fields.get(n) is not None and fields[n].source not in ("missing", "manual")
     )
+
+
+def _gegencheck_frage(tpl: Template) -> list[str]:
+    """Wonach der Gegencheck die KI fragt: Pflichtfelder + von der Vorlage
+    gelernte Felder -- nur von der Vorlage abhaengig, NICHT von Korrekturen
+    oder fehlenden Werten dieser Rechnung. Sonst waere es nach jeder Korrektur
+    eine neue Frage, und die schon gelesene Rechnung ginge erneut an die KI
+    (30-90 s auf dem Laptop, Befund Aaron 13.11.2026). Verglichen wird danach
+    nur ``_gegencheck_felder``."""
+    tpl_names = {f.name for f in tpl.fields}
+    return sorted(n for n, (_vtype, required) in STANDARD_FIELDS.items()
+                  if required or n in tpl_names)
 
 
 def _gegencheck_mismatch(name: str, vorlage, ki) -> bool:
@@ -1097,7 +1140,12 @@ def _gegencheck(res: "Result", doc, tpl: Template, store: Store, timer: StageTim
     if not namen and not hat_positionen:
         return
     with timer.stage("ki"):
-        ki_fields = semantic.extract(extraction_text(doc), namen, {}, res.llm_rejected)
+        abgelehnt: dict[str, str] = {}
+        ki_fields = semantic.extract(extraction_text(doc), _gegencheck_frage(tpl), {}, abgelehnt)
+    # Nur was auch verglichen wird -- eine verworfene KI-Antwort zu einem schon
+    # korrigierten oder fehlenden Feld gehoert nicht in die Anzeige.
+    ki_fields = {n: fr for n, fr in ki_fields.items() if n in namen}
+    res.llm_rejected.update({n: g for n, g in abgelehnt.items() if n in namen})
     abweichungen = []
     for name in namen:
         fr_ki = ki_fields.get(name)
@@ -1618,22 +1666,13 @@ def _process(path: str | Path, store: Store, use_llm: bool = True,
     # kann ``use_llm=False`` (z.B. fuer eine reine Listenuebersicht ueber
     # viele Dateien) den Fallback ueberspringen, ohne res.status zu aendern.
     #
-    # SPEC Effizienz-Baustein 1: nachgefragt werden nur Pflichtfelder und die
-    # Felder, die die Vorlage selbst kennt -- ein optionales Feld, das fuer
-    # diesen Lieferanten nie angelernt wurde (z.B. Kostenstelle), kostet sonst
-    # bei JEDER Rechnung einen Modellaufruf und laedt das Modell zum Raten ein.
-    tpl_names = {f.name for f in tpl.fields}
-    gaps = [
-        name for name, (_vtype, required) in STANDARD_FIELDS.items()
-        if (required or name in tpl_names)
-        and (res.fields.get(name) is None or res.fields[name].source == "missing"
-             or res.fields[name].confidence < CONF_MIN)
-    ]
+    # Luecken und Frage an die KI: ``vorlagen_luecken``/``ki_luecken_fuellen``
+    # (dieselben Funktionen nutzt die Pruefansicht /api/invoice).
+    gaps = vorlagen_luecken(tpl, res.fields)
     if gaps and use_llm:
         with timer.stage("ki"):
-            hints = {n: r.raw for n, r in res.fields.items() if r.source != "missing"}
-            for name, fr in semantic.extract(extraction_text(doc), gaps, hints,
-                                             res.llm_rejected).items():
+            for name, fr in ki_luecken_fuellen(doc, gaps, res.fields,
+                                               res.llm_rejected).items():
                 cur = res.fields.get(name)
                 if cur is None or cur.source == "missing" or fr.confidence > cur.confidence:
                     res.fields[name] = fr

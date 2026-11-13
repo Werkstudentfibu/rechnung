@@ -186,12 +186,18 @@ def _alle(store) -> list[dict]:
     die Pruefungen laufen bei jeder Rechnung."""
     from .testsatz import bestaetigte
 
+    # Signatur und Liste als EIN Eintrag, ersetzt in einem Zug: Vorverarbeitung,
+    # Listen-Zwischenspeicher und Anklicken rechnen gleichzeitig. Vorher
+    # (clear, sig, recs nacheinander) sah ein zweiter Thread die neue Signatur
+    # vor der Liste -> KeyError 'recs', die Rechnung galt als "Fehler" statt
+    # "bereit" (Befund 13.11.2026).
     sig = _sig(store)
-    if _cache.get("sig") != sig:
-        _cache.clear()
-        _cache["sig"] = sig
-        _cache["recs"] = bestaetigte(store)
-    return _cache["recs"]
+    eintrag = _cache.get("eintrag")
+    if eintrag is not None and eintrag[0] == sig:
+        return eintrag[1]
+    recs = bestaetigte(store)
+    _cache["eintrag"] = (sig, recs)
+    return recs
 
 
 def profil(store, supplier_id: str | None, ausser_sha: str | None = None) -> dict | None:
