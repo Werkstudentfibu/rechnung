@@ -583,6 +583,9 @@ class Abgleich:
     # freiwillige Felder, bei denen Claude unsicher war: kein Grund fuer den
     # Menschen, der Wert des Programms bleibt (Plan Aaron 12.11.2026, D)
     hinweise: dict[str, str] = field(default_factory=dict)
+    # Felder, die das Programm nur ERRECHNET hatte (gleicher Wert wie Claude)
+    # und die trotzdem als Korrektur gehen, damit die Vorlage sie lernt
+    errechnet: list[str] = field(default_factory=list)
 
 
 def _gleich(a, b, vtype: str) -> bool:
@@ -629,7 +632,18 @@ def _waehrung_belegt(text: str, wert) -> str | None:
     return code if any(b in t for b in belege) else None
 
 
-def abgleichen(text: str, felder: dict[str, str], programm: dict, antwort: dict) -> Abgleich:
+def abgleichen(text: str, felder: dict[str, str], programm: dict, antwort: dict,
+               quellen: dict[str, str] | None = None) -> Abgleich:
+    """Claudes Werte gegen die des Programms. ``quellen``: Feldquelle je
+    Programmwert (``FieldResult.source``). Hat das Programm einen Wert nur
+    errechnet (rechnen.py, z.B. Netto/USt aus Brutto) und steht derselbe
+    Wert belegt im PDF, geht er trotzdem als Korrektur: sonst lernt die
+    Vorlage seine Position nie, und der Schattenbetrieb -- der VOR der
+    Rechenstufe entscheidet -- zaehlt ihn bei jeder Rechnung als "fehlt"
+    (Nachtlauf 12./13.11.2026: 30x Amazon fehlerfrei, nie "sicher").
+    learn.py lernt errechnete Werte weiterhin nicht von selbst: hier ist
+    der Wert durch Claudes Beleg im PDF gefunden, kein Zufallstreffer."""
+    from .rechnen import ERRECHNET, KOPF
     from .semantic import _check_value
     from .shadow import REQUIRED
 
@@ -673,6 +687,9 @@ def abgleichen(text: str, felder: dict[str, str], programm: dict, antwort: dict)
             continue
         if not _gleich(prog, value, vtype):
             out.korrekturen[name] = str(wert)
+        elif (quellen or {}).get(name) in (ERRECHNET, KOPF):
+            out.korrekturen[name] = str(wert)
+            out.errechnet.append(name)
     for name in [n for n in out.unsicher if n not in REQUIRED]:
         out.hinweise[name] = out.unsicher.pop(name)
     return out
@@ -928,9 +945,12 @@ def anlernen_datei(store, path: str | Path, *, post=None, erneut: bool = False) 
     programm = {n: (res.fields[n].value if n in res.fields
                     and res.fields[n].source != "missing" else None) for n in felder}
 
-    ab = abgleichen(doc.text, felder, programm, antwort)
+    quellen = {n: res.fields[n].source for n in felder if n in res.fields}
+    ab = abgleichen(doc.text, felder, programm, antwort, quellen=quellen)
     rec["claude"] = {k: v for k, v in ab.werte.items()}
     rec["korrigiert"] = sorted(ab.korrekturen)
+    if ab.errechnet:
+        rec["errechnet_gelernt"] = sorted(ab.errechnet)
     if ab.hinweise:
         rec["hinweise_felder"] = dict(ab.hinweise)
     rec["hinweis"] = antwort.get("hinweis") or ""

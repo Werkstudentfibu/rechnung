@@ -186,6 +186,25 @@ def _best_label(doc: Document, fname: str, span: list[Word]) -> tuple[int, Word 
     return _hint_score(fname, w) * 2 + (1 if same else 0), w
 
 
+# Summenzeile (Nachtlauf 12./13.11.2026, Amazon): derselbe Betrag steht in
+# der Zeile des Steuersatzes ("19.0%  105,10 €  19,96 €") und in der Zeile
+# "USt. Gesamt  105,10 €  19,96 €" -- nur die Gesamtzeile hat einen
+# eindeutigen Anker, das Spaltenlabel ("Zwischensumme") steht mehrfach auf
+# der Seite. Fuer Summenfelder zaehlt ein Anker in DERSELBEN Zeile, der eine
+# Summenzeile kennzeichnet, deshalb als passendes Label.
+_SUMMENZEILE = ("gesamt", "summe", "total", "endsumme")
+_SUMMENFELDER = ("netto", "ust_betrag", "brutto")
+
+
+def _summenzeile(fname: str, span: list[Word], anchor: Word | None) -> bool:
+    if fname not in _SUMMENFELDER or anchor is None:
+        return False
+    n = norm(anchor.text)
+    h = max(span[0].bottom - span[0].top, 6.0)
+    gleiche_zeile = abs(anchor.cy - span[0].cy) <= max(2.0, h * 0.4) and anchor.x1 <= span[0].x0 + 1
+    return gleiche_zeile and any(n == s or n.startswith(s) for s in _SUMMENZEILE)
+
+
 def locate(doc: Document, fname: str, value, value_type: str
            ) -> tuple[list[Word] | None, Word | None, str]:
     """Wert + Anker fuer ein Feld bestimmen. -> (Wertwoerter, Anker, Grund)."""
@@ -202,7 +221,8 @@ def locate(doc: Document, fname: str, value, value_type: str
     scored.sort(key=lambda x: -x[0])
     if len(scored) > 1 and scored[0][0] == scored[1][0]:
         return None, None, f"mehrdeutig ({len(spans)} Vorkommen, Label entscheidet nicht)"
-    if len(spans) > 1 and _hint_score(fname, scored[0][2]) == 0:
+    if (len(spans) > 1 and _hint_score(fname, scored[0][2]) == 0
+            and not _summenzeile(fname, scored[0][1], scored[0][2])):
         # Mehrere Vorkommen und das gewaehlte Label passt nicht mal zum Feld:
         # das waere geraten.
         return None, None, f"mehrdeutig ({len(spans)} Vorkommen, kein passendes Label)"

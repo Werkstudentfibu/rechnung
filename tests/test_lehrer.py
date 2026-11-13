@@ -729,3 +729,53 @@ def test_nummer_mit_leerzeichen_wird_belegt():
                            {"rechnungsnummer": "R"}, antwort)
     assert "rechnungsnummer" not in ab.unsicher, ab.unsicher
     assert ab.korrekturen["rechnungsnummer"] == "R811658"
+
+
+def test_errechneter_wert_mit_beleg_geht_als_korrektur():
+    """Nachtlauf 12./13.11.2026: Programm errechnet Netto/USt aus Brutto,
+    Claude findet dieselben Werte im PDF -- ohne Korrektur lernt die Vorlage
+    sie nie und der Schattenbetrieb meldet bei jeder Rechnung 'fehlt'."""
+    text = "Nettobetrag 20,83 EUR USt 19% 3,96 EUR Gesamt 24,79 EUR"
+    felder = {"netto": "amount", "ust_betrag": "amount", "brutto": "amount"}
+    programm = {"netto": 20.83, "ust_betrag": 3.96, "brutto": 24.79}
+    antwort = {"felder": {k: {"wert": str(v), "sicher": True, "beleg": str(v)}
+                          for k, v in programm.items()}}
+    quellen = {"netto": "errechnet", "ust_betrag": "errechnet", "brutto": "template-anchor"}
+    ab = lehrer.abgleichen(text, felder, programm, antwort, quellen=quellen)
+    assert sorted(ab.korrekturen) == ["netto", "ust_betrag"]
+    assert sorted(ab.errechnet) == ["netto", "ust_betrag"]
+    # gelesener Wert, gleich wie Claude: keine Korrektur
+    ab = lehrer.abgleichen(text, felder, programm, antwort,
+                           quellen={k: "template-anchor" for k in felder})
+    assert not ab.korrekturen and not ab.errechnet
+    # errechnet, aber Claudes Wert steht nicht im PDF: Mensch, keine Korrektur
+    antwort["felder"]["netto"]["wert"] = "20.84"
+    ab = lehrer.abgleichen(text, felder, {**programm, "netto": 20.84}, antwort, quellen=quellen)
+    assert "netto" not in ab.korrekturen and "netto" in ab.unsicher
+
+
+def test_vorlage_lernt_errechnete_felder_nach(tmp_path):
+    """Ende zu Ende: Vorlage kennt Netto/USt nicht mehr (Rechenstufe ergaenzt
+    sie) -> Claude bestaetigt die errechneten Werte -> Vorlage lernt sie ->
+    naechste Rechnung liest sie selbst, Schattenbetrieb meldet nichts fehlend."""
+    store, ordner, src = _store(tmp_path)
+    assert lehrer.anlernen_datei(store, src, post=_claude(RICHTIG))["ergebnis"] == lehrer.ERG_BESTAETIGT
+    tpl = store.templates_for("muster")[0]
+    tpl.fields = [f for f in tpl.fields if f.name not in ("netto", "ust_betrag")]
+    store.save_template(tpl)
+
+    b = make_invoice(ordner / "b.pdf", rechnungsnr="RE-2026-00050", netto=420.0)
+    res = process(b, store, use_llm=False)
+    assert res.fields["netto"].source == "errechnet", res.fields["netto"]
+    assert any("fehlt" in g for g in res.shadow["reasons"]), res.shadow
+    werte_b = dict(RICHTIG, rechnungsnummer="RE-2026-00050", netto="420.00",
+                   ust_betrag="79.80", brutto="499.80")
+    r = lehrer.anlernen_datei(store, b, post=_claude(werte_b))
+    assert r["ergebnis"] == lehrer.ERG_BESTAETIGT, r
+    assert r["errechnet_gelernt"] == ["netto", "ust_betrag"]
+    assert {"netto", "ust_betrag"} <= {f.name for f in store.templates_for("muster")[0].fields}
+
+    c = make_invoice(ordner / "c.pdf", rechnungsnr="RE-2026-00051", netto=300.0)
+    res = process(c, store, use_llm=False)
+    assert res.fields["netto"].value == 300.0 and res.fields["netto"].source != "errechnet"
+    assert not any("fehlt" in g for g in res.shadow["reasons"]), res.shadow
