@@ -57,3 +57,61 @@ def test_dublette_braucht_bestaetigung(tmp_path: Path):
     assert (samples / "b.pdf").exists()
     r = c.post("/api/senden", json={"file": "b.pdf", "template_id": d2["template_id"], "trotzdem": True})
     assert r.status_code == 200
+
+
+def _nur_in_menschlich(tmp_path: Path):
+    """Rechnung liegt nur im Ordner 'Menschliche Bearbeitung', nicht im Eingang."""
+    from rechnung import human
+
+    store, samples = _secured_setup(tmp_path)
+    human.ablegen_datei(store, "a.pdf", (samples / "a.pdf").read_bytes(),
+                        [{"art": "pflichtfeld", "grund": "Test", "felder": []}])
+    (samples / "a.pdf").unlink()
+    return store, samples
+
+
+def test_senden_aus_menschlicher_bearbeitung(tmp_path: Path):
+    """Befund Aaron 13.11.2026: Bestaetigen loeschte die Arbeitskopie, die
+    Freigabe danach scheiterte (FileNotFoundError, dann 'Datei nicht
+    gefunden'). Jetzt: senden klappt, danach ist die Arbeitskopie weg."""
+    from rechnung import human
+
+    store, samples = _nur_in_menschlich(tmp_path)
+    c = TestClient(create_app(store, samples))
+    d = c.get("/api/invoice?file=a.pdf").json()
+    r = c.post("/api/senden", json={"file": "a.pdf", "template_id": d["template_id"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["gesendet"] and r.json()["queued"]
+    assert list(jobrouter.queue_dir(store.root).glob("*.json"))
+    assert human.datei_pfad(store, "a.pdf") is None
+    assert [x for x in human.offen(store) if x["datei"] == "a.pdf"] == []
+
+
+def test_freigabe_scheitert_arbeitskopie_bleibt(tmp_path: Path, monkeypatch):
+    """Scheitert die Freigabe, bleibt die Rechnung in 'Menschliche
+    Bearbeitung' -- ein zweiter Versuch findet sie wieder."""
+    from rechnung import human
+    from rechnung import pipeline
+
+    store, samples = _nur_in_menschlich(tmp_path)
+    c = TestClient(create_app(store, samples))
+    d = c.get("/api/invoice?file=a.pdf").json()
+    monkeypatch.setattr(pipeline, "finalize", lambda *a, **k: {"finalized": False, "error": "test"})
+    r = c.post("/api/senden", json={"file": "a.pdf", "template_id": d["template_id"]})
+    assert r.status_code == 409 and "Freigabe nicht möglich" in r.json()["detail"]
+    assert human.datei_pfad(store, "a.pdf") is not None
+    monkeypatch.undo()
+    r = c.post("/api/senden", json={"file": "a.pdf", "template_id": d["template_id"]})
+    assert r.status_code == 200, r.text
+
+
+def test_bestaetigen_allein_raeumt_weiter_auf(tmp_path: Path):
+    """Der Knopf 'Bestaetigen' (ohne Senden) entfernt die Arbeitskopie wie bisher."""
+    from rechnung import human
+
+    store, samples = _nur_in_menschlich(tmp_path)
+    c = TestClient(create_app(store, samples))
+    d = c.get("/api/invoice?file=a.pdf").json()
+    r = c.post("/api/confirm", json={"file": "a.pdf", "template_id": d["template_id"]})
+    assert r.status_code == 200, r.text
+    assert human.datei_pfad(store, "a.pdf") is None

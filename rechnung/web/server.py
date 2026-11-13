@@ -1506,11 +1506,14 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         with _mensch():
             return _confirm(body)
 
-    def _confirm(body: ConfirmPost) -> JSONResponse:
+    def _confirm(body: ConfirmPost, human_erledigen: bool = True) -> JSONResponse:
+        """``human_erledigen=False``: die Arbeitskopie in 'Menschliche
+        Bearbeitung' bleibt liegen -- ``_senden`` braucht die Datei danach
+        noch fuer die Freigabe und raeumt sie erst dann weg."""
         from ..config import operator as _operator
 
         if body.template_id is None:
-            return _confirm_untemplated(body.file, _operator())
+            return _confirm_untemplated(body.file, _operator(), human_erledigen)
         tpl = store.template(body.template_id)
         if tpl is None:
             raise HTTPException(404, "Template nicht gefunden")
@@ -1543,7 +1546,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         learned = learn.learn_from_confirmed(store, res, doc, _operator())
         # Lag die Rechnung im Ordner "Menschliche Bearbeitung", verlaesst sie
         # ihn jetzt (erst NACH dem Lernen -- die Arbeitskopie wird entfernt).
-        human.erledigt(store, res, _operator())
+        if human_erledigen:
+            human.erledigt(store, res, _operator())
         _nach_lernen_neu_auswerten(res)
         return JSONResponse({"confirmations": tpl.confirmations, "secured": tpl.secured,
                              "learned": learned.to_dict()})
@@ -1690,11 +1694,18 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             return JSONResponse(status_code=409, content={
                 "detail": "Mögliche Dublette: " + (dub[0].detail or "gleiche Rechnung schon verarbeitet"),
                 "code": "dublette"})
-        gelernt = confirm(ConfirmPost(file=body.file, template_id=body.template_id))            # lernen + Goldstandard + Ereignisse
+        # Arbeitskopie in 'Menschliche Bearbeitung' erst NACH der Freigabe
+        # entfernen: vorher loeschte das Bestaetigen sie, und das Neuladen
+        # fuer die Freigabe scheiterte mit FileNotFoundError, ein zweiter
+        # Klick mit "Datei nicht gefunden" (Befund Aaron 13.11.2026).
+        from ..config import operator as _operator
+        gelernt = _confirm(ConfirmPost(file=body.file, template_id=body.template_id),
+                           human_erledigen=False)   # lernen + Goldstandard + Ereignisse
         res = _process_for_confirm(path)   # Stand nach dem Lernen
         fin = finalize(res, store, als_dummy=als_dummy)
         if not fin.get("finalized"):
             raise HTTPException(409, f"Freigabe nicht möglich: {fin.get('error')}")
+        human.erledigt(store, res, _operator())
         if path.parent.resolve() == samples.resolve():
             ziel = store.root / "erledigt"
             ziel.mkdir(parents=True, exist_ok=True)
@@ -1707,14 +1718,15 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                              "jobrouter_live": _jr().live,
                              "gelernt": __import__("json").loads(gelernt.body)})
 
-    def _confirm_untemplated(file: str, operator: str) -> JSONResponse:
+    def _confirm_untemplated(file: str, operator: str,
+                             human_erledigen: bool = True) -> JSONResponse:
         """Bestaetigen ohne Template: E-Rechnung (Werte aus dem XML) oder ein
         PDF, dessen Werte der Mensch eingetippt/korrigiert bzw. aus der KI-
         Extraktion uebernommen und geprueft hat. Aus Letzterem lernt Stufe 1
         automatisch ein Template fuer den Lieferanten."""
         path = _resolve(file)
         if einvoice.load(path) is not None:
-            return _confirm_einvoice(path, operator)
+            return _confirm_einvoice(path, operator, human_erledigen)
         res = _process_for_confirm(path)
         if not any(f.source not in ("library", "missing", "text") for f in res.fields.values()):
             raise HTTPException(400, "Keine Werte zum Bestaetigen -- erst Werte eintragen "
@@ -1727,13 +1739,15 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         shadow.record(store, res, operator)
         eventlog.record(store, res, operator)
         learned = learn.learn_from_confirmed(store, res, _load(path), operator)
-        human.erledigt(store, res, operator)
+        if human_erledigen:
+            human.erledigt(store, res, operator)
         _nach_lernen_neu_auswerten(res)
         return JSONResponse({"confirmed": True, "status": res.status,
                              "confirmations": 0, "secured": False,
                              "learned": learned.to_dict()})
 
-    def _confirm_einvoice(path: Path, operator: str) -> JSONResponse:
+    def _confirm_einvoice(path: Path, operator: str,
+                          human_erledigen: bool = True) -> JSONResponse:
         res = _process_for_confirm(path)
         store.mark_confirmed(res.sha256, operator)
         if not store.seen_sha_template(res.sha256, None):
@@ -1741,7 +1755,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         testsatz.merken(store, res, operator)
         shadow.record(store, res, operator)
         eventlog.record(store, res, operator)
-        human.erledigt(store, res, operator)
+        if human_erledigen:
+            human.erledigt(store, res, operator)
         return JSONResponse({"confirmed": True, "extraction": EXTRACT_EINVOICE,
                              "status": res.status})
 
