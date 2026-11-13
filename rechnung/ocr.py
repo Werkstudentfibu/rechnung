@@ -168,11 +168,17 @@ def tesseract_cmd() -> str | None:
             or _windows_fallback())
 
 
-def _run(args: list[str], timeout: float | None, **kw):
+def _run(args: list[str], timeout: float | None, niedrig: bool = False, **kw):
     """subprocess.run ohne aufblitzendes Konsolenfenster unter Windows
-    (das Programm laeuft dort als Fenster-Anwendung/geplante Aufgabe)."""
+    (das Programm laeuft dort als Fenster-Anwendung/geplante Aufgabe).
+    ``niedrig``: Hintergrundarbeit -- Unterprozess mit niedriger Prioritaet."""
+    from .prioritaet import subprocess_flags
+
+    extra = subprocess_flags(niedrig)
     if _on_windows():
         kw.setdefault("creationflags", getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        kw["creationflags"] |= extra.pop("creationflags", 0)
+    kw.update(extra)
     if args and args[0] and "env" not in kw:
         env = _tessdata_env(str(args[0]))
         if env is not None:
@@ -332,10 +338,11 @@ def sprache() -> str:
     return LANG
 
 
-def _run_tesseract(image: Path, out_base: Path, timeout: float | None) -> None:
+def _run_tesseract(image: Path, out_base: Path, timeout: float | None,
+                   niedrig: bool = False) -> None:
     """Eine Seite erkennen -> ``out_base.pdf`` + ``out_base.tsv``."""
     _run([tesseract_cmd(), str(image), str(out_base), "-l", sprache(),
-          "--dpi", str(DPI), "pdf", "tsv"], timeout, check=True)
+          "--dpi", str(DPI), "pdf", "tsv"], timeout, niedrig=niedrig, check=True)
 
 
 def _parse_tsv(text: str, word_min: float) -> tuple[list[float], list[str]]:
@@ -405,8 +412,30 @@ def _cached(target: Path, meta: Path, sha: str) -> OcrResult | None:
                      missing_pages=list(m.get("fehlend") or []))
 
 
+_SHA_SPERREN: dict[str, Lock] = {}
+_SHA_SPERREN_LOCK = Lock()
+
+
+def _sha_sperre(sha: str) -> Lock:
+    with _SHA_SPERREN_LOCK:
+        return _SHA_SPERREN.setdefault(sha, Lock())
+
+
 def ensure_text(path: str | Path, cache_dir: str | Path,
                 timeout: float | None = None, full: bool = False) -> OcrResult:
+    """Wie ``_ensure_text`` -- aber je Datei-Inhalt immer nur EINE
+    Erkennung gleichzeitig: klickt der Mensch eine Rechnung an, die der
+    Hintergrund gerade erkennt, wartet er auf dieses Ergebnis (Cache),
+    statt dieselbe Arbeit parallel zu starten (Befund Aaron 13.11.2026)."""
+    path = Path(path)
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    with _sha_sperre(sha):
+        return _ensure_text(path, cache_dir, timeout, full, sha=sha)
+
+
+def _ensure_text(path: str | Path, cache_dir: str | Path,
+                 timeout: float | None = None, full: bool = False,
+                 sha: str | None = None) -> OcrResult:
     """Original -> OCR-PDF mit Textebene (aus dem Cache, falls schon erzeugt).
     ``timeout`` begrenzt die gesamte Erkennung (alle Seiten zusammen).
 
@@ -418,9 +447,13 @@ def ensure_text(path: str | Path, cache_dir: str | Path,
     Prozessorkerne (``jobs()``, konfigurierbar, auf dem Laptop-Profil
     sparsam), statt streng nacheinander."""
     path = Path(path)
-    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    sha = sha or hashlib.sha256(path.read_bytes()).hexdigest()
     cache_dir = Path(cache_dir)
     target, meta = cache_dir / f"{sha}.pdf", cache_dir / f"{sha}.json"
+    # Hintergrund? (thread-lokal, gilt fuer die Seiten-Threads unten mit)
+    from . import prioritaet
+
+    hintergrund = prioritaet.ist_hintergrund()
     hit = _cached(target, meta, sha)
     if hit is not None:
         return hit
@@ -479,7 +512,10 @@ def ensure_text(path: str | Path, cache_dir: str | Path,
         base = tmp / f"s{i:03d}"
         remaining = None if deadline is None else max(1.0, deadline - time.monotonic())
         try:
-            _run_tesseract(png, base, remaining)
+            # je Seite neu entschieden: wartet der Mensch inzwischen auf diese
+            # Datei, laeuft der Rest mit normaler Prioritaet
+            _run_tesseract(png, base, remaining,
+                           niedrig=prioritaet.niedrig_fuer(path.name, hintergrund))
         except subprocess.TimeoutExpired:
             with lock:
                 errors.append("OCR: Zeitgrenze ueberschritten")

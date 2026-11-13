@@ -249,7 +249,7 @@ def test_ensure_text_full_run_and_cache_reuse(tmp_path: Path, monkeypatch):
     src = _textless_pdf(tmp_path / "scan.pdf")
     produced = make_invoice(tmp_path / "ocr_out.pdf", rechnungsnr="RE-9")
 
-    def fake_run(image, out_base, timeout):
+    def fake_run(image, out_base, timeout, **kw):
         out_base.with_suffix(".pdf").write_bytes(produced.read_bytes())
         out_base.with_suffix(".tsv").write_text(
             "level\tpage_num\tconf\ttext\n"
@@ -269,7 +269,7 @@ def test_ensure_text_full_run_and_cache_reuse(tmp_path: Path, monkeypatch):
     assert meta["confidence"] == res.confidence
 
     calls = []
-    monkeypatch.setattr(ocr, "_run_tesseract", lambda *a: calls.append(a))
+    monkeypatch.setattr(ocr, "_run_tesseract", lambda *a, **kw: calls.append(a))
     res2 = ocr.ensure_text(src, cache)
     assert res2.confidence == res.confidence
     assert calls == []  # Cache-Treffer, kein erneuter Tesseract-Lauf
@@ -281,7 +281,7 @@ def test_ensure_text_tesseract_timeout(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(ocr, "available", lambda: True)
     src = _textless_pdf(tmp_path / "scan.pdf")
 
-    def fake_run(image, out_base, timeout):
+    def fake_run(image, out_base, timeout, **kw):
         raise sp.TimeoutExpired(cmd="tesseract", timeout=timeout or 1)
 
     monkeypatch.setattr(ocr, "_run_tesseract", fake_run)

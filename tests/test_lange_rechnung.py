@@ -32,7 +32,7 @@ def lang(tmp_path, monkeypatch):
     scan = _scan_from(soll["path"], tmp_path / "scan15.pdf")
     calls: list[int] = []
 
-    def fake_tesseract(image, out_base, timeout):
+    def fake_tesseract(image, out_base, timeout, **kw):
         i = int(re.search(r"s(\d+)", Path(image).name).group(1))
         calls.append(i)
         one = pdfium.PdfDocument.new()

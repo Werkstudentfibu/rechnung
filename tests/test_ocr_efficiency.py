@@ -85,7 +85,7 @@ def test_ensure_text_skips_pages_with_text_layer(tmp_path: Path, monkeypatch):
     produced = make_invoice(tmp_path / "ocr_out.pdf", rechnungsnr="RE-OCR")
     calls = []
 
-    def fake_run(image, out_base, timeout):
+    def fake_run(image, out_base, timeout, **kw):
         calls.append(image)
         out_base.with_suffix(".pdf").write_bytes(produced.read_bytes())
         out_base.with_suffix(".tsv").write_text(
@@ -106,7 +106,7 @@ def test_ensure_text_no_ocr_needed_reports_no_confidence(tmp_path: Path, monkeyp
     monkeypatch.setattr(ocr, "available", lambda: True)
     src = make_invoice(tmp_path / "re.pdf")
     called = []
-    monkeypatch.setattr(ocr, "_run_tesseract", lambda *a: called.append(a))
+    monkeypatch.setattr(ocr, "_run_tesseract", lambda *a, **kw: called.append(a))
     res = ocr.ensure_text(src, tmp_path / "cache")
     assert called == []
     assert res.confidence is None
@@ -119,7 +119,7 @@ def test_ensure_text_all_pages_without_text_layer_runs_all(tmp_path: Path, monke
     produced = make_invoice(tmp_path / "ocr_out.pdf", rechnungsnr="RE-OCR")
     calls = []
 
-    def fake_run(image, out_base, timeout):
+    def fake_run(image, out_base, timeout, **kw):
         calls.append(image)
         out_base.with_suffix(".pdf").write_bytes(produced.read_bytes())
         out_base.with_suffix(".tsv").write_text(
@@ -153,7 +153,7 @@ def test_ensure_text_runs_pages_in_parallel(tmp_path: Path, monkeypatch):
 
     laeufe: list[tuple[float, float]] = []
 
-    def fake_run(image, out_base, timeout):
+    def fake_run(image, out_base, timeout, **kw):
         start = time.monotonic()
         time.sleep(0.5)
         out_base.with_suffix(".pdf").write_bytes(produced.read_bytes())

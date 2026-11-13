@@ -32,21 +32,12 @@ from typing import Callable
 
 
 def _niedrige_prioritaet() -> None:
-    """Diesen Thread hinter die Oberflaeche stellen (best effort)."""
-    try:
-        import sys
+    """Diesen Thread hinter die Oberflaeche stellen (best effort). Die
+    eigentliche Verarbeitung laeuft in einem eigenen Thread der Guard --
+    der wird mit ``Guard(niedrig=True)`` gesenkt (prioritaet.py)."""
+    from .prioritaet import niedrig_setzen
 
-        if sys.platform == "win32":
-            import ctypes
-
-            k = ctypes.windll.kernel32
-            k.SetThreadPriority(k.GetCurrentThread(), -1)     # BELOW_NORMAL
-        else:
-            import os
-
-            os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 10)
-    except Exception:  # noqa: BLE001 -- nur ein Gefallen, nie ein Fehler
-        pass
+    niedrig_setzen()
 
 
 class Vorverarbeiter:

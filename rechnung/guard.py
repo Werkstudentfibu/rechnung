@@ -89,7 +89,7 @@ def aborted_result(path, reason: str, kind: str, duration: float):
 class Guard:
     def __init__(self, data_root, timeout: float | None = None, mode: str = "process",
                  target: str = DEFAULT_TARGET, extra: dict | None = None,
-                 protokoll: bool = True):
+                 protokoll: bool = True, niedrig: bool = False):
         self.data_root = str(data_root)
         # extra: weitere kwargs fuer target (Testsatz: Extraktionsvariante);
         # protokoll=False: Abbruch NICHT ins Audit schreiben -- Trockenlauf des
@@ -99,6 +99,10 @@ class Guard:
         self.timeout = process_timeout() if timeout is None else max(0.0, float(timeout))
         self.mode = mode
         self.target = target
+        # Hintergrundarbeit (Vorbereitung, Senden im Hintergrund): der
+        # Verarbeitungs-Thread und seine Texterkennung laufen mit niedriger
+        # Prioritaet (prioritaet.py) -- der Klick des Menschen hat Vorrang.
+        self.niedrig = niedrig
         self._proc = None
         self._conn = None
         self._lock = threading.Lock()
@@ -197,6 +201,9 @@ class Guard:
         func = _resolve(self.target)
 
         def run():
+            if self.niedrig:
+                from . import prioritaet
+                prioritaet.hintergrund_an()
             try:
                 box["res"] = ("ok", func(path, Store(self.data_root), use_llm=use_llm,
                                          create_draft_supplier=create_draft_supplier,

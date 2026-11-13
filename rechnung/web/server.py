@@ -26,6 +26,7 @@ from .. import eventlog
 from .. import human
 from .. import jobrouter
 from .. import keine_rechnung
+from .. import prioritaet
 from .. import sende_warteschlange
 from .. import learn
 from .. import pdf as pdfmod
@@ -506,7 +507,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
 
     vorverarbeiter = None
     if vorverarbeitung_an():
-        bg_guard = Guard(store.root, timeout=VORVERARBEITUNG_TIMEOUT_S, mode="thread")
+        bg_guard = Guard(store.root, timeout=VORVERARBEITUNG_TIMEOUT_S, mode="thread",
+                         niedrig=True)
         vorverarbeiter = Vorverarbeiter(
             lambda p: vorbereitung.vorbereite_datei(bg_guard, store, p),
             neu_auswerten=lambda p: vorbereitung.neu_auswerten(bg_guard, store, p),
@@ -1006,7 +1008,9 @@ def create_app(store: Store, samples: Path) -> FastAPI:
 
     @app.get("/api/invoice")
     def invoice(file: str, address: str | None = None) -> JSONResponse:
-        with _mensch():
+        # eilig: laeuft genau diese Datei im Hintergrund, bekommt ihre
+        # Texterkennung wieder normale Prioritaet (prioritaet.py)
+        with _mensch(), prioritaet.eilig(human.file_name(file)):
             return _invoice(file, address)
 
     def _mail_view(path: Path) -> dict:
@@ -1794,7 +1798,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                 "gelernt": __import__("json").loads(gelernt.body)}
 
     # ---- Senden im Hintergrund (sende_warteschlange.py) -------------
-    _sende_guard = Guard(store.root, mode="thread")
+    _sende_guard = Guard(store.root, mode="thread", niedrig=True)
 
     def _hintergrund_senden(a: dict) -> dict:
         """Ein Auftrag der Sende-Warteschlange: wie der zweite Teil von
