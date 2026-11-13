@@ -192,7 +192,12 @@ def test_confirming_new_supplier_makes_it_recognized_next_time(tmp_path: Path):
 def test_invoice_endpoint_surfaces_semantic_fallback(tmp_path: Path, monkeypatch):
     """Der LLM-Vorschlag muss schon in /api/invoice auftauchen (Review vor
     dem Bestaetigen), nicht erst bei /api/confirm -- sonst sieht der Mensch
-    ihn nie, bevor er bestaetigt (widerspraeche §7c)."""
+    ihn nie, bevor er bestaetigt (widerspraeche §7c). Gefragt wird dabei
+    genau wie in der Pipeline (SPEC Effizienz-Baustein 1, dieselbe Funktion
+    ``pipeline.vorlagen_luecken``): Pflicht- und Vorlagenfelder. Ein nie
+    angelerntes optionales Feld (bestellnummer) kaeme beim Senden ohnehin
+    nicht mit -- und eine abweichende Frage verfehlte den KI-Zwischenspeicher
+    der Vorverarbeitung (Befund Aaron 13.11.2026)."""
     client, store, inv = _client(tmp_path)
     doc = pdfmod.load(inv)
 
@@ -205,17 +210,19 @@ def test_invoice_endpoint_surfaces_semantic_fallback(tmp_path: Path, monkeypatch
     tpl.fields = [
         FieldSpec("rechnungsnummer", "number", True,
                  anchor=Anchor("rechnungsnummer", 0), rel=(60, -4, 240, 12)),
-        # "bestellnummer" bewusst nicht angelernt -- Luecke fuer den Fallback
+        # Pflichtfeld "rechnungsdatum" bewusst nicht angelernt -- Luecke fuer den Fallback
     ]
     store.save_template(tpl)
 
     def fake_extract(text, field_names, hints, rejected=None):
-        assert "bestellnummer" in field_names
-        return {"bestellnummer": FieldResult("bestellnummer", "PO-42", "PO-42", 0.6, "llm")}
+        assert "rechnungsdatum" in field_names
+        assert "bestellnummer" not in field_names
+        return {"rechnungsdatum": FieldResult("rechnungsdatum", "2026-02-14", "14.02.2026",
+                                              0.6, "llm")}
 
     monkeypatch.setattr(server_mod.semantic, "extract", fake_extract)
 
     r = client.get("/api/invoice", params={"file": "a.pdf"})
     current = r.json()["current"]
-    assert current["bestellnummer"]["source"] == "llm"
-    assert current["bestellnummer"]["value"] == "PO-42"
+    assert current["rechnungsdatum"]["source"] == "llm"
+    assert current["rechnungsdatum"]["value"] == "2026-02-14"

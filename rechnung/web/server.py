@@ -43,12 +43,12 @@ from ..identify import empfaenger_namen as _empfaenger_namen
 from ..identify import (FIXED_FIELD_TYPES, POSITIONSMODI, POSITIONSMODUS_EINE_POSITION,
                         POSITIONSMODUS_EINZELN, Supplier,
                         identify, supplier_from_doc)
-from ..pipeline import (CONF_MIN, EXTRACT_EINVOICE, EXTRACT_TEMPLATE, MASTER_FIELDS,
+from ..pipeline import (EXTRACT_EINVOICE, EXTRACT_TEMPLATE, MASTER_FIELDS,
                         POSITIONEN_KEY, STATUS_LABELS, _positionsmodus_abschliessen,
                         _positionsmodus_hinweis, _positionsmodus_vorbereiten,
                         confirm_supplier, discard_supplier, dispatch, invoice_files,
-                        journal_rows, journal_totals, load_document, origin,
-                        set_positionsmodus)
+                        journal_rows, journal_totals, ki_luecken_fuellen, load_document, origin,
+                        set_positionsmodus, vorlagen_luecken)
 from ..listencache import LABEL_WIRD_GELESEN, STATUS_WIRD_GELESEN, Listencache
 from ..store import Store
 from ..suggest import similar_suppliers
@@ -1106,15 +1106,16 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                 # spaeter beim tatsaechlichen Bestaetigen (process() in
                 # /api/confirm) unbemerkt mitbekommen wuerde -- widerspraeche
                 # der Bestaetigungspflicht (§7c: erst sehen, dann bestaetigen).
-                gaps = [
-                    n for n in sichtbare_felder()
-                    if current.get(n) is None or current[n]["source"] == "missing"
-                    or current[n]["confidence"] < CONF_MIN
-                ]
+                # Deshalb dieselben Funktionen wie dort: gleiche Frage an die
+                # KI = Treffer im Zwischenspeicher, den die Vorverarbeitung
+                # gefuellt hat -- sonst las die KI eine schon gelesene
+                # Rechnung beim Anklicken noch einmal (Befund Aaron 13.11.2026).
+                gelesen = {k: FieldResult(k, v["value"], v["raw"], v["confidence"], v["source"])
+                           for k, v in current.items()}
+                gaps = vorlagen_luecken(chosen, gelesen)
                 if gaps:
-                    hints = {n: v["raw"] for n, v in current.items() if v["source"] != "missing"}
-                    for fname, fr in semantic.extract(doc.text, gaps, hints,
-                                                      llm_rejected).items():
+                    for fname, fr in ki_luecken_fuellen(doc, gaps, gelesen,
+                                                        llm_rejected).items():
                         cur = current.get(fname)
                         if cur is None or cur["source"] == "missing" or fr.confidence > cur["confidence"]:
                             current[fname] = {"value": fr.value, "raw": fr.raw,
