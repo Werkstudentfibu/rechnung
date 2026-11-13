@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import collections
 import copy
+import threading
 import hashlib
 import io
 import re
@@ -25,6 +26,7 @@ from .. import eventlog
 from .. import human
 from .. import jobrouter
 from .. import keine_rechnung
+from .. import sende_warteschlange
 from .. import learn
 from .. import pdf as pdfmod
 from .. import positionen
@@ -130,6 +132,9 @@ class ConfirmPost(BaseModel):
 class SendenPost(ConfirmPost):
     # Mensch hat einen Dublettenverdacht gesehen und will trotzdem senden
     trotzdem: bool = False
+    # Nach der schnellen Pruefung im Hintergrund lernen + freigeben
+    # (sende_warteschlange.py, Aaron 13.11.2026)
+    hintergrund: bool = False
 
 
 class FeldBestaetigenPost(BaseModel):
@@ -427,6 +432,10 @@ def create_app(store: Store, samples: Path) -> FastAPI:
     # Zeitgrenze je Rechnung (guard.py). Thread-Modus: die UI muss den KI-
     # Antwort-Cache mit /api/invoice teilen -- bestaetigt wird, was angezeigt wurde.
     guard = Guard(store.root, mode="thread")
+    # Je Thread waehlbare Verarbeitung: das Senden im Hintergrund nutzt eine
+    # eigene (_sende_guard), damit das Oeffnen der naechsten Rechnung nicht
+    # auf das Lernen/Freigeben der vorigen wartet.
+    _tl = threading.local()
     # KI-Antworten auf der Platte merken: jede Rechnung nur einmal vom Modell lesen
     semantic.set_cache_dir(store.root / "ki-cache")
 
@@ -436,7 +445,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         # echte Verarbeiten des Posteingangs (/api/scan, wie CLI "rechnung
         # scan") legt bei einem unbekannten Lieferanten einen Entwurf an
         # (Entscheidung Aaron 09.10.2026).
-        return guard.process(path, use_llm=use_llm, create_draft_supplier=create_draft_supplier)
+        g = getattr(_tl, "guard", None) or guard
+        return g.process(path, use_llm=use_llm, create_draft_supplier=create_draft_supplier)
 
     def _load(path: Path):
         """PDF bzw. OCR-Arbeitskopie eines Scans/Bildes laden."""
@@ -1691,16 +1701,43 @@ def create_app(store: Store, samples: Path) -> FastAPI:
 
     @app.post("/api/senden")
     def senden(body: SendenPost) -> JSONResponse:
+        if not body.hintergrund:
+            with _mensch():
+                return _senden(body)
+        name = human.file_name(body.file)
+        if sender.laeuft_fuer(name):          # schon unterwegs: nicht doppelt senden
+            return JSONResponse({"angenommen": True, "datei": name, "schon_unterwegs": True})
         with _mensch():
-            return _senden(body)
+            geprueft = _senden_pruefen(body)
+        if isinstance(geprueft, JSONResponse):   # Dublettenverdacht: der Mensch entscheidet
+            return geprueft
+        path, res, als_dummy = geprueft
+        a = sender.einreihen({"datei": name, "template_id": body.template_id,
+                              "als_dummy": als_dummy, "sha256": res.sha256})
+        return JSONResponse({"angenommen": True, "datei": name, "auftrag": a["id"]})
+
+    @app.get("/api/senden/status")
+    def senden_status() -> JSONResponse:
+        return JSONResponse(sender.stand())
+
+    @app.post("/api/senden/gesehen")
+    def senden_gesehen(body: dict) -> JSONResponse:
+        return JSONResponse({"ok": sender.gesehen(str(body.get("id") or ""))})
 
     def _senden(body: SendenPost) -> JSONResponse:
         """Ein Klick fuer die taegliche Arbeit (Aaron 11.10.2026): pruefen,
         bestaetigen (= lernen, Goldstandard), fuer JobRouter freigeben
-        (finalize -> Warteschlange) und aus dem Eingang nehmen."""
-        import time as _time
+        (finalize -> Warteschlange) und aus dem Eingang nehmen -- am Stueck."""
+        geprueft = _senden_pruefen(body)
+        if isinstance(geprueft, JSONResponse):
+            return geprueft
+        path, _res, als_dummy = geprueft
+        return JSONResponse(_senden_ausfuehren(body, path, als_dummy))
 
-        from ..pipeline import finalize
+    def _senden_pruefen(body: SendenPost):
+        """Schnelle Pruefung vor dem Senden: Pflichtfelder, Geschaeftsbereich,
+        Dublettenverdacht. -> (Pfad, Ergebnis, als_dummy) oder die 409-Antwort
+        zum Dublettenverdacht; fehlende Angaben -> HTTPException 400."""
         from ..template import sichtbare_felder
 
         path = _resolve(body.file)
@@ -1724,6 +1761,14 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             return JSONResponse(status_code=409, content={
                 "detail": "Mögliche Dublette: " + (dub[0].detail or "gleiche Rechnung schon verarbeitet"),
                 "code": "dublette"})
+        return path, res, als_dummy
+
+    def _senden_ausfuehren(body: SendenPost, path: Path, als_dummy: bool) -> dict:
+        """Lernen, freigeben, aufraeumen (nach ``_senden_pruefen``)."""
+        import time as _time
+
+        from ..pipeline import finalize
+
         # Arbeitskopie in 'Menschliche Bearbeitung' erst NACH der Freigabe
         # entfernen: vorher loeschte das Bestaetigen sie, und das Neuladen
         # fuer die Freigabe scheiterte mit FileNotFoundError, ein zweiter
@@ -1743,10 +1788,32 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if abholer is not None:
             abholer.anstossen()            # JobRouter-Nachschicken gleich versuchen
         from ..config import jobrouter as _jr
-        return JSONResponse({"gesendet": True, "als_dummy": als_dummy,
-                             "queued": fin.get("queued"),
-                             "jobrouter_live": _jr().live,
-                             "gelernt": __import__("json").loads(gelernt.body)})
+        return {"gesendet": True, "als_dummy": als_dummy,
+                "queued": fin.get("queued"),
+                "jobrouter_live": _jr().live,
+                "gelernt": __import__("json").loads(gelernt.body)}
+
+    # ---- Senden im Hintergrund (sende_warteschlange.py) -------------
+    _sende_guard = Guard(store.root, mode="thread")
+
+    def _hintergrund_senden(a: dict) -> dict:
+        """Ein Auftrag der Sende-Warteschlange: wie der zweite Teil von
+        ``_senden``, mit eigener Verarbeitung. Schon freigegebene Rechnung
+        (z.B. Auftrag nach Neustart fortgesetzt): nichts mehr zu tun."""
+        _tl.guard = _sende_guard
+        try:
+            with _mensch():
+                if a.get("sha256") and store.seen_sha(a["sha256"]):
+                    return {"schon_gesendet": True}
+                body = SendenPost(file=a["datei"], template_id=a.get("template_id"), trotzdem=True)
+                return _senden_ausfuehren(body, _resolve(body.file), bool(a.get("als_dummy")))
+        finally:
+            _tl.guard = None
+
+    sender = sende_warteschlange.SendeWarteschlange(
+        _hintergrund_senden, store.root / sende_warteschlange.DATEI)
+    app.state.sender = sender
+    sender.fortsetzen()            # beim Schliessen offen gebliebene Auftraege
 
     def _confirm_untemplated(file: str, operator: str,
                              human_erledigen: bool = True) -> JSONResponse:
@@ -2322,6 +2389,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
             pass                                     # Liste trotzdem zeigen
         offen = human.nach_prioritaet(human.offen(store))
         _menschlich_vorbereiten(offen)
+        for r in offen:
+            r["wird_gesendet"] = sender.laeuft_fuer(r.get("datei") or "")
         uebersicht = []
         for stufe, (kategorie, aufgabe) in human.PRIORITAETEN.items():
             n = sum(1 for r in offen if r["prioritaet"]["stufe"] == stufe)

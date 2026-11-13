@@ -180,6 +180,12 @@
   #sende-overlay .box { background: #fff; border: 2px solid #1c7550; border-radius: 8px; padding: 16px 24px;
                         box-shadow: 0 4px 18px rgba(0,0,0,.18); color: #1c7550; font-size: 15px; }
   #sende-overlay .zeit { color: #555; font-size: 12px; margin-top: 6px; min-height: 1em; }
+  /* Senden im Hintergrund (Aaron 13.11.2026) */
+  #sende-status { margin-left: 10px; font-size: 12px; color: #eaf5ef; white-space: nowrap; }
+  #sende-status a { color: #ffd6d6; font-weight: 600; }
+  #sende-fehler-box { position: fixed; top: 48px; right: 16px; z-index: 9998; background: #fff;
+                      border: 2px solid #c0392b; border-radius: 8px; padding: 10px 14px; max-width: 520px;
+                      box-shadow: 0 4px 18px rgba(0,0,0,.18); font-size: 13px; color: #222; }
   .af label { display: block; font-size: 12px; color: #444; margin-bottom: 1px; }
   .ab-in { width: 100%; box-sizing: border-box; border: 1px solid #a9a9a9; background: #fff;
            padding: 3px 6px; font: inherit; }
@@ -643,7 +649,12 @@ async function stapelWeiter(alt, vorher) {
 // beliebigen -- sonst wartet der Mensch wieder auf die Texterkennung.
 function naechsteBereite(alteListe, alt) {
   const rows = [...document.querySelectorAll('#list .row')];
-  const bereit = rows.filter(r => r.dataset.zustand === 'bereit' && r.dataset.file !== alt);
+  // Vergleich ueber den Dateinamen: die Liste fuehrt den ganzen Pfad, STATE.file
+  // nur den Namen -- sonst kam beim Senden im Hintergrund dieselbe Rechnung
+  // wieder (sie steht noch in der Liste, bis sie fertig gesendet ist)
+  const nm = f => String(f || '').split(/[\\/]/).pop();
+  const bereit = rows.filter(r => r.dataset.zustand === 'bereit' && nm(r.dataset.file) !== nm(alt)
+                                   && !SENDE_LAEUFT.has(nm(r.dataset.file)));
   if (bereit.length) {
     if (SORT.lernwert) return bereit[0];
     const idx = alteListe.indexOf(alt);
@@ -3097,9 +3108,11 @@ async function sendeRechnungJetzt() {
   // -> aus der Liste -> naechste Rechnung.
   const alteListe = [...LIST_FILES], alt = STATE.file;
   $('#msg').textContent = 'Sende …';
-  sendeAnzeige('Rechnung wird gesendet – prüfen, lernen, freigeben …');
+  sendeAnzeige('Rechnung wird geprüft …');
+  // hintergrund: nach der schnellen Pruefung lernt + gibt das Programm im
+  // Hintergrund frei, hier geht es sofort weiter (Aaron 13.11.2026)
   const sende = trotzdem => fetch('/api/senden', { method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ file: STATE.file, template_id: STATE.tid || null, trotzdem }) });
+    body: JSON.stringify({ file: STATE.file, template_id: STATE.tid || null, trotzdem, hintergrund: true }) });
   let r = await sende(false);
   let d = await r.json().catch(() => ({}));
   if (r.status === 409 && d.code === 'dublette') {
@@ -3115,12 +3128,26 @@ async function sendeRechnungJetzt() {
       }
       $('#msg').textContent = 'Nicht gesendet (Dublettenverdacht).'; return;
     }
-    sendeAnzeige('Rechnung wird gesendet – prüfen, lernen, freigeben …');
+    sendeAnzeige('Rechnung wird geprüft …');
     r = await sende(true); d = await r.json().catch(() => ({}));
   }
   if (!r.ok) {
     sendeAnzeige(null);   // Fehlermeldung nicht verdecken
     $('#msg').textContent = '✗ ' + (d.detail || ('Fehler ' + r.status)); alert(d.detail || ('Fehler ' + r.status)); return;
+  }
+  if (d.angenommen) {
+    SENDE_LAEUFT.add(alt);
+    sendeStatusAbfragen();
+    sendeAnzeige('✓ Geprüft – wird im Hintergrund gesendet …');
+    const hinweis = '⟳ Vorige Rechnung wird im Hintergrund gesendet.';
+    STATE.file = null;
+    if (HUMAN_QUEUE) { loadList(); await stapelWeiter(alt, hinweis); return; }
+    await loadList();
+    const naechste = naechsteBereite(alteListe, alt);
+    if (naechste) { await openInvoice(naechste.dataset.file, naechste); }
+    else { $('#work').innerHTML = `<p class="hint" style="padding:12px">${esc(keineBereite())}</p>`; }
+    const mh = $('#msg'); if (mh) mh.textContent = hinweis;
+    return;
   }
   const wohin = (d.jobrouter_live ? 'an JobRouter übergeben' : 'freigegeben – geht an JobRouter, sobald die Anbindung steht')
     + (d.als_dummy ? ' (als Dummy Lieferant)' : '');
@@ -3136,6 +3163,62 @@ async function sendeRechnungJetzt() {
   const m = $('#msg'); if (m) m.textContent = `✓ Vorige Rechnung ${wohin}.`;
   else if (!row) $('#work').insertAdjacentHTML('beforeend', `<p class="hint" style="padding:0 12px">✓ Vorige Rechnung ${esc(wohin)}.</p>`);
 }
+
+/* Senden im Hintergrund: Hinweis oben (Aaron 13.11.2026) */
+const SENDE_LAEUFT = new Set();
+let SENDE_OFFEN = 0, SENDE_UHR = null, SENDE_FEHLER = [], SENDE_WAR_OFFEN = false;
+async function sendeStatusAbfragen() {
+  clearTimeout(SENDE_UHR);
+  let s;
+  try { const r = await fetch('/api/senden/status'); if (!r.ok) return; s = await r.json(); } catch (e) { return; }
+  SENDE_OFFEN = s.offen || 0;
+  SENDE_LAEUFT.clear(); (s.dateien || []).forEach(f => SENDE_LAEUFT.add(f));
+  SENDE_FEHLER = s.fehler || [];
+  let el = document.getElementById('sende-status');
+  if (!el) {
+    const h = document.querySelector('header'); if (!h) return;
+    el = document.createElement('span'); el.id = 'sende-status';
+    h.insertBefore(el, document.getElementById('stats'));
+  }
+  const teile = [];
+  if (s.offen) teile.push(`<span class="spinner"></span>${s.offen} ${s.offen > 1 ? 'Rechnungen werden' : 'Rechnung wird'} im Hintergrund gesendet`);
+  else if (s.fertig) teile.push(`✓ ${s.fertig} im Hintergrund gesendet`);
+  if (SENDE_FEHLER.length) teile.push(`<a href="#" onclick="sendeFehlerZeigen(); return false;">✗ ${SENDE_FEHLER.length} nicht gesendet – ansehen</a>`);
+  el.innerHTML = teile.join(' · ');
+  if (s.offen) { SENDE_WAR_OFFEN = true; SENDE_UHR = setTimeout(sendeStatusAbfragen, 2000); }
+  else if (SENDE_WAR_OFFEN) {
+    SENDE_WAR_OFFEN = false;           // gerade fertig geworden: Listen auffrischen
+    loadList();
+    const hv = document.getElementById('v-human'); if (hv && hv.classList.contains('active')) loadHuman();
+  }
+}
+function sendeFehlerZeigen() {
+  const alt = document.getElementById('sende-fehler-box'); if (alt) alt.remove();
+  if (!SENDE_FEHLER.length) return;
+  const box = document.createElement('div'); box.id = 'sende-fehler-box';
+  box.innerHTML = `<b>Im Hintergrund nicht gesendet</b>
+    <div class="hint">Die Rechnung liegt weiter im Eingang bzw. in „Menschliche Bearbeitung“ – öffnen, Problem beheben, erneut senden.</div>`
+    + SENDE_FEHLER.map((f, i) => `<div style="margin-top:8px"><b>${esc(f.datei)}</b><br><span class="hint">${esc(f.detail)}</span><br>
+        <button class="mini" onclick="sendeFehlerOeffnen(${i})">Öffnen</button>
+        <button class="ghost mini" onclick="sendeFehlerGesehen(${i})">Ausblenden</button></div>`).join('')
+    + `<div style="margin-top:8px;text-align:right"><button class="ghost mini" onclick="this.closest('#sende-fehler-box').remove()">Schließen</button></div>`;
+  document.body.appendChild(box);
+}
+async function sendeFehlerGesehen(i, ohneKasten) {
+  const f = SENDE_FEHLER[i]; if (!f) return;
+  await fetch('/api/senden/gesehen', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: f.id }) }).catch(() => {});
+  await sendeStatusAbfragen();
+  if (!ohneKasten) sendeFehlerZeigen();
+}
+async function sendeFehlerOeffnen(i) {
+  const f = SENDE_FEHLER[i]; if (!f) return;
+  const box = document.getElementById('sende-fehler-box'); if (box) box.remove();
+  await sendeFehlerGesehen(i, true);
+  HUMAN_QUEUE = null; show('scan'); await openInvoice(f.datei, null);
+}
+window.addEventListener('beforeunload', ev => { if (SENDE_OFFEN > 0) { ev.preventDefault(); ev.returnValue = ''; } });
+setTimeout(sendeStatusAbfragen, 800);   // nach Neustart fortgesetzte Auftraege / alte Fehler zeigen
 
 async function confirmTpl() {
   // Naechste Datei VOR dem Neuladen merken -- loadList() baut #list komplett
@@ -3437,7 +3520,7 @@ async function loadHuman() {
       .map(([n, v]) => `${esc(n)}: ${esc(typeof v.wert === 'object' ? JSON.stringify(v.wert) : v.wert)}
         <span class="badge ${esc(v.herkunft)}">${esc(v.herkunft)}${v.via ? ' · ' + esc(v.via) : ''}</span>`);
     tr.innerHTML = `<td>${prioBadge(p)}${p ? `<div class="hint">${esc(p.aufgabe)}</div>` : ''}</td>
-      <td>${esc(r.datei)}</td>
+      <td>${r.wird_gesendet ? '<span class="badge">⟳ wird gesendet</span> ' : ''}${esc(r.datei)}</td>
       <td>${esc(r.lieferant_name || r.lieferant || '–')}</td>
       <td>${esc((r.abgelegt || '').slice(0, 16).replace('T', ' '))}</td>
       <td>${(r.gruende || []).map(g => esc(g.grund)).join('<br>')}</td>
