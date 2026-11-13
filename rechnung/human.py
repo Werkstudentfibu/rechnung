@@ -495,11 +495,16 @@ def erledigt(store, res, operator: str = "", freigabe: str = "mensch") -> dict |
 # dann abweichende IBANs, dann echte Einzelfaelle. Rechnungen, die NUR an der
 # fehlenden Rechnungsadresse (Mandant) haengen, kommen zuletzt: sie loest eine
 # ergaenzte Mandantenliste gesammelt, ohne dass jemand jede einzeln oeffnet.
+# Mails ohne Rechnungsanhang stehen seit 13.11.2026 HINTER den PDF-Rechnungen
+# (Aaron: "viele Rechnungen haben keine PDF dabei ... vor allem Adressen, die
+# sowieso nicht viel genutzt werden") -- und lassen sich je Absender
+# gesammelt erledigen (mails_nach_absender / sammel_erledigen).
 PRIORITAETEN = {
     1: ("Stichprobe", "Claudes Prüfung kontrollieren und senden (misst Claudes Fehlerquote)"),
-    2: ("Mail", "Mail ohne Rechnungsanhang sichten: Erledigt oder Keine Rechnung"),
-    3: ("IBAN", "Abweichende IBAN prüfen (Betrugsschutz)"),
-    4: ("Prüfen", "Felder prüfen, ergänzen und senden"),
+    2: ("IBAN", "Abweichende IBAN prüfen (Betrugsschutz)"),
+    3: ("Prüfen", "Felder prüfen, ergänzen und senden"),
+    4: ("Mail", "Mail ohne Rechnungsanhang sichten – am schnellsten gesammelt je Absender "
+                "(oben: Erledigt oder Keine Rechnung)"),
     5: ("Später", "Nur der Mandant fehlt in der Bibliothek – wird nach Ergänzung "
                   "der Mandantenliste automatisch erneut geprüft"),
 }
@@ -516,6 +521,52 @@ def _grund_teile(rec: dict) -> list[str]:
     return teile
 
 
+def ist_mail(rec: dict) -> bool:
+    """Mail ohne Rechnungsanhang (``.eml`` bzw. Grund-Art ``mail``)."""
+    arten = {str(g.get("art") or "") for g in rec.get("gruende") or []}
+    return str(rec.get("datei") or "").lower().endswith(".eml") or "mail" in arten
+
+
+def mail_absender(store, rec: dict) -> str:
+    """Absender-Adresse einer Mail im Ordner (klein geschrieben): aus der
+    Herkunft (Postfach-Abholung), sonst aus dem Mailkopf der Datei."""
+    import email.utils
+    from email.parser import BytesHeaderParser
+
+    von = str((rec.get("herkunft") or {}).get("von") or "")
+    if not von:
+        name = str(rec.get("datei") or "")
+        kandidaten = [name] + [b for b in rec.get("beilagen") or [] if b.lower().endswith(".eml")]
+        for k in kandidaten:
+            p = human_dir(store.root) / k
+            if k.lower().endswith(".eml") and p.is_file():
+                try:
+                    with p.open("rb") as fh:
+                        von = str(BytesHeaderParser().parse(fh).get("From") or "")
+                except (OSError, ValueError):
+                    von = ""
+                if von:
+                    break
+    adresse = email.utils.parseaddr(von)[1] or von
+    return adresse.strip().lower() or "(unbekannt)"
+
+
+def mails_nach_absender(store, eintraege: list[dict] | None = None) -> list[dict]:
+    """Offene Mails ohne Rechnungsanhang, gebuendelt je Absender (meiste
+    zuerst): ``[{"von", "anzahl", "betreff", "dateien"}]``."""
+    gruppen: dict[str, dict] = {}
+    for r in (offen(store) if eintraege is None else eintraege):
+        if not ist_mail(r):
+            continue
+        von = mail_absender(store, r)
+        g = gruppen.setdefault(von, {"von": von, "anzahl": 0, "betreff": "", "dateien": []})
+        g["anzahl"] += 1
+        g["dateien"].append(r.get("datei"))
+        if not g["betreff"]:
+            g["betreff"] = str((r.get("herkunft") or {}).get("betreff") or "")
+    return sorted(gruppen.values(), key=lambda g: (-g["anzahl"], g["von"]))
+
+
 def prioritaet(rec: dict) -> dict:
     """-> ``{"stufe": 1-5, "kategorie": ..., "aufgabe": ...}`` fuer einen
     Eintrag aus ``offen``."""
@@ -527,16 +578,16 @@ def prioritaet(rec: dict) -> dict:
     rest = [x for x in teile if x not in adresse and x not in generisch]
     if any("Stichprobe" in x for x in teile):
         stufe = 1
-    elif datei.endswith(".eml") or "mail" in arten:
-        stufe = 2
-    elif "iban" in arten or any("IBAN weicht" in x for x in teile):
-        stufe = 3
-    elif rest or not adresse:
+    elif ist_mail(rec):
         stufe = 4
+    elif "iban" in arten or any("IBAN weicht" in x for x in teile):
+        stufe = 2
+    elif rest or not adresse:
+        stufe = 3
     else:
         stufe = 5
     kategorie, aufgabe = PRIORITAETEN[stufe]
-    if stufe == 4 and adresse:
+    if stufe == 3 and adresse:
         aufgabe += " – dabei auch den Mandanten wählen"
     return {"stufe": stufe, "kategorie": kategorie, "aufgabe": aufgabe}
 

@@ -3494,6 +3494,18 @@ pruefePostfach();
 setInterval(pruefePostfach, 30000);
 
 /* ================= Menschliche Bearbeitung ================= */
+let HUMAN_MAILGRUPPEN = [];
+async function mailGruppe(i, aktion) {
+  const g = HUMAN_MAILGRUPPEN[i]; if (!g) return;
+  const was = aktion === 'keine-rechnung'
+    ? `in den Ordner „Keine Rechnung“ verschieben (nichts wird gelöscht)` : `als erledigt abhaken`;
+  if (!confirm(`${g.anzahl} Mail(s) von ${g.von} ${was}?`)) return;
+  const r = await fetch('/api/menschlich/sammel', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ von: g.von, aktion }) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert('Nicht möglich: ' + (d.detail || r.status)); return; }
+  await loadHuman();
+}
 async function loadHuman() {
   const d = await api('/api/menschlich');
   $('#human-dir').textContent = d.ordner;
@@ -3504,7 +3516,7 @@ async function loadHuman() {
   }
   // Prioritaet (Aaron 12.11.2026): oben steht, was jetzt wichtig ist; die
   // Tabelle ist danach sortiert, der Stapel folgt derselben Reihenfolge.
-  const PRIO_FARBE = {1: '#c0392b', 2: '#2471a3', 3: '#b9770e', 4: '#555', 5: '#999'};
+  const PRIO_FARBE = {1: '#c0392b', 2: '#b9770e', 3: '#555', 4: '#2471a3', 5: '#999'};
   const prioBadge = p => p ? `<span class="badge" style="background:${PRIO_FARBE[p.stufe]};color:#fff">${p.stufe} · ${esc(p.kategorie)}</span>` : '';
   const ueb = (d.uebersicht || []).map(u =>
     `<li>${prioBadge(u)} <b>${u.anzahl}</b> – ${esc(u.aufgabe)}</li>`).join('');
@@ -3535,6 +3547,22 @@ async function loadHuman() {
     t.appendChild(tr);
   }
   $('#human-table').innerHTML = ueb ? `<p><b>Reihenfolge:</b> oben anfangen, mit „b“ geht es zur nächsten.</p><ul>${ueb}</ul>` : '';
+  // Mails ohne Rechnungsanhang je Absender gesammelt erledigen (Aaron 13.11.2026)
+  HUMAN_MAILGRUPPEN = d.mails_nach_absender || [];
+  if (HUMAN_MAILGRUPPEN.length) {
+    const n = HUMAN_MAILGRUPPEN.reduce((s, g) => s + g.anzahl, 0);
+    const box = document.createElement('details'); box.className = 'box'; box.open = true;
+    box.innerHTML = `<summary><b>Mails ohne Rechnungsanhang – nach Absender</b> (${n} Mails von ${HUMAN_MAILGRUPPEN.length} Absendern)</summary>
+      <div class="hint">Einmal je Absender entscheiden: <b>Keine Rechnung</b> (Newsletter, Werbung, Hinweise – kommt in den Ordner
+        „Keine Rechnung“, nichts wird gelöscht) oder <b>Erledigt</b> (z. B. Rechnung aus dem Portal schon geholt).
+        PDF-Rechnungen desselben Absenders bleiben unberührt.</div>
+      <table><tr><th>Absender</th><th>Mails</th><th>Beispiel-Betreff</th><th></th></tr>
+      ${HUMAN_MAILGRUPPEN.map((g, i) => `<tr><td>${esc(g.von)}</td><td>${g.anzahl}</td><td>${esc(g.betreff || '–')}</td>
+        <td style="white-space:nowrap"><button class="ghost mini" onclick="mailGruppe(${i}, 'keine-rechnung')">Alle: Keine Rechnung</button>
+            <button class="ghost mini" onclick="mailGruppe(${i}, 'erledigt')">Alle: Erledigt</button></td></tr>`).join('')}
+      </table>`;
+    $('#human-table').appendChild(box);
+  }
   $('#human-table').appendChild(t);
 }
 

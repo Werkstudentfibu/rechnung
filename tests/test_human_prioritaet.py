@@ -11,9 +11,9 @@ def _rec(datei, *gruende, art="claude", lieferant=None):
 
 def test_stufen():
     assert human.prioritaet(_rec("a.pdf", "Stichprobe: Claudes Pruefung bitte kontrollieren"))["stufe"] == 1
-    assert human.prioritaet(_rec("m.eml", ("mail", "nur Link im Mailtext")))["stufe"] == 2
-    assert human.prioritaet(_rec("i.pdf", ("iban", "IBAN weicht von Stammdaten ab (Betrugsschutz)")))["stufe"] == 3
-    assert human.prioritaet(_rec("p.pdf", ("pflichtfeld", "Pflichtfeld fehlt: netto")))["stufe"] == 4
+    assert human.prioritaet(_rec("m.eml", ("mail", "nur Link im Mailtext")))["stufe"] == 4
+    assert human.prioritaet(_rec("i.pdf", ("iban", "IBAN weicht von Stammdaten ab (Betrugsschutz)")))["stufe"] == 2
+    assert human.prioritaet(_rec("p.pdf", ("pflichtfeld", "Pflichtfeld fehlt: netto")))["stufe"] == 3
     nur_mandant = _rec("x.pdf", ("zurueckgestellt", "keine Rechnungsadresse aus der Bibliothek passt"),
                        "nach Claudes Pruefung noch offen: keine Rechnungsadresse aus der Bibliothek passt",
                        ("zurueckgestellt", "Lieferant: Rechnungsadresse nicht erkannt -- Lieferant wird nur je Adresse gesucht"))
@@ -21,7 +21,7 @@ def test_stufen():
     gemischt = _rec("y.pdf", "nach Claudes Pruefung noch offen: keine Rechnungsadresse aus der Bibliothek passt; "
                              "Pruefung rot: positionen-rechnung (Position 1)")
     p = human.prioritaet(gemischt)
-    assert p["stufe"] == 4 and "Mandanten" in p["aufgabe"]
+    assert p["stufe"] == 3 and "Mandanten" in p["aufgabe"]
 
 
 def test_sortierung_nach_stufe_dann_lieferant():
@@ -49,5 +49,5 @@ def test_endpunkt_liefert_prioritaet_und_uebersicht(tmp_path):
     m = EmailMessage(); m["Subject"] = "Rechnung"; m.set_content("https://x.example")
     human.ablegen_datei(store, "mail_1.eml", bytes(m), [{"art": "mail", "grund": "nur Link im Mailtext", "felder": []}])
     d = TestClient(server_mod.create_app(store, samples)).get("/api/menschlich").json()
-    assert d["offen"][0]["prioritaet"]["stufe"] == 2
-    assert d["uebersicht"] == [{"stufe": 2, "kategorie": "Mail", "aufgabe": human.PRIORITAETEN[2][1], "anzahl": 1}]
+    assert d["offen"][0]["prioritaet"]["stufe"] == 4
+    assert d["uebersicht"] == [{"stufe": 4, "kategorie": "Mail", "aufgabe": human.PRIORITAETEN[4][1], "anzahl": 1}]

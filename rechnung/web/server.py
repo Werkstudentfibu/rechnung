@@ -2395,6 +2395,8 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         _menschlich_vorbereiten(offen)
         for r in offen:
             r["wird_gesendet"] = sender.laeuft_fuer(r.get("datei") or "")
+        mails = [{k: g[k] for k in ("von", "anzahl", "betreff")}
+                 for g in human.mails_nach_absender(store, offen)]
         uebersicht = []
         for stufe, (kategorie, aufgabe) in human.PRIORITAETEN.items():
             n = sum(1 for r in offen if r["prioritaet"]["stufe"] == stufe)
@@ -2402,7 +2404,37 @@ def create_app(store: Store, samples: Path) -> FastAPI:
                 uebersicht.append({"stufe": stufe, "kategorie": kategorie,
                                    "aufgabe": aufgabe, "anzahl": n})
         return JSONResponse({"ordner": str(human.human_dir(store.root)),
-                             "offen": offen, "uebersicht": uebersicht})
+                             "offen": offen, "uebersicht": uebersicht,
+                             "mails_nach_absender": mails})
+
+    @app.post("/api/menschlich/sammel")
+    def menschlich_sammel(body: dict) -> JSONResponse:
+        """Alle offenen Mails ohne Rechnungsanhang EINES Absenders auf einmal:
+        ``aktion`` "erledigt" (gesichtet/Rechnung geholt) oder "keine-rechnung"
+        (in den Ordner 'Keine Rechnung', nichts geloescht). PDF-Rechnungen
+        desselben Absenders bleiben unberuehrt (Aaron 13.11.2026)."""
+        from ..config import operator as _operator
+
+        von = str(body.get("von") or "").strip().lower()
+        aktion = str(body.get("aktion") or "")
+        if not von or aktion not in ("erledigt", "keine-rechnung"):
+            raise HTTPException(400, "Absender und Aktion (erledigt | keine-rechnung) angeben")
+        gruppe = next((g for g in human.mails_nach_absender(store) if g["von"] == von), None)
+        if gruppe is None:
+            raise HTTPException(404, "Keine offenen Mails von diesem Absender")
+        op = _operator()
+        n = 0
+        for datei in gruppe["dateien"]:
+            if aktion == "keine-rechnung":
+                ok = keine_rechnung.von_hand_aussortieren(store, datei, operator=op) is not None
+            else:
+                rec = next((r for r in human.offen(store) if r.get("datei") == datei), None)
+                ok = rec is not None and human.erledigt_sha(
+                    store, rec["sha256"], operator=op,
+                    notiz=f"Mail gesichtet – gesammelt je Absender ({von})") is not None
+            n += 1 if ok else 0
+        store.audit("menschlich_sammel", {"von": von, "aktion": aktion, "anzahl": n}, op)
+        return JSONResponse({"ok": True, "von": von, "aktion": aktion, "anzahl": n})
 
     # ---- Ordner "Keine Rechnung" (Entscheidung Aaron 14.10.2026) -------
     @app.get("/api/keine-rechnung")
