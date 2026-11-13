@@ -3092,7 +3092,17 @@ async function sendeRechnungJetzt() {
   let d = await r.json().catch(() => ({}));
   if (r.status === 409 && d.code === 'dublette') {
     sendeAnzeige(null);   // Rueckfrage nicht verdecken
-    if (!confirm(d.detail + '\n\nTrotzdem senden?')) { $('#msg').textContent = 'Nicht gesendet (Dublettenverdacht).'; return; }
+    if (!confirm(d.detail + '\n\nTrotzdem senden?')) {
+      // Stapel 'Menschliche Bearbeitung' (Aaron 13.11.2026): eine schon
+      // gesendete Rechnung soll nicht ewig in der Liste stehen bleiben.
+      if (HUMAN_QUEUE && confirm('Dann als erledigt abhaken?\n\nWurde diese Rechnung schon gesendet (z. B. als andere Datei), '
+          + 'verschwindet sie damit aus „Menschliche Bearbeitung“. Gesendet wird nichts.')) {
+        const e = await fetch('/api/menschlich/erledigt', { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ file: STATE.file, notiz: 'Dublette – Rechnung war schon gesendet' }) });
+        if (e.ok) { STATE.file = null; await stapelWeiter(alt, '✓ Als erledigt abgehakt (Dublette).'); return; }
+      }
+      $('#msg').textContent = 'Nicht gesendet (Dublettenverdacht).'; return;
+    }
     sendeAnzeige('Rechnung wird gesendet – prüfen, lernen, freigeben …');
     r = await sende(true); d = await r.json().catch(() => ({}));
   }

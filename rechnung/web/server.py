@@ -2274,6 +2274,10 @@ def create_app(store: Store, samples: Path) -> FastAPI:
     def menschlich_ep() -> JSONResponse:
         """Ordner "Menschliche Bearbeitung": was wartet auf wen und warum
         (Gruende, betroffene Felder, Vorschlagswerte mit Herkunft)."""
+        try:
+            human.namen_entwirren(store, samples)   # gleicher Name, anderer Inhalt
+        except OSError:
+            pass                                     # Liste trotzdem zeigen
         offen = human.nach_prioritaet(human.offen(store))
         uebersicht = []
         for stufe, (kategorie, aufgabe) in human.PRIORITAETEN.items():

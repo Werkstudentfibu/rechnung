@@ -255,6 +255,74 @@ def datei_pfad(store, name: str) -> Path | None:
     return None
 
 
+# Pruefwerte der Eingangsdateien (Pfad -> (Groesse, Aenderungszeit, sha256)),
+# damit das Laden der Liste nicht jedes Mal alle Dateien neu einliest.
+_EINGANG_SHA: dict[str, tuple[int, float, str]] = {}
+
+
+def _datei_sha(p: Path) -> str | None:
+    import hashlib
+
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    hit = _EINGANG_SHA.get(str(p))
+    if hit and hit[0] == st.st_size and hit[1] == st.st_mtime:
+        return hit[2]
+    try:
+        sha = hashlib.sha256(p.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    _EINGANG_SHA[str(p)] = (st.st_size, st.st_mtime, sha)
+    return sha
+
+
+def namen_entwirren(store, eingang) -> int:
+    """Eintraege, die genauso heissen wie eine Datei im Eingang, aber einen
+    ANDEREN Inhalt haben, eindeutig umbenennen (Hash-Anfang davor, wie
+    ``_target_name``) -- samt Beilagen. Sonst oeffnete und sendete das
+    Programm beim Klick auf den Eintrag die Eingangsdatei (``_resolve``
+    sucht zuerst im Eingang), und der Eintrag blieb nach dem Senden stehen
+    (Befund Aaron 13.11.2026). -> Anzahl umbenannter Eintraege."""
+    if eingang is None:
+        return 0
+    eingang = Path(eingang)
+    folder = human_dir(store.root)
+    n = 0
+    for side in _sidecars(folder):
+        rec = _read(side)
+        name, sha = (rec or {}).get("datei") or "", (rec or {}).get("sha256") or ""
+        if not name or not sha or not (eingang / name).is_file():
+            continue
+        ein = _datei_sha(eingang / name)
+        if ein is None or ein == sha:
+            continue
+        neu, k = f"{sha[:8]}_{name}", 1
+        while any(p.exists() for p in (folder / neu, folder / (neu + SIDECAR_SUFFIX), eingang / neu)):
+            k += 1
+            neu = f"{sha[:8]}-{k}_{name}"
+        if (folder / name).exists():
+            (folder / name).replace(folder / neu)
+        beilagen = []
+        for b in rec.get("beilagen") or []:
+            if not b.startswith(name):
+                beilagen.append(b)
+                continue
+            nb = neu + b[len(name):]
+            if (folder / b).exists():
+                (folder / b).replace(folder / nb)
+            beilagen.append(nb)
+        _write(folder / (neu + SIDECAR_SUFFIX), dict(rec, datei=neu, beilagen=beilagen,
+                                                     umbenannt_von=name))
+        side.unlink(missing_ok=True)
+        store.audit("menschlich_umbenannt", {
+            "sha256": sha, "von": name, "nach": neu,
+            "grund": "gleicher Name im Eingang, anderer Inhalt"}, "programm")
+        n += 1
+    return n
+
+
 def _target_name(folder: Path, name: str, sha256: str) -> str:
     """Dateiname im Ordner -- bei Namensgleichheit mit einer ANDEREN Rechnung
     wird der Hash-Anfang vorangestellt, nichts wird ueberschrieben."""
