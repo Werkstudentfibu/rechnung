@@ -169,6 +169,17 @@
   .actionbar details > div { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
   .af .ab-in.val-input { padding-right: 46px; }
   button.senden { background: #1c7550; color: #fff; font-weight: 600; padding: 6px 18px; }
+  /* Senden: sichtbar arbeiten (Aaron 13.11.2026) */
+  @keyframes dreh { to { transform: rotate(360deg); } }
+  .spinner { display: inline-block; width: 13px; height: 13px; margin-right: 7px; vertical-align: -2px;
+             border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+             animation: dreh .8s linear infinite; }
+  button.senden[disabled] { opacity: .85; cursor: progress; }
+  #sende-overlay { position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center;
+                   justify-content: center; background: rgba(255,255,255,.55); cursor: progress; }
+  #sende-overlay .box { background: #fff; border: 2px solid #1c7550; border-radius: 8px; padding: 16px 24px;
+                        box-shadow: 0 4px 18px rgba(0,0,0,.18); color: #1c7550; font-size: 15px; }
+  #sende-overlay .zeit { color: #555; font-size: 12px; margin-top: 6px; min-height: 1em; }
   .af label { display: block; font-size: 12px; color: #444; margin-bottom: 1px; }
   .ab-in { width: 100%; box-sizing: border-box; border: 1px solid #a9a9a9; background: #fff;
            padding: 3px 6px; font: inherit; }
@@ -3003,22 +3014,64 @@ function learnedMsg(r) {
   return ` · Vorlage ${l.created ? 'gelernt' : 'ergänzt'}: ${l.learned.join(', ')}`;
 }
 
+/* Senden sichtbar machen (Aaron 13.11.2026: "Wenn man auf senden klickt
+   sollte man sehen, dass das Programm arbeitet"): Knopf grau mit
+   Drehkreis, Hinweis ueber der Seite mit laufender Zeit; waehrenddessen
+   zaehlt ein zweiter Klick bzw. die Taste b nicht. */
+let SENDET = false;
+function sendeAnzeige(text) {
+  let o = document.getElementById('sende-overlay');
+  if (!text) { if (o) o.remove(); clearInterval(sendeAnzeige.uhr); return; }
+  if (!o) {
+    o = document.createElement('div'); o.id = 'sende-overlay';
+    o.setAttribute('role', 'status'); o.setAttribute('aria-live', 'polite');
+    o.innerHTML = '<div class="box"><span class="spinner"></span><b class="txt"></b><div class="zeit"></div></div>';
+    document.body.appendChild(o);
+    const start = Date.now();
+    clearInterval(sendeAnzeige.uhr);
+    sendeAnzeige.uhr = setInterval(() => {
+      const s = Math.round((Date.now() - start) / 1000), z = o.querySelector('.zeit');
+      if (z && s >= 2) z.textContent = `läuft seit ${s} s – bitte warten`;
+    }, 1000);
+  }
+  o.querySelector('.txt').textContent = text;
+}
 async function sendeRechnung() {
+  if (SENDET) return;   // Doppelklick / Taste b waehrend des Sendens
+  SENDET = true;
+  const knopf = document.querySelector('.actionbar button.senden');
+  if (knopf) { knopf.disabled = true; knopf.innerHTML = '<span class="spinner"></span>Wird gesendet …'; }
+  try {
+    await sendeRechnungJetzt();
+  } finally {
+    SENDET = false;
+    sendeAnzeige(null);
+    if (knopf && knopf.isConnected) { knopf.disabled = false; knopf.textContent = '✓ Senden'; }
+  }
+}
+async function sendeRechnungJetzt() {
   // Ein Klick (Aaron 11.10.2026): pruefen -> lernen -> an JobRouter freigeben
   // -> aus der Liste -> naechste Rechnung.
   const alteListe = [...LIST_FILES], alt = STATE.file;
   $('#msg').textContent = 'Sende …';
+  sendeAnzeige('Rechnung wird gesendet – prüfen, lernen, freigeben …');
   const sende = trotzdem => fetch('/api/senden', { method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ file: STATE.file, template_id: STATE.tid || null, trotzdem }) });
   let r = await sende(false);
   let d = await r.json().catch(() => ({}));
   if (r.status === 409 && d.code === 'dublette') {
+    sendeAnzeige(null);   // Rueckfrage nicht verdecken
     if (!confirm(d.detail + '\n\nTrotzdem senden?')) { $('#msg').textContent = 'Nicht gesendet (Dublettenverdacht).'; return; }
+    sendeAnzeige('Rechnung wird gesendet – prüfen, lernen, freigeben …');
     r = await sende(true); d = await r.json().catch(() => ({}));
   }
-  if (!r.ok) { $('#msg').textContent = '✗ ' + (d.detail || ('Fehler ' + r.status)); alert(d.detail || ('Fehler ' + r.status)); return; }
+  if (!r.ok) {
+    sendeAnzeige(null);   // Fehlermeldung nicht verdecken
+    $('#msg').textContent = '✗ ' + (d.detail || ('Fehler ' + r.status)); alert(d.detail || ('Fehler ' + r.status)); return;
+  }
   const wohin = (d.jobrouter_live ? 'an JobRouter übergeben' : 'freigegeben – geht an JobRouter, sobald die Anbindung steht')
     + (d.als_dummy ? ' (als Dummy Lieferant)' : '');
+  sendeAnzeige('✓ Gesendet – nächste Rechnung wird geöffnet …');
   STATE.file = null;
   await loadList();
   if (HUMAN_QUEUE) { await stapelWeiter(alt, `✓ Vorige Rechnung ${wohin}.`); return; }
@@ -3064,6 +3117,7 @@ document.addEventListener('keydown', (ev) => {
   if (!STATE || !STATE.file) return;
   ev.preventDefault();
   if (STATE.mail) { mailErledigt(); return; }   // Mail-Ansicht: b = Erledigt
+  if (SENDET) return;                            // laeuft schon
   sendeRechnung();
 });
 

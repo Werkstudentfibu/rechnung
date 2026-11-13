@@ -115,3 +115,13 @@ def test_bestaetigen_allein_raeumt_weiter_auf(tmp_path: Path):
     r = c.post("/api/confirm", json={"file": "a.pdf", "template_id": d["template_id"]})
     assert r.status_code == 200, r.text
     assert human.datei_pfad(store, "a.pdf") is None
+
+
+def test_senden_zeigt_dass_es_arbeitet():
+    """Aaron 13.11.2026: beim Senden sichtbar machen, dass das Programm
+    arbeitet; waehrenddessen kein zweiter Sendeversuch."""
+    html = (Path(__file__).resolve().parent.parent / "rechnung" / "web" / "static" / "index.html").read_text("utf-8")
+    assert "function sendeAnzeige(text)" in html and "#sende-overlay" in html
+    assert "if (SENDET) return;   // Doppelklick / Taste b waehrend des Sendens" in html
+    assert "Wird gesendet …" in html and "läuft seit ${s} s" in html
+    assert html.count("sendeAnzeige(null);") >= 3   # Fehler, Dublette, Ende
