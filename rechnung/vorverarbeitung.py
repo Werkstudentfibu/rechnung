@@ -22,6 +22,7 @@ Lieferanten neu auswerten (``neu_auswerten``, nur schnelle Vorlagenstufe).
 
 from __future__ import annotations
 
+import itertools
 import queue
 import threading
 import time
@@ -55,7 +56,10 @@ class Vorverarbeiter:
         self._verarbeite = verarbeite
         self._neu = neu_auswerten
         self._ueberspringen = ueberspringen
-        self._q: "queue.Queue[tuple[str, Path]]" = queue.Queue()
+        # (Rang, laufende Nummer, Art, Pfad): Rang 0 = vorgezogen (naechste
+        # Rechnungen im Stapel 'Menschliche Bearbeitung'), 1 = normal
+        self._q: "queue.PriorityQueue[tuple[int, int, str, Path]]" = queue.PriorityQueue()
+        self._nr = itertools.count()
         self._erledigt: set[tuple[str, int, float]] = set()
         self._geplant: set[str] = set()
         self._neu_geplant: set[str] = set()
@@ -97,10 +101,12 @@ class Vorverarbeiter:
             namen.add(self.status["aktuell"])
         return namen
 
-    def einreihen(self, paths) -> None:
+    def einreihen(self, paths, vorne: bool = False) -> None:
+        """``vorne``: vor allen normal eingereihten Dateien bearbeiten (auch
+        wenn die Datei schon weiter hinten wartet)."""
         for p in paths:
             p = Path(p)
-            if not p.is_file() or p.name in self._geplant:
+            if not p.is_file() or (p.name in self._geplant and not vorne):
                 continue
             try:
                 if self._kennung(p) in self._erledigt:
@@ -110,7 +116,7 @@ class Vorverarbeiter:
             except OSError:
                 continue
             self._geplant.add(p.name)
-            self._q.put(("vor", p))
+            self._q.put((0 if vorne else 1, next(self._nr), "vor", p))
         self.status["wartend"] = self._q.qsize()
         self._start()
 
@@ -123,7 +129,7 @@ class Vorverarbeiter:
             if not p.is_file() or p.name in self._neu_geplant:
                 continue
             self._neu_geplant.add(p.name)
-            self._q.put(("neu", p))
+            self._q.put((1, next(self._nr), "neu", p))
         self.status["wartend"] = self._q.qsize()
         self._start()
 
@@ -145,7 +151,7 @@ class Vorverarbeiter:
     def _schleife(self) -> None:
         _niedrige_prioritaet()
         while True:
-            art, p = self._q.get()
+            _rang, _nr, art, p = self._q.get()
             try:
                 while self._mensch > 0:          # Klick des Menschen hat Vorrang
                     time.sleep(0.2)
@@ -155,6 +161,11 @@ class Vorverarbeiter:
                     self._geplant.discard(p.name)
                 self.status["wartend"] = self._q.qsize()
                 if not p.is_file():
+                    continue
+                try:      # vorgezogen und hinten nochmal eingereiht: nur einmal lesen
+                    if art == "vor" and self._kennung(p) in self._erledigt:
+                        continue
+                except OSError:
                     continue
                 self.status["aktuell"] = p.name
                 try:

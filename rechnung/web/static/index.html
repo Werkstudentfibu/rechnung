@@ -615,6 +615,17 @@ function stapelStand(q, file) {
   const rest = q.dateien.filter(f => !(q.erledigt || []).includes(f)).length;
   return `Menschliche Bearbeitung: ${q.dateien.indexOf(file) + 1} von ${q.dateien.length} · noch ${rest} offen`;
 }
+// Die naechsten zwei Rechnungen des Stapels bevorzugt im Hintergrund lesen,
+// damit sie beim Weiterklicken sofort da sind (Aaron 13.11.2026).
+function stapelVorladen(file) {
+  const q = HUMAN_QUEUE; if (!q || !q.dateien) return;
+  const erledigt = new Set(q.erledigt || []);
+  const naechste = q.dateien.slice(q.dateien.indexOf(file) + 1)
+    .filter(f => f !== file && !erledigt.has(f)).slice(0, 2);
+  if (!naechste.length) return;
+  fetch('/api/vorbereiten', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ files: naechste }) }).catch(() => {});
+}
 async function stapelWeiter(alt, vorher) {
   const next = naechsteImStapel(HUMAN_QUEUE, alt);
   if (!next) {
@@ -622,6 +633,7 @@ async function stapelWeiter(alt, vorher) {
     $('#work').innerHTML = `<p class="hint" style="padding:12px">${esc(vorher || '')} Menschliche Bearbeitung: alles abgearbeitet.</p>`;
     return;
   }
+  stapelVorladen(next);
   await openInvoice(next, null);
   const m = $('#msg');
   if (m) m.textContent = `${vorher || ''} ${stapelStand(HUMAN_QUEUE, next)}`.trim();
@@ -3433,6 +3445,7 @@ async function loadHuman() {
       <td>${vs.join('<br>')}</td>`;
     tr.onclick = async () => {
       HUMAN_QUEUE = { dateien: d.offen.map(x => x.datei), erledigt: [] };
+      stapelVorladen(r.datei);
       show('scan'); await openInvoice(r.datei, null);
       const m = $('#msg'); if (m) m.textContent = stapelStand(HUMAN_QUEUE, r.datei);
     };

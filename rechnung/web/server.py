@@ -43,7 +43,7 @@ from ..identify import empfaenger_namen as _empfaenger_namen
 from ..identify import (FIXED_FIELD_TYPES, POSITIONSMODI, POSITIONSMODUS_EINE_POSITION,
                         POSITIONSMODUS_EINZELN, Supplier,
                         identify, supplier_from_doc)
-from ..pipeline import (EXTRACT_EINVOICE, EXTRACT_TEMPLATE, MASTER_FIELDS,
+from ..pipeline import (EXTRACT_EINVOICE, EXTRACT_TEMPLATE, INVOICE_SUFFIXES, MASTER_FIELDS,
                         POSITIONEN_KEY, STATUS_LABELS, _positionsmodus_abschliessen,
                         _positionsmodus_hinweis, _positionsmodus_vorbereiten,
                         confirm_supplier, discard_supplier, dispatch, invoice_files,
@@ -504,6 +504,31 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         if samples.is_dir():
             vorverarbeiter.einreihen(invoice_files(samples))
     app.state.vorverarbeiter = vorverarbeiter
+
+    def _menschlich_vorbereiten(eintraege: list[dict] | None = None) -> None:
+        """Eintraege aus 'Menschliche Bearbeitung', die NICHT im Eingang
+        liegen, im Hintergrund vorab lesen -- in der Reihenfolge der Liste
+        (Aaron 13.11.2026). Der Eingang wird ohnehin vorbereitet."""
+        if vorverarbeiter is None:
+            return
+        try:
+            pfade = []
+            for r in (eintraege if eintraege is not None else human.nach_prioritaet(human.offen(store))):
+                name = r.get("datei") or ""
+                p = human.datei_pfad(store, name)
+                if p is None or p.suffix.lower() not in INVOICE_SUFFIXES or (samples / name).is_file():
+                    continue
+                pfade.append(p)
+            vorverarbeiter.einreihen(pfade)
+        except Exception:  # noqa: BLE001 -- Vorab-Lesen darf nie etwas stoeren
+            pass
+
+    if vorverarbeiter is not None:
+        try:
+            human.namen_entwirren(store, samples)
+        except OSError:
+            pass
+        _menschlich_vorbereiten()
 
     def _mensch():
         """Klick des Menschen hat Vorrang vor dem Hintergrund."""
@@ -2255,6 +2280,23 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         threading.Timer(0.5, lambda: os._exit(selbstupdate.RESTART_EXIT_CODE)).start()
         return JSONResponse({"ok": True})
 
+    @app.post("/api/vorbereiten")
+    def vorbereiten_ep(body: dict) -> JSONResponse:
+        """Die naechsten Rechnungen im Stapel bevorzugt vorab lesen, damit sie
+        beim Weiterklicken sofort da sind (Aaron 13.11.2026)."""
+        if vorverarbeiter is None:
+            return JSONResponse({"eingereiht": 0})
+        pfade = []
+        for f in list(body.get("files") or [])[:5]:
+            try:
+                p = _resolve(str(f))
+            except HTTPException:
+                continue
+            if p.suffix.lower() in INVOICE_SUFFIXES:
+                pfade.append(p)
+        vorverarbeiter.einreihen(pfade, vorne=True)
+        return JSONResponse({"eingereiht": len(pfade)})
+
     @app.post("/api/menschlich/erledigt")
     def menschlich_erledigt(body: dict) -> JSONResponse:
         """Eintrag ohne Rechnungs-Ergebnis von Hand erledigen (z.B. Mail nur
@@ -2279,6 +2321,7 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         except OSError:
             pass                                     # Liste trotzdem zeigen
         offen = human.nach_prioritaet(human.offen(store))
+        _menschlich_vorbereiten(offen)
         uebersicht = []
         for stufe, (kategorie, aufgabe) in human.PRIORITAETEN.items():
             n = sum(1 for r in offen if r["prioritaet"]["stufe"] == stufe)
