@@ -296,13 +296,27 @@ def _cmd_import_business_units(args) -> int:
 
 def _cmd_templates(args) -> int:
     store = Store(args.data)
-    for t in store.all_templates():
+    vorlagen = store.all_templates()
+    for t in vorlagen:
         print(f"{t.id:24s} supplier={t.supplier_id:16s} variant={t.variant:10s} "
               f"confirmations={t.confirmations} secured={t.secured}"
               + (" VERALTET" if t.stale else ""))
         for f in t.fields:
             kind = "anchor" if f.anchor else ("abs" if f.abs_frac else "-")
             print(f"   {f.name:16s} {f.value_type:8s} {kind}")
+        if t.line_items and t.line_items.columns:
+            print("   Positionstabelle: ja ("
+                  + ", ".join(c.name for c in t.line_items.columns)
+                  + (", mehrseitig" if t.line_items.folgeseiten else "") + ")")
+        else:
+            print("   Positionstabelle: nein")
+    # Zusammenfassung (Aaron 16.11.2026: "hat das Programm aus der manuellen
+    # Tabellenerstellung schon was gelernt?") -- nur Zahlen, keine Inhalte.
+    aktiv = [t for t in vorlagen if not t.stale]
+    mit = sum(1 for t in aktiv if t.line_items and t.line_items.columns)
+    print()
+    print(f"Vorlagen (aktiv): {len(aktiv)}, davon mit Positionstabelle: {mit}")
+    print(f"Spaltenwoerterbuch: {len(store.spaltenwoerter())} Kopfwoerter")
     return 0
 
 

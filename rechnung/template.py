@@ -337,6 +337,26 @@ def _cluster_zeilen(band: list[Word], line_h: float, row_gap: float) -> list[lis
     return rows
 
 
+def _fortsetzungen_anhaengen(recs: list[dict], columns: list["Column"]) -> list[dict]:
+    """Mehrzeilige Beschreibung (Aaron 16.11.2026): eine Zeile, die nur Text
+    und keinen einzigen Wert in einer Zahlen-/Betragsspalte hat, setzt die
+    Beschreibung der vorigen Position fort -- wie ``tabelle._merge_fort-
+    setzungen`` bei der automatischen Erkennung."""
+    text = [c.name for c in columns if c.value_type == "text"]
+    zahlen = [c.name for c in columns if c.value_type != "text"]
+    if not text or not zahlen:
+        return recs
+    out: list[dict] = []
+    for rec in recs:
+        if out and all(rec.get(k) in (None, "", []) for k in zahlen):
+            for k in text:
+                if rec.get(k) not in (None, ""):
+                    out[-1][k] = " ".join(f"{out[-1].get(k) or ''} {rec[k]}".split())
+            continue
+        out.append(rec)
+    return out
+
+
 def _passt_zum_muster(rec: dict, typisch: set[str]) -> bool:
     """Zeile der Folgeseite mit dem Muster der Kopfseite abgleichen: mindestens
     drei Viertel der dort ueblichen Zahlenspalten gefuellt ("Seite 2 von 3"
@@ -395,6 +415,7 @@ def apply_line_items(doc: Document, spec: LineItemSpec) -> list[dict]:
                 rec[col.name] = val
             if any(v not in (None, "", []) for v in rec.values()):
                 seite_recs.append(rec)
+        seite_recs = _fortsetzungen_anhaengen(seite_recs, spec.columns)
 
         if page == first_page:
             if spec.folgeseiten and seite_recs:

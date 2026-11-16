@@ -272,7 +272,9 @@ def _value_equiv(a, b) -> bool:
     try:
         return abs(float(a) - float(b)) <= 0.01
     except (TypeError, ValueError):
-        return str(a).strip() == str(b).strip()
+        # Leerzeichen-Unterschiede (mehrzeilige Beschreibung zusammengefuegt,
+        # doppelte Leerzeichen im PDF) sind kein anderer Wert
+        return " ".join(str(a).split()) == " ".join(str(b).split())
 
 
 def _items_equiv(got: list[dict], want: list[dict]) -> bool:
@@ -297,35 +299,98 @@ def _spans_in_line(line: list[Word], value, value_type: str) -> list[list[Word]]
     return hits
 
 
+def _text_span(line: list[Word], value: str, used: set[int]) -> list[Word] | None:
+    """Beschreibung in einer Textzeile wiederfinden -- beliebig lang (nicht
+    nur bis MAX_SPAN Woerter wie ein Kopffeld) und, wenn sie ueber mehrere
+    Zeilen laeuft, als Anfang: die Zeile traegt den Beginn der Beschreibung,
+    der Rest steht in den Folgezeilen (Aaron 16.11.2026: Tabellen mit
+    laengeren Beschreibungen wurden nie gelernt). Ob der Rest wirklich so
+    dasteht, entscheidet der Probelauf in ``_learn_line_items``.
+    Vollstaendiger Treffer vor Anfang, laengerer Anfang vor kuerzerem."""
+    ziel = norm(value)
+    if not ziel:
+        return None
+    anfang: list[Word] | None = None
+    for i in range(len(line)):
+        if id(line[i]) in used:
+            continue
+        for j in range(i, len(line)):
+            if id(line[j]) in used:
+                break
+            t = norm(" ".join(w.text for w in line[i:j + 1]))
+            if not t:
+                continue
+            if t == ziel:
+                return line[i:j + 1]
+            if not ziel.startswith(t):
+                break
+            if ziel.startswith(t + "-") and (anfang is None or j + 1 - i > len(anfang)):
+                anfang = line[i:j + 1]
+    return anfang
+
+
 def _find_row(doc: Document, item: dict, lines: list[list[Word]], skip: set[int]
              ) -> tuple[int, dict[str, tuple[list[Word], str]]] | None:
     """Textzeile, in der ALLE (nicht-leeren) Werte einer Position als eigene,
     nicht ueberlappende Wortspannen vorkommen -> (Zeilenindex, Spalte ->
-    (Wortspanne, Spaltentyp))."""
+    (Wortspanne, Spaltentyp)). Eine Beschreibung darf beliebig lang sein und
+    in der Zeile nur beginnen (``_text_span``)."""
+    werte = [(k, v) for k, v in item.items() if not k.startswith("_") and v not in (None, "")]
+    # Erst in der bestaetigten Reihenfolge (wie bisher), dann Zahlen vor der
+    # Beschreibung -- ein Beschreibungsanfang ("Tomaten passiert" / "4
+    # Dosen") darf der Menge "4" nicht das Wort wegnehmen, und umgekehrt.
+    reihenfolgen = [werte, sorted(werte, key=lambda kv: _value_types(kv[1])[0] == "text")]
     for li, line in enumerate(lines):
         if li in skip:
             continue
-        found: dict[str, tuple[list[Word], str]] = {}
-        used: set[int] = set()
-        ok = True
-        for key, value in item.items():
-            if key.startswith("_") or value in (None, ""):
-                continue
-            hit = None
-            for vtype in _value_types(value):
-                cands = [s for s in _spans_in_line(line, value, vtype)
-                        if not ({id(w) for w in s} & used)]
-                if cands:
-                    hit = (cands[0], vtype)
-                    break
-            if hit is None:
-                ok = False
-                break
-            found[key] = hit
-            used |= {id(w) for w in hit[0]}
-        if ok and found:
-            return li, found
+        for reihenfolge in reihenfolgen:
+            found = _zeile_belegen(line, reihenfolge)
+            if found:
+                return li, found
     return None
+
+
+def _zeile_belegen(line: list[Word], werte: list[tuple[str, object]]
+                   ) -> dict[str, tuple[list[Word], str]] | None:
+    found: dict[str, tuple[list[Word], str]] = {}
+    used: set[int] = set()
+    for key, value in werte:
+        hit = None
+        for vtype in _value_types(value):
+            if vtype == "text":
+                span = _text_span(line, str(value), used)
+                if span:
+                    hit = (span, vtype)
+                    break
+                continue
+            cands = [s for s in _spans_in_line(line, value, vtype)
+                    if not ({id(w) for w in s} & used)]
+            if cands:
+                hit = (cands[0], vtype)
+                break
+        if hit is None:
+            return None
+        found[key] = hit
+        used |= {id(w) for w in hit[0]}
+    return found or None
+
+
+_STOPP_VERSUCHE = 4
+
+
+def _zeilen_unterhalb(lines: list[list[Word]], page: int, ref_bottom: float, h: float,
+                      max_gap_lines: float) -> list[list[Word]]:
+    """Textzeilen unterhalb ``ref_bottom`` auf der Seite, naechste zuerst
+    (dieselbe Abstandsregel wie ``_nearest_line``)."""
+    out = []
+    for line in lines:
+        if not line or line[0].page != page:
+            continue
+        top = min(w.top for w in line)
+        if top < ref_bottom - 0.5 or top - ref_bottom > h * max_gap_lines:
+            continue
+        out.append((top, line))
+    return [line for _t, line in sorted(out, key=lambda t: t[0])]
 
 
 def _nearest_line(lines: list[list[Word]], page: int, ref_top: float, ref_bottom: float,
@@ -424,32 +489,38 @@ def _learn_line_items(doc: Document, items: list[dict], store=None) -> LineItemS
         return None
     # Stoppwort: erste Zeile unterhalb der letzten Position (auf deren Seite)
     # -- auch wenn der Summenblock etwas abgesetzt steht (Trennlinie,
-    # Leerraum); ob das passt, entscheidet ohnehin der Probelauf unten.
-    stop_line = _nearest_line(lines, last_page, 0, max(w.bottom for w in last_words), h,
-                              above=False, max_gap_lines=12.0)
+    # Leerraum); ob das passt, entscheidet ohnehin der Probelauf unten. Laeuft
+    # die Beschreibung der letzten Position ueber mehrere Zeilen, ist die
+    # naechste Zeile noch deren Fortsetzung -- dann die uebernaechste usw.
+    # (hoechstens _STOPP_VERSUCHE Zeilen, der Probelauf entscheidet).
+    unten = _zeilen_unterhalb(lines, last_page, max(w.bottom for w in last_words), h,
+                              max_gap_lines=12.0)
 
     page_w = doc.pages[page].width
     header_cols = [(header_map[key], key, rows[0][key][1]) for key in rows[0]]
-    # Nur Label-Woerter der Stoppzeile ("Nettobetrag"), keine Betraege/
-    # Waehrung -- "EUR" steht womoeglich auch in jeder Positionszeile und
-    # wuerde die Tabelle schon nach der ersten Zeile beenden.
-    stop_words = [w for w in (stop_line or []) if _is_label(w)]
     mehrseitig = last_page != page
-    if mehrseitig:
-        # "Uebertrag"/"Zwischensumme" steht auf JEDER Seite -- als Stopp-Wort
-        # wuerde es die Tabelle schon auf Seite 1 beenden.
-        stop_words = [w for w in stop_words if not ist_seitenwechsel_wort(w.text)]
-    spec = build_line_item_spec(header_cols, stop_words, page_w)
-    if mehrseitig:
-        spec.folgeseiten = True
-        # Beginn der Tabelle auf der zweiten Seite: oberster Positionswert dort
-        alle_woerter = [w for row in rows for span, _t in row.values() for w in span]
-        zweite_seite = min(w.page for w in alle_woerter if w.page > page)
-        zweite = [w for w in alle_woerter if w.page == zweite_seite]
-        if zweite:
-            ph = doc.pages[zweite[0].page].height
-            spec.folge_top = round(max(0.0, (min(w.top for w in zweite) - h * 0.4) / ph), 4)
-    if not _items_equiv(apply_line_items(doc, spec), items):
+    for stop_line in (unten[:_STOPP_VERSUCHE] or [None]):
+        # Nur Label-Woerter der Stoppzeile ("Nettobetrag"), keine Betraege/
+        # Waehrung -- "EUR" steht womoeglich auch in jeder Positionszeile und
+        # wuerde die Tabelle schon nach der ersten Zeile beenden.
+        stop_words = [w for w in (stop_line or []) if _is_label(w)]
+        if mehrseitig:
+            # "Uebertrag"/"Zwischensumme" steht auf JEDER Seite -- als Stopp-Wort
+            # wuerde es die Tabelle schon auf Seite 1 beenden.
+            stop_words = [w for w in stop_words if not ist_seitenwechsel_wort(w.text)]
+        spec = build_line_item_spec(header_cols, stop_words, page_w)
+        if mehrseitig:
+            spec.folgeseiten = True
+            # Beginn der Tabelle auf der zweiten Seite: oberster Positionswert dort
+            alle_woerter = [w for row in rows for span, _t in row.values() for w in span]
+            zweite_seite = min(w.page for w in alle_woerter if w.page > page)
+            zweite = [w for w in alle_woerter if w.page == zweite_seite]
+            if zweite:
+                ph = doc.pages[zweite[0].page].height
+                spec.folge_top = round(max(0.0, (min(w.top for w in zweite) - h * 0.4) / ph), 4)
+        if _items_equiv(apply_line_items(doc, spec), items):
+            break
+    else:
         return None
     if store is not None:
         for key, w in header_map.items():
