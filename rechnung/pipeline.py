@@ -1232,6 +1232,27 @@ def _tabelle_rangfolge(doc, supplier, store: Store, netto: float | None, brutto:
                            woerterbuch=store.spaltenwoerter()), ""
 
 
+def _tabelle_ueber_summen(res: Result, doc, supplier, store: Store,
+                          tbl_pages: list[int] | None) -> None:
+    """Noch keine Werte (unbekannter Lieferant, keine KI): Netto/Brutto NUR
+    fuer die Tabellen-Pruefung aus dem Rechnungstext (``summen.py``: nur ein
+    eindeutiges, aufgehendes Netto/USt/Brutto) -- damit greifen auch hier
+    Tabellen ohne Zeilen-Mathematik ("Bezeichnung | Betrag") und ohne
+    erkannte Kopfzeile (Aaron 16.11.2026: "Tabellen werden oft gar nicht
+    angelegt"). Die Felder selbst bleiben unberuehrt."""
+    from . import summen
+
+    erg = summen.summen_aus_kontext(doc.text)
+    if not erg.gefunden:
+        return
+    items, herkunft = _tabelle_rangfolge(doc, supplier, store, erg.netto, erg.brutto,
+                                         doc.text, tbl_pages)
+    if items:
+        res.line_items = positionen.normalize_columns(items)
+        if herkunft and herkunft not in res.hinweise:
+            res.hinweise.append(herkunft)
+
+
 def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
                         extra_checks: list[Check] | None = None,
                         timer: StageTimer | None = None,
@@ -1295,6 +1316,9 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
         # nur Stammdaten bzw. Zahlungsbedingungen per Textregel: noch nichts
         # Pruefbares extrahiert
         if not any(f.source not in ("library", zahlung.SOURCE) for f in res.fields.values()):
+            if (not manuell_korrigiert and not res.line_items
+                    and modus != POSITIONSMODUS_EINE_POSITION):
+                _tabelle_ueber_summen(res, doc, supplier, store, tbl_pages)
             # Belegart/Waehrung/QR-Zahlteil sind auch ohne sonstige Werte
             # pruefbar -- bleiben also auch hier ein Grund fuer den Menschen.
             res.checks = (extra

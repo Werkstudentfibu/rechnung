@@ -94,7 +94,7 @@ def test_diagnose_nennt_grund_bei_leerer_tabelle(tmp_path, monkeypatch):
     d = client.get("/api/invoice", params={"file": "c.pdf"}).json()
 
     assert not d["line_items"]
-    assert "keine Tabelle erkannt" in d["positionen_grund"]
+    assert "kein Tabellenkopf erkannt" in d["positionen_grund"]
     assert "KI ausgeschaltet" in d["positionen_grund"]
 
 

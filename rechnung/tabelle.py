@@ -6,6 +6,9 @@ Arbeitet wie eine Vorlage, aber ohne Anlernen: eine Kopfzeile wird ueber
 Schluesselwoerter (Beschreibung/Menge/Einzelpreis/Gesamt/MwSt/...) gefunden,
 die Zeilen darunter werden im Wort-Layout geclustert (wie
 ``template.apply_line_items``) und je Spalte aus der x-Position gelesen.
+Ohne erkennbare Kopfzeile (fehlt, Bild, verlesen) bleibt ein Block aus
+Betragszeilen, dessen Spalten sich nur ueber die Rechnung selbst deuten
+lassen (Summe = Netto, Menge x Preis = Betrag) -- siehe ``_ohne_kopf``.
 
 Kein Raten: eine gefundene Tabelle wird nur uebernommen, wenn sie die
 ohnehin vorhandene Rechen-Pruefung besteht (``validate.line_item_row`` je
@@ -27,22 +30,60 @@ from .validate import check_line_items_total, line_item_row
 _HEADER_HINWEISE: dict[str, tuple[str, ...]] = {
     "pos": ("pos", "position", "nr", "posnr", "lfd", "lfdnr"),
     "beschreibung": ("beschreibung", "bezeichnung", "artikel", "leistung", "text",
-                      "description", "item", "designation", "descrizione", "produkt"),
-    "menge": ("menge", "anzahl", "anz", "stueck", "qty", "quantity", "quantite", "quantita"),
+                      "description", "item", "designation", "descrizione", "produkt",
+                      "leistungen", "posten", "taetigkeit", "artikeltext"),
+    "menge": ("menge", "anzahl", "anz", "stueck", "qty", "quantity", "quantite", "quantita",
+              "stk", "stck", "std", "stunden", "mng", "pcs"),
     "einzelpreis_netto": ("einzelpreis", "preis", "ep", "unitprice", "price",
-                           "prixunitaire", "prezzounitario", "stueckpreis"),
+                           "prixunitaire", "prezzounitario", "stueckpreis",
+                           "epreis", "einzel", "nettopreis", "vkpreis", "rate"),
     "gesamt_netto": ("gesamtpreis", "gesamtbetrag", "gesamt", "betrag", "summe",
                       "total", "amount", "montant", "importo", "nettobetrag",
-                      "zeilensumme", "positionssumme"),
+                      "zeilensumme", "positionssumme",
+                      "gpreis", "gespreis", "endpreis", "wert", "gesamtwert", "nettowert",
+                      "linetotal", "netto", "brutto"),
     "mwst_satz": ("mwst", "ust", "vat", "steuersatz", "tax", "tva", "iva", "mwstsatz"),
     "waehrung": ("waehrung", "currency", "devise", "valuta"),
 }
-# Eine Kopfzeile muss mindestens diese Spalte UND mindestens _MIN_SPALTEN
+# Kopfwoerter einer Spalte, die NICHT uebernommen wird (Artikelnummer,
+# Datum, Rabatt): sie bildet trotzdem eine eigene Spalte, damit ihr Inhalt
+# nicht in die Nachbarspalte rutscht ("10234 Tomaten passiert" als
+# Beschreibung, eine Artikelnummer als Positionsnummer). Zaehlt nicht als
+# Tabellenspalte fuer die Mindestanzahl unten.
+_KENNUNG = "_kennung"
+_KENNUNG_WOERTER = (
+    "artnr", "artikelnr", "artikelnummer", "bestellnr", "bestellnummer", "materialnr",
+    "materialnummer", "ean", "sku", "itemno", "partno", "datum", "date", "lieferdatum",
+    "leistungsdatum", "rabatt", "nachlass", "discount",
+)
+# Zusammengesetzte Kopfwoerter (Aaron 16.11.2026: "Tabellen werden oft gar
+# nicht angelegt"): "Artikelbezeichnung", "Leistungsbeschreibung",
+# "Liefermenge", "Verkaufspreis", "Nettowert" -- das Wortende traegt die
+# Bedeutung. Laengere Endungen zuerst ("gesamtpreis" vor "preis").
+_WORTENDEN: tuple[tuple[str, str], ...] = (
+    ("beschreibung", "beschreibung"), ("bezeichnung", "beschreibung"),
+    ("leistung", "beschreibung"), ("text", "beschreibung"),
+    ("nummer", _KENNUNG), ("datum", _KENNUNG), ("nr", _KENNUNG),
+    ("menge", "menge"), ("anzahl", "menge"),
+    ("gesamtpreis", "gesamt_netto"), ("betrag", "gesamt_netto"), ("summe", "gesamt_netto"),
+    ("wert", "gesamt_netto"), ("preis", "einzelpreis_netto"),
+)
+# Rang eines Kopfwort-Treffers -- trifft mehr als ein Wort derselben Zeile
+# dieselbe Spalte, gewinnt der bessere Rang (dann das linke Wort).
+_RANG_EXAKT, _RANG_SCHWACH, _RANG_WORTTEIL, _RANG_WORTENDE, _RANG_BRUTTO = 0, 1, 2, 3, 4
+# Exakte, aber unspezifische Treffer: "Artikel" steht oft ueber der
+# Artikelnummer, die echte Beschreibung heisst daneben "Bezeichnung".
+_SCHWACHE_WOERTER = ("artikel", "item", "nr", "text", "netto")
+# Eine Kopfzeile muss die Beschreibung UND mindestens _MIN_SPALTEN
 # verschiedene Spalten treffen -- sonst waere z.B. die Summenzeile
 # "Gesamtbetrag 1.190,00 EUR" (zufaellig "gesamt_netto" + "waehrung")
-# faelschlich eine Kopfzeile.
+# faelschlich eine Kopfzeile. Ausnahme: Beschreibung + Betrag (+ hoechstens
+# Kennung/Datum) -- "Bezeichnung | Betrag", "Datum | Text | Betrag"
+# (Hotel-Folio). Solch eine Tabelle hat keine Zeilen-Mathematik und gilt
+# deshalb NUR, wenn ihre Summe zum Netto/Brutto passt (``_validieren``).
 _PFLICHT_SPALTEN = ("beschreibung",)
 _MIN_SPALTEN = 3
+_BETRAGS_SPALTEN = ("gesamt_netto", "einzelpreis_netto")
 
 # Zeilen, die die Tabelle BEENDEN (Summenblock/Bank/Zahlungsbedingungen) --
 # geprueft gegen das LINKE (erste) Wort der Zeile, nicht den ganzen
@@ -56,7 +97,17 @@ _STOP_WOERTER = (
     "skonto", "total", "mwst", "ust", "vat", "tva",
     # englisch (Testsatz "englische Rechnung", Aaron 12.10.2026)
     "net", "amount", "due", "balance", "grandtotal",
+    # Summenblock (Aaron 16.11.2026): "Endsumme" wurde sonst als weitere
+    # Position mitgelesen.
+    "endsumme", "rechnungssumme", "nettowarenwert",
 )
+# Stoppen nur als GANZES erstes Wort UND wenn in der Zeile ein Betrag steht:
+# "Summe 98,30", "Netto 98,30", "Gesamt netto 98,30", "zzgl. 7 % MwSt 6,88"
+# beenden die Tabelle -- eine mehrzeilige Kopfzeile ("Betrag / Netto /
+# EUR"), eine Fortsetzung "zzgl. Pfand" ohne Betrag oder eine Position
+# "Gesamtpaket Wartung" nicht.
+_STOP_MIT_BETRAG = ("summe", "summen", "netto", "brutto", "gesamt",
+                    "zzgl", "zuzgl", "zuzueglich", "abzgl", "abzueglich")
 # Kurze Stoppwoerter ("net", "due", "ust", "bic" ...) gelten nur als GANZES
 # erstes Wort -- sonst beendet eine Position "Netzwerkkabel" oder "Duesenset"
 # die Tabelle (Aaron 05.11.2026: gruendlich statt schnell). Erst ab dieser
@@ -79,15 +130,123 @@ def _match_header_word(text: str, woerterbuch: dict | None = None) -> str | None
     Lieferanten mitgegeben (``woerterbuch``), bei einem bereits gelernten
     Lieferanten bleibt der Aufruf ohne Woerterbuch (dessen eigene Spec
     entscheidet, siehe ``pipeline._tabelle_rangfolge``)."""
+    treffer = _kopfwort(text, woerterbuch)
+    # Kennung ist keine waehlbare Spalte, eine Brutto-Spalte nie ein
+    # Nettopreis-Vorschlag (Raster im UI)
+    if not treffer or treffer[0] == _KENNUNG or treffer[1] == _RANG_BRUTTO:
+        return None
+    return treffer[0]
+
+
+def _kopfwort(text: str, woerterbuch: dict | None = None) -> tuple[str, int] | None:
+    """Kopfwort -> (Spalte, Rang) oder ``None``. Spalte ist eine kanonische
+    Spalte oder ``_KENNUNG`` (eigene Spalte, Inhalt wird verworfen). Reihen-
+    folge: Spaltenwoerterbuch, exaktes Schluesselwort (auch ohne Bindestrich:
+    "E-Preis", "Art.-Nr."), Wortteil ("Preis/Stk." -> Preis), Wortende
+    ("Artikelbezeichnung" -> Beschreibung). Brutto-Spalten nur als letzte
+    Wahl -- "Betrag netto | Betrag brutto" nimmt die Netto-Spalte."""
     n = norm(text)
     if not n:
         return None
     gelernt = _woerterbuch_hinweis(woerterbuch, text)
     if gelernt in _HEADER_HINWEISE:
-        return gelernt
-    for canon, keys in _HEADER_HINWEISE.items():
-        if n in keys:
-            return canon
+        return gelernt, _RANG_EXAKT
+    brutto = "brutto" in n or "gross" in n
+
+    def _exakt(w: str) -> tuple[str, int] | None:
+        if w in _KENNUNG_WOERTER:
+            return _KENNUNG, _RANG_EXAKT
+        for canon, keys in _HEADER_HINWEISE.items():
+            if w in keys:
+                return canon, (_RANG_SCHWACH if w in _SCHWACHE_WOERTER else _RANG_EXAKT)
+        return None
+
+    def _rang(canon: str, rang: int) -> tuple[str, int]:
+        if brutto and canon in _BETRAGS_SPALTEN:
+            return canon, _RANG_BRUTTO
+        return canon, rang
+
+    ganz = n.replace("-", "")
+    t = _exakt(n) or _exakt(ganz)
+    if t:
+        return _rang(*t)
+    teile = [p for p in n.split("-") if p]
+    if len(teile) > 1:
+        # "Preis/Stk." ist ein Preis, "Menge/ME" eine Menge: der erste
+        # Wortteil mit Bedeutung zaehlt. Ein Nummern-Teil ("Kunden-Nr.")
+        # macht daraus eine Kennung, ausser es ist die Positionsnummer.
+        if (any(p in ("nr", "no", "nummer") for p in teile)
+                and (_exakt(teile[0]) or ("", 0))[0] != "pos"):
+            return _KENNUNG, _RANG_WORTTEIL
+        for p in teile:
+            t = _exakt(p)
+            if t:
+                return _rang(t[0], _RANG_WORTTEIL)
+    canon = next((c for endung, c in _WORTENDEN
+                  if len(ganz) > len(endung) and ganz.endswith(endung)), None)
+    # "Gesamtnettopreis"/"Totalpreis" ist die Zeilensumme, kein Einzelpreis
+    if ganz.startswith(("gesamt", "total")) and canon in (None, "einzelpreis_netto"):
+        canon = "gesamt_netto"
+    return _rang(canon, _RANG_WORTENDE) if canon else None
+
+
+def _kopf_labels(line: list[Word]) -> list[list[Word]]:
+    """Woerter einer Kopfzeile -> Spaltenbeschriftungen: Woerter mit
+    normalem Wortabstand gehoeren zu EINER Beschriftung ("Unit price",
+    "Einzelpreis netto", "Betrag EUR"), eine groessere Luecke trennt zwei
+    Spalten."""
+    ordered = sorted(line, key=lambda w: w.x0)
+    luecke = _line_h(line) * 0.6
+    labels: list[list[Word]] = []
+    for w in ordered:
+        if labels and w.x0 - labels[-1][-1].x1 <= luecke:
+            labels[-1].append(w)
+        else:
+            labels.append([w])
+    return labels
+
+
+def _kopf_treffer(line: list[Word], woerterbuch: dict | None = None) -> dict[str, Word] | None:
+    """Sieht die Zeile wie eine Tabellen-Kopfzeile aus? -> Spalte ->
+    Beschriftung (ein Wort ueber die ganze Beschriftung), sonst ``None``.
+    Je Beschriftung zaehlt das Wort mit dem besten Rang (bei Gleichstand das
+    erste: "Einzelpreis netto" ist ein Einzelpreis). Treffen zwei
+    Beschriftungen dieselbe Spalte ("Artikel | Bezeichnung"), gewinnt der
+    bessere Rang; die andere bleibt als Kennungs-Spalte stehen, damit ihr
+    Inhalt nicht in die Nachbarspalte rutscht."""
+    if _hat_betrag(line):
+        return None
+    kandidaten: list[tuple[str, int, Word]] = []
+    for lab in _kopf_labels(line):
+        def _guete(t: tuple[str, int]) -> tuple[bool, int]:
+            return t[0] == _KENNUNG, t[1]
+        best = _kopfwort(" ".join(w.text for w in lab), woerterbuch) if len(lab) > 1 else None
+        for w in lab:
+            t = _kopfwort(w.text, woerterbuch)
+            if t and (best is None or _guete(t) < _guete(best)):
+                best = t
+        if best and best[0] in _BETRAGS_SPALTEN and any(
+                b in norm(w.text) for w in lab for b in ("brutto", "gross", "inkl")):
+            best = best[0], _RANG_BRUTTO
+        if best:
+            span = Word(" ".join(w.text for w in lab), min(w.x0 for w in lab),
+                        max(w.x1 for w in lab), min(w.top for w in lab),
+                        max(w.bottom for w in lab), lab[0].page)
+            kandidaten.append((best[0], best[1], span))
+    matches: dict[str, Word] = {}
+    rang: dict[str, int] = {}
+    extra = 0
+    for canon, r, span in sorted(kandidaten, key=lambda k: (k[1], k[2].x0)):
+        if canon == _KENNUNG or canon in matches:
+            extra += 1
+            matches[f"{_KENNUNG}{extra}"] = span
+            continue
+        matches[canon], rang[canon] = span, r
+    werte = {c for c in matches if not c.startswith("_")}
+    if not all(c in werte for c in _PFLICHT_SPALTEN):
+        return None
+    if len(werte) >= _MIN_SPALTEN or (len(werte) >= 2 and werte & set(_BETRAGS_SPALTEN)):
+        return matches
     return None
 
 
@@ -127,12 +286,8 @@ def _header_candidates(page: Page, woerterbuch: dict | None = None
     line_h = _line_h(page.words)
     out: list[tuple[list[Word], dict[str, Word]]] = []
     for line in _cluster_rows(page.words, line_h):
-        matches: dict[str, Word] = {}
-        for w in line:
-            canon = _match_header_word(w.text, woerterbuch)
-            if canon and canon not in matches:
-                matches[canon] = w
-        if len(matches) >= _MIN_SPALTEN and all(c in matches for c in _PFLICHT_SPALTEN):
+        matches = _kopf_treffer(line, woerterbuch)
+        if matches:
             out.append((line, matches))
     out.sort(key=lambda t: min(w.top for w in t[0]))
     return out
@@ -155,6 +310,8 @@ def _zeile_aus_woertern(line: list[Word], cols: dict[str, tuple[float, float]],
                         page_width: float) -> dict | None:
     rec: dict = {}
     for name, (x0f, x1f) in cols.items():
+        if name.startswith("_"):  # Kennung/Datum/Rabatt: eigene Spalte, nicht uebernommen
+            continue
         x0, x1 = x0f * page_width, x1f * page_width
         cell = sorted((w for w in line if x0 <= w.cx < x1), key=lambda w: w.x0)
         if not cell:
@@ -175,8 +332,11 @@ def _zeile_aus_woertern(line: list[Word], cols: dict[str, tuple[float, float]],
 def _ist_stop(line: list[Word]) -> bool:
     first = min(line, key=lambda w: w.x0)
     fw = norm(first.text)
-    return any(fw == s or (len(s) >= _STOP_PRAEFIX_MIN and fw.startswith(s))
-               for s in _STOP_WOERTER)
+    ganz = fw.replace("-", "")  # "Netto-Betrag" wie "Nettobetrag"
+    if any(f == s or (len(s) >= _STOP_PRAEFIX_MIN and f.startswith(s))
+           for s in _STOP_WOERTER for f in {fw, ganz}):
+        return True
+    return ganz in _STOP_MIT_BETRAG and _hat_betrag(line)
 
 
 def _ist_seitenwechsel_zeile(line: list[Word]) -> bool:
@@ -187,8 +347,7 @@ def _ist_header_zeile(line: list[Word]) -> bool:
     """Wie ``_header_candidates``, aber fuer eine einzelne (schon bekannte)
     Zeile: erkennt die auf Folgeseiten wiederholte Kopfzeile innerhalb eines
     per Rahmen markierten Bereichs (Baustein 2)."""
-    matches = {c for w in line if (c := _match_header_word(w.text))}
-    return len(matches) >= _MIN_SPALTEN and all(c in matches for c in _PFLICHT_SPALTEN)
+    return _kopf_treffer(line) is not None
 
 
 def _ist_positionszeile(rec: dict | None, typisch: set[str]) -> bool:
@@ -347,23 +506,189 @@ def extract(doc: Document, netto: float | None = None, brutto: float | None = No
     Spaltenwoerterbuch (SPEC Baustein 5, ``store.spaltenwoerter()``) als
     zusaetzlicher Hinweis bei einem Lieferanten ohne eigene Spec."""
     page_idxs = pages if pages is not None else list(range(len(doc.pages)))
-    kopf = _finde_kopf(doc, page_idxs, woerterbuch)
-    if kopf is None:
-        return None
-    header_page, header_line, matches = kopf
-    cols = _spalten(matches, doc.pages[header_page].width)
+    # Jede Kopfzeile der Reihe nach probieren, die erste stimmige gilt: eine
+    # Zeile im Anschreiben, die zufaellig wie ein Kopf aussieht ("Leistung
+    # ... Betrag"), darf die echte Tabelle darunter nicht verdecken.
+    for header_page, header_line, matches in _alle_koepfe(doc, page_idxs, woerterbuch):
+        cols = _spalten(matches, doc.pages[header_page].width)
+        gelesen: list[tuple[Page, dict | None]] = []
+        for page, line in _zeilen_unter_kopf(doc, page_idxs, header_page, header_line):
+            if _ist_seitenwechsel_zeile(line):
+                continue
+            gelesen.append((page, _zeile_aus_woertern(line, cols, page.width)))
+        rows_raw = _ohne_briefkopf(gelesen, doc.pages[header_page])
+        items = _ohne_summenzeile(_merge_fortsetzungen(rows_raw))
+        if items:
+            gueltig = _validieren(items, netto, brutto, text)
+            if gueltig:
+                return gueltig
+    return _ohne_kopf(doc, page_idxs, netto, brutto, text)
 
-    gelesen: list[tuple[Page, dict | None]] = []
-    for page, line in _zeilen_unter_kopf(doc, page_idxs, header_page, header_line):
-        if _ist_seitenwechsel_zeile(line):
+
+# ---- Tabelle ohne erkannte Kopfzeile (Aaron 16.11.2026) ------------------
+# Kopf fehlt, ist ein Bild oder hat die Texterkennung verlesen
+# ("Bezeichnurg"): dann der Block aus Betragszeilen ueber dem Summenblock,
+# Spalten aus den Wortluecken, Bedeutung der Spalten NUR aus der Rechnung
+# selbst -- die Zeilensumme muss zum Netto passen (bei Bruttopreisen zum
+# Brutto), Menge x Einzelpreis zum Zeilenbetrag. Ohne bekanntes Netto/Brutto
+# gibt es hier nie eine Tabelle.
+_BETRAG_VOLL = __import__("re").compile(r"^[-+]?\d[\d.,'’]*[.,]\d{2}-?$")
+_STEUER_WOERTER = ("mwst", "ust", "umsatzsteuer", "mehrwertsteuer", "vat", "steuer",
+                   "tax", "tva", "iva")
+
+
+def _ist_betragszeile(line: list[Word]) -> bool:
+    return any(_BETRAG_VOLL.match(w.text.strip()) for w in line)
+
+
+def _betragsbloecke(zeilen: list[list[Word]]):
+    """Laeufe aufeinanderfolgender Betragszeilen (hoechstens zwei Zeilen ohne
+    Betrag dazwischen: mehrzeilige Beschreibung), beendet von Summenblock,
+    Seitenwechsel oder Kopfzeile."""
+    block: list[list[Word]] = []
+    luecke = 0
+    for z in zeilen:
+        trenner = _ist_stop(z) or _ist_seitenwechsel_zeile(z) or _kopf_treffer(z) is not None
+        if not trenner and _ist_betragszeile(z):
+            block.append(z)
+            luecke = 0
             continue
-        gelesen.append((page, _zeile_aus_woertern(line, cols, page.width)))
-    rows_raw = _ohne_briefkopf(gelesen, doc.pages[header_page])
+        if not trenner and block and luecke < 2:
+            block.append(z)
+            luecke += 1
+            continue
+        while block and not _ist_betragszeile(block[-1]):
+            block.pop()
+        if block:
+            yield block
+        block, luecke = [], 0
+    while block and not _ist_betragszeile(block[-1]):
+        block.pop()
+    if block:
+        yield block
 
-    items = _merge_fortsetzungen(rows_raw)
-    if not items:
+
+def _zahl(text: str) -> float | None:
+    if not text or any(ch.isalpha() for ch in text.replace("%", "")):
         return None
-    return _validieren(items, netto, brutto, text)
+    v, ok = coerce(text, "amount")
+    return float(v) if ok else None
+
+
+def _ohne_kopf(doc: Document, page_idxs: list[int], netto: float | None,
+               brutto: float | None, text: str) -> list[dict] | None:
+    if netto is None and brutto is None:
+        return None
+    for i in page_idxs:
+        if not (0 <= i < len(doc.pages)) or not doc.pages[i].words:
+            continue
+        page = doc.pages[i]
+        for block in _betragsbloecke(_cluster_rows(page.words, _line_h(page.words))):
+            items = _block_lesen(block, netto, brutto, text)
+            if items:
+                return items
+    return None
+
+
+def _block_lesen(block: list[list[Word]], netto: float | None, brutto: float | None,
+                 text: str) -> list[dict] | None:
+    betragszeilen = [z for z in block if _ist_betragszeile(z)]
+    alle = [w for z in betragszeilen for w in z]
+    x0, x1 = min(w.x0 for w in alle) - 1, max(w.x1 for w in alle) + 1
+    spalten = _spaltenluecken(alle, x0, x1)
+    if len(spalten) < 2:
+        return None
+    # Positionen: jede Betragszeile beginnt eine, Zeilen ohne Betrag danach
+    # sind ihre Beschreibungs-Fortsetzung.
+    positionen: list[tuple[list[str], list[str]]] = []
+    for z in block:
+        zellen = [_zelltext([z], a, b) for a, b in spalten]
+        if _ist_betragszeile(z):
+            positionen.append((zellen, []))
+        elif positionen:
+            positionen[-1][1].append(" ".join(c for c in zellen if c))
+    n = len(positionen)
+    werte = [[_zahl(p[0][j]) for p in positionen] for j in range(len(spalten))]
+    # Beschreibung: die Spalte mit den meisten Buchstaben -- jede Position
+    # braucht dort Text, sonst ist das keine Positionstabelle.
+    buchstaben = [sum(sum(ch.isalpha() for ch in p[0][j]) for p in positionen)
+                  for j in range(len(spalten))]
+    bj = max(range(len(spalten)), key=lambda j: buchstaben[j])
+    if not buchstaben[bj] or not all(any(ch.isalpha() for ch in p[0][bj]) for p in positionen):
+        return None
+    beschreibungen = [" ".join([p[0][bj]] + p[1]).strip() for p in positionen]
+    if all(any(s in norm(b).split("-") for s in _STEUER_WOERTER) or "%" in b
+           for b in beschreibungen):
+        return None  # USt-Aufstellung, keine Positionen
+    fields: dict = {}
+    if netto is not None:
+        fields["netto"] = FieldResult("netto", netto, str(netto), 1.0, "tabelle")
+    if brutto is not None:
+        fields["brutto"] = FieldResult("brutto", brutto, str(brutto), 1.0, "tabelle")
+    # Zeilenbetrag: von rechts die erste Spalte mit einem Betrag in JEDER
+    # Position, deren Summe zum Netto (bzw. Brutto) passt.
+    for gj in reversed(range(len(spalten))):
+        if gj == bj or not all(_BETRAG_VOLL.match(p[0][gj].strip()) for p in positionen):
+            continue
+        items = [{"beschreibung": b, "gesamt_netto": werte[gj][k]}
+                 for k, b in enumerate(beschreibungen)]
+        if check_line_items_total(fields, items, text).ok is not True:
+            continue
+        # Menge x Einzelpreis: zwei Zahlenspalten, deren Produkt in JEDER
+        # Position den Zeilenbetrag ergibt.
+        paar = next(((a, b) for a in range(len(spalten)) for b in range(a + 1, len(spalten))
+                     if bj not in (a, b) and gj not in (a, b)
+                     and all(werte[a][k] is not None and werte[b][k] is not None
+                             and abs(round(werte[a][k] * werte[b][k], 2) - werte[gj][k]) <= 0.01
+                             for k in range(n))), None)
+        if paar:
+            a, b = paar
+            # Menge ist die Spalte ohne Nachkommastellen, sonst die linke
+            if (all(float(v).is_integer() for v in werte[b])
+                    and not all(float(v).is_integer() for v in werte[a])):
+                a, b = b, a
+            for k, it in enumerate(items):
+                it["menge"], it["einzelpreis_netto"] = werte[a][k], werte[b][k]
+        if n < 2 and not paar:
+            return None  # eine einzelne Zeile nur mit eigener Rechenprobe
+        for k, it in enumerate(items, 1):
+            it["pos"] = k
+            it["_quelle"] = "tabelle_ohne_kopf"
+        return items
+    return None
+
+
+def kopf_spalten(doc: Document, woerterbuch: dict | None = None) -> list[str]:
+    """Spalten der ersten erkannten Kopfzeile (fuer die Diagnose "warum keine
+    Positionen?" in der Bearbeitungsansicht), leer ohne Kopfzeile."""
+    for _i, _line, matches in _alle_koepfe(doc, list(range(len(doc.pages))), woerterbuch):
+        return [c for c in sorted(matches, key=lambda c: matches[c].x0) if not c.startswith("_")]
+    return []
+
+
+def _alle_koepfe(doc: Document, page_idxs: list[int], woerterbuch: dict | None = None):
+    """Alle Kopfzeilen ueber die gegebenen Seiten, seitenweise von oben."""
+    for i in page_idxs:
+        if 0 <= i < len(doc.pages):
+            for header_line, matches in _header_candidates(doc.pages[i], woerterbuch):
+                yield i, header_line, matches
+
+
+def _ohne_summenzeile(items: list[dict]) -> list[dict]:
+    """Letzte "Position" ohne Menge/Einzelpreis, deren Betrag genau die Summe
+    aller vorherigen ist, ist die Summenzeile mit unbekannter Beschriftung
+    ("Positionen gesamt 98,30") -- keine eigene Position."""
+    if len(items) < 3:
+        return items
+    letzte = items[-1]
+    if any(k in letzte for k in ("menge", "einzelpreis_netto")):
+        return items
+    try:
+        betrag = float(letzte.get("gesamt_netto"))
+        vorher = sum(float(it["gesamt_netto"]) for it in items[:-1])
+    except (TypeError, ValueError, KeyError):
+        return items
+    return items[:-1] if abs(betrag - vorher) <= 0.01 * len(items) else items
 
 
 # ---- Tabelle per Rahmen markieren (Aaron 12.10.2026, Baustein 2) ---------

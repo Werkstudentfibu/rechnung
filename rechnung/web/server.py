@@ -379,8 +379,16 @@ def _positionen_grund(doc, line_items, supplier_obj, llm_rejected, store) -> str
         except Exception:  # noqa: BLE001 -- Diagnose darf nie die Ansicht kippen
             gefunden = None
         if gefunden is None:
-            gruende.append("keine Tabelle erkannt (kein Tabellenkopf mit bekannten Spaltenwörtern "
-                           "oder die Zeilen rechnen nicht auf)")
+            try:
+                kopf = tabelle.kopf_spalten(doc, woerterbuch=store.spaltenwoerter())
+            except Exception:  # noqa: BLE001
+                kopf = None
+            if kopf:
+                gruende.append("Tabellenkopf erkannt (" + ", ".join(kopf) + "), aber die Zeilen "
+                               "rechnen nicht auf (Menge × Preis ≠ Betrag bzw. Summe ≠ Netto)")
+            else:
+                gruende.append("kein Tabellenkopf erkannt und keine Betragszeilen, deren Summe "
+                               "zum Netto passt – Tabelle im PDF markieren")
     c = llm()
     if not c.enabled:
         gruende.append("KI ausgeschaltet")
