@@ -11,6 +11,19 @@ from pathlib import Path
 from .store import Store
 
 
+def _cmd_link_mails(args) -> int:
+    """Mails ohne Rechnungsanhang zaehlen (linkmails.py) -- nur lesend,
+    kein Link wird geoeffnet; Ausgabe nur Zahlen und Link-Domains."""
+    from . import linkmails
+
+    b = linkmails.bilanz(Store(args.data))
+    if args.json:
+        print(json.dumps(b.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(linkmails.bericht(b, min_mails=args.min_mails))
+    return 0
+
+
 def _cmd_lernmaterial(args) -> int:
     """Lernmaterial gezielt aus den Postfaechern holen (lernmaterial.py).
     Gibt nur Anzahlen aus, keine Absender oder Inhalte."""
@@ -685,6 +698,14 @@ def main(argv=None) -> int:
     lm.add_argument("--nur-anzeigen", action="store_true", help="nur Auswahl zeigen, nichts holen")
     lm.add_argument("--json", action="store_true")
     lm.set_defaults(func=_cmd_lernmaterial)
+
+    lk = sub.add_parser("link-mails",
+                        help="Mails ohne Rechnungsanhang zaehlen: Download-Link, Portal, kein "
+                             "Link (nur lesend, oeffnet keinen Link)")
+    lk.add_argument("--min-mails", type=int, default=2,
+                    help="Link-Domains erst ab so vielen Mails einzeln zeigen")
+    lk.add_argument("--json", action="store_true")
+    lk.set_defaults(func=_cmd_link_mails)
 
     vb = sub.add_parser("vorbereiten",
                         help="Eingang vorab auslesen (Postfach abholen, falls eingerichtet) -- "
