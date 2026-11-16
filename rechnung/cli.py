@@ -11,6 +11,40 @@ from pathlib import Path
 from .store import Store
 
 
+def _cmd_lernmaterial(args) -> int:
+    """Lernmaterial gezielt aus den Postfaechern holen (lernmaterial.py).
+    Gibt nur Anzahlen aus, keine Absender oder Inhalte."""
+    import os
+
+    from . import lernmaterial
+
+    # abgeholt.json (ingest) liegt im selben Datenordner wie --data
+    os.environ["RECHNUNG_DATA"] = str(Path(args.data))
+    store = Store(args.data)
+    ziel = Path(args.ziel or args.samples)
+    ziel.mkdir(parents=True, exist_ok=True)
+    r = lernmaterial.lauf(store, ziel, neu_scannen=args.neu_scannen, je80=args.je80,
+                          je95=args.je95, nur_anzeigen=args.nur_anzeigen)
+    if args.json:
+        print(json.dumps(r, indent=2, ensure_ascii=False))
+        return 0
+    print(f"Mails mit Anhang (ohne eigene Hotels): {r['mails_mit_anhang']} von {r['absender']} Absendern")
+    print(f"80-%-Gruppe: {r['absender_80']} Absender (je {args.je80}), "
+          f"80-95-%-Gruppe: {r['absender_95'] - r['absender_80']} Absender (je {args.je95})")
+    print(f"schon geholt (angerechnet): {r['schon_geholt']}")
+    print(f"neu ausgewaehlt: {r['ausgewaehlt']} (80 %: {r['holen_80']}, 80-95 %: {r['holen_95']})")
+    if args.nur_anzeigen:
+        print("Nur angezeigt -- nichts geholt (ohne --nur-anzeigen wird geholt).")
+    elif r['ausgewaehlt']:
+        print(f"geholt: {r.get('geholt', 0)} Mails, {r.get('dateien', 0)} Dateien im Eingang ({ziel}), "
+              f"{r.get('mensch', 0)} an Menschliche Bearbeitung, {r.get('fehler', 0)} Fehler"
+              + (f", {r['nicht_eingerichtet']} aus nicht eingerichteten Postfaechern"
+                 if r.get('nicht_eingerichtet') else ""))
+    else:
+        print("Nichts Neues zu holen -- die Auswahl ist schon im Eingang.")
+    return 0
+
+
 def _cmd_fetch(args) -> int:
     """PDF-Anhaenge aus dem IONOS-Postfach in den Inbox-Ordner holen."""
     from .config import imap, inbox_dir
@@ -625,6 +659,18 @@ def main(argv=None) -> int:
     f.add_argument("--limit", type=int, default=0, help="hoechstens N Mails")
     f.add_argument("--json", action="store_true")
     f.set_defaults(func=_cmd_fetch)
+
+    lm = sub.add_parser("lernmaterial",
+                        help="Lernmaterial gezielt aus den Postfaechern holen (80/15-Regel: je 3 "
+                             "Rechnungen der Lieferanten mit 80 %% der Mails, je 1 bis 95 %%)")
+    lm.add_argument("--ziel", help="Eingangsordner (Standard: --samples)")
+    lm.add_argument("--neu-scannen", action="store_true",
+                    help="Postfaecher neu durchsehen (sonst gespeicherter Scan, falls juenger als 7 Tage)")
+    lm.add_argument("--je80", type=int, default=3, help="Rechnungen je Lieferant der 80-%%-Gruppe")
+    lm.add_argument("--je95", type=int, default=1, help="Rechnungen je Lieferant der 80-95-%%-Gruppe")
+    lm.add_argument("--nur-anzeigen", action="store_true", help="nur Auswahl zeigen, nichts holen")
+    lm.add_argument("--json", action="store_true")
+    lm.set_defaults(func=_cmd_lernmaterial)
 
     vb = sub.add_parser("vorbereiten",
                         help="Eingang vorab auslesen (Postfach abholen, falls eingerichtet) -- "
