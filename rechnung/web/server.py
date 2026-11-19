@@ -2354,9 +2354,15 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         import os
         import threading
 
-        from .. import selbstupdate
+        from .. import instanz, selbstupdate
 
-        threading.Timer(0.5, lambda: os._exit(selbstupdate.RESTART_EXIT_CODE)).start()
+        def _ende():
+            # os._exit ueberspringt alle finally-Bloecke: die Programm-Sperre
+            # vorher freigeben, sonst meldet der sofortige Neustart "laeuft bereits"
+            instanz.freigeben()
+            os._exit(selbstupdate.RESTART_EXIT_CODE)
+
+        threading.Timer(0.5, _ende).start()
         return JSONResponse({"ok": True})
 
     @app.post("/api/vorbereiten")

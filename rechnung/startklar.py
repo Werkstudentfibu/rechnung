@@ -15,6 +15,48 @@ def _p(name: str, status: str, detail: str = "", hilfe: str = "") -> dict:
     return {"name": name, "status": status, "detail": detail, "hilfe": hilfe}
 
 
+# Microsoft Edge WebView2 (Programmfenster, pywebview): auf Windows 10/11
+# meist vorhanden, auf Windows Server oft NICHT (Serverbetrieb "Einzelplatz
+# per Remote", Aaron 19.11.2026). Kennung der Evergreen-Laufzeit laut
+# Microsoft-Doku "Detect if a WebView2 Runtime is already installed".
+_WEBVIEW2_ID = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+_WEBVIEW2_SCHLUESSEL = (
+    ("HKLM", r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients" + "\\" + _WEBVIEW2_ID),
+    ("HKLM", r"SOFTWARE\Microsoft\EdgeUpdate\Clients" + "\\" + _WEBVIEW2_ID),
+    ("HKCU", r"Software\Microsoft\EdgeUpdate\Clients" + "\\" + _WEBVIEW2_ID),
+)
+
+
+def _registry_pv(hive: str, pfad: str) -> str:
+    """Wert ``pv`` (installierte Version) eines Registry-Schluessels, sonst ""."""
+    import winreg
+
+    wurzel = winreg.HKEY_LOCAL_MACHINE if hive == "HKLM" else winreg.HKEY_CURRENT_USER
+    try:
+        with winreg.OpenKey(wurzel, pfad) as k:
+            return str(winreg.QueryValueEx(k, "pv")[0] or "")
+    except OSError:
+        return ""
+
+
+def webview2(plattform: str | None = None, lesen=None) -> dict:
+    """Startklar-Zeile "Programmfenster (WebView2)"."""
+    import sys
+
+    name = "Programmfenster (WebView2)"
+    if (plattform or sys.platform) != "win32":
+        return _p(name, AUS, "nur unter Windows nötig")
+    lesen = lesen or _registry_pv
+    for hive, pfad in _WEBVIEW2_SCHLUESSEL:
+        pv = lesen(hive, pfad)
+        if pv and pv != "0.0.0.0":
+            return _p(name, OK, f"Version {pv}")
+    return _p(name, FEHLER, "Microsoft Edge WebView2 nicht installiert – das Programmfenster "
+                            "bleibt leer oder startet nicht",
+              "WebView2-Laufzeit installieren (Microsoft, „Evergreen“) – oder die Oberfläche "
+              "im Browser öffnen: rechnung web")
+
+
 def pruefen(store, samples: Path) -> list[dict]:
     from . import ingest, jobrouter, lernbericht, ocr, selbstupdate, semantic, sicherung
     from .config import gruendlich, jobrouter as jr_cfg, llm as llm_cfg
@@ -89,6 +131,8 @@ def pruefen(store, samples: Path) -> list[dict]:
         out.append(_p("KI-Positionen", OK if llm.line_items else WARN,
                       f"an (Kontext bis {llm.num_ctx})" if llm.line_items else "aus",
                       "" if llm.line_items else "RECHNUNG_LLM_LINE_ITEMS=1 in rechnung.env"))
+
+    out.append(webview2())
 
     frei = shutil.disk_usage(store.root).free / 1e9
     out.append(_p("Speicherplatz", OK if frei > 5 else (WARN if frei > 1 else FEHLER), f"{frei:.1f} GB frei"))

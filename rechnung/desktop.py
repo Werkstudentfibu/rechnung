@@ -40,8 +40,22 @@ def run(store: Store, samples: Path, port: int = 8000,
     import uvicorn
     import webview
 
+    from . import instanz
     from .web.server import create_app
 
+    # Nur EIN Programmfenster je Datenordner (Serverbetrieb per Remote,
+    # Aaron 19.11.2026) -- ein zweiter Start meldet, wer es offen hat.
+    try:
+        sperre = instanz.Sperre(store.root).nehmen()
+    except instanz.LaeuftBereits as e:
+        raise SystemExit(f"FEHLER: {e}") from None
+    try:
+        _run(store, samples, port, title, sperre, uvicorn, webview, create_app)
+    finally:
+        sperre.freigeben()
+
+
+def _run(store, samples, port, title, sperre, uvicorn, webview, create_app) -> None:
     app = create_app(store, Path(samples))
     # Zwischenspeicher fuer den Excel-Import (Befund Aaron 16.10.2026: eingelesene
     # Listen waren nach dem Schliessen weg). Faellt er aus, startet das Programm
@@ -57,6 +71,7 @@ def run(store: Store, samples: Path, port: int = 8000,
     # 09.10.2026: Update installiert, Oberflaeche trotzdem alt. Dann lieber
     # einen freien Port nehmen.
     port = freier_port(port)
+    sperre.port_setzen(port)
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = uvicorn.Server(config)
 
@@ -81,5 +96,9 @@ def run(store: Store, samples: Path, port: int = 8000,
                           maximized=True, text_select=True)
     webview.start()
 
+    # Fenster zu = Sperre frei, sofort -- auch wenn das Beenden des
+    # Hintergrund-Servers noch dauert oder haengt (Befund 09.10.2026: ein
+    # haengengebliebener alter Prozess darf den naechsten Start nie blockieren).
+    sperre.freigeben()
     server.should_exit = True
     thread.join(timeout=2.0)

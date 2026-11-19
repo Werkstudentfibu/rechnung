@@ -628,9 +628,20 @@ def _cmd_web(args) -> int:
 
     from .web.server import create_app
 
-    app = create_app(Store(args.data), Path(args.samples))
-    print(f"Training-UI:  http://127.0.0.1:{args.port}")
-    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+    from . import instanz
+
+    store = Store(args.data)
+    try:
+        sperre = instanz.Sperre(store.root, port=args.port).nehmen()
+    except instanz.LaeuftBereits as e:
+        print(f"FEHLER: {e}")
+        return 3
+    try:
+        app = create_app(store, Path(args.samples))
+        print(f"Training-UI:  http://127.0.0.1:{args.port}")
+        uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+    finally:
+        sperre.freigeben()
     return 0
 
 
