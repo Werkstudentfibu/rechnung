@@ -231,6 +231,8 @@ Nicht Teil dieser Freigabe; wird gesondert vorgelegt. Absehbar nötig:
   Überwachung (Nachtbericht, Logdatei) durch die IT.
 - **Sprachmodell:** auf dem Server ggf. größer bzw. mit Grafikkarte, lokal
   per Ollama oder als OpenAI-kompatibler Modellserver im Firmennetz.
+  Ausgearbeitet für das Modell „Einzelplatz per Remote“ in
+  `IT-FREIGABE-SERVER-EINZELPLATZ.md`, Abschnitt 4.
 - **Firewall-Freigaben:** ausgehend IMAP/TLS zu IONOS, HTTPS zu JobRouter;
   eingehend nur, falls die Oberfläche im Netz erreichbar sein soll.
 
