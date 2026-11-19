@@ -329,3 +329,66 @@ def test_mail_mit_anlage_und_unklarem_anhang_bleibt_bei_mensch(tmp_path, monkeyp
     out = ingest.analyse_mail(msg.as_bytes(), (".pdf",))
     assert out.keine_rechnung is False
     assert ingest.MAIL_OHNE_BELEG_ANHANG in out.human_reason
+
+
+# ---- Aaron 19.11.2026: Signatur-Bilder/Logos und FAQ-Dokumente -------------
+
+def _bild(path: Path, w: int, h: int) -> Path:
+    from PIL import Image
+
+    Image.new("RGB", (w, h), "white").save(path)
+    return path
+
+
+@pytest.mark.parametrize("w,h", [(120, 40), (499, 300), (64, 64)])
+def test_kleines_bild_wird_aussortiert(tmp_path, monkeypatch, w, h):
+    monkeypatch.delenv("RECHNUNG_MENSCHLICH", raising=False)
+    store = Store(tmp_path / "data")
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    p = _bild(inbox / "image001.png", w, h)
+    res = process(p, store, use_llm=False)
+    assert res.status == KEINE_RECHNUNG
+    assert f"{w}x{h}" in res.keine_rechnung["grund"]
+    assert res.sha256
+    out = dispatch(res, store)
+    assert out["aktion"] == "keine_rechnung"
+    assert human.offen(store) == []
+    assert keine_rechnung.offen(store)[0]["beschriftung"] == "Kleines Bild"
+
+
+@pytest.mark.parametrize("w,h", [(500, 300), (1240, 1754), (300, 900)])
+def test_grosses_bild_bleibt_auf_dem_normalen_weg(tmp_path, w, h):
+    assert keine_rechnung.pruefe_kleines_bild(_bild(tmp_path / "scan.png", w, h)) is None
+
+
+def test_kleines_bild_regel_nur_fuer_bilder_und_abschaltbar(tmp_path, monkeypatch):
+    p = make_plain_doc(tmp_path / "a.pdf", titel="Rechnung", zeilen=["x"])
+    assert keine_rechnung.pruefe_kleines_bild(p) is None
+    kaputt = tmp_path / "kaputt.png"
+    kaputt.write_bytes(b"kein bild")
+    assert keine_rechnung.pruefe_kleines_bild(kaputt) is None
+    monkeypatch.setenv("RECHNUNG_KEINE_RECHNUNG_ORDNER", "0")
+    assert keine_rechnung.pruefe_kleines_bild(_bild(tmp_path / "logo.png", 100, 50)) is None
+
+
+@pytest.mark.parametrize("titel", ["FAQ", "Haeufig gestellte Fragen", "Häufige Fragen"])
+def test_faq_wird_aussortiert(tmp_path, titel):
+    p = make_plain_doc(tmp_path / "faq.pdf", titel=titel,
+                       zeilen=["Wie aendere ich meine Lieferadresse?", "Rufen Sie uns an."])
+    kr = keine_rechnung.pruefe_pipeline(pdfmod.load(p), None)
+    assert kr is not None and kr["beschriftung"] == "FAQ"
+
+
+def test_faq_mit_rechnungsmerkmal_bleibt_rechnung(tmp_path):
+    p = make_plain_doc(tmp_path / "faq.pdf", titel="FAQ",
+                       zeilen=["Rechnungsnummer: RE-2026-0042", "Gesamtbetrag 119,00 EUR"])
+    assert keine_rechnung.pruefe_pipeline(pdfmod.load(p), None) is None
+
+
+def test_faq_mit_rechnung_im_titel_bleibt_auf_dem_normalen_weg(tmp_path):
+    """Steht "Rechnung" im Titel, entscheidet die Belegart -- im Zweifel zum
+    Menschen, nie faelschlich aussortiert."""
+    p = make_plain_doc(tmp_path / "faq.pdf", titel="Häufige Fragen zur Rechnung",
+                       zeilen=["Wie aendere ich meine Lieferadresse?"])
+    assert keine_rechnung.pruefe_pipeline(pdfmod.load(p), None) is None

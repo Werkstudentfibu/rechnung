@@ -66,7 +66,9 @@ def test_ocr_disabled_defers_scan_to_human(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("RECHNUNG_OCR_ENABLED", "0")
     monkeypatch.setattr(ocr, "available", lambda: pytest.fail("darf nicht aufgerufen werden"))
     img = tmp_path / "scan.png"
-    Image.new("RGB", (50, 50), "white").save(img)
+    # gross genug fuer einen Beleg -- kleine Bilder (Logo/Signatur) sortiert
+    # keine_rechnung.pruefe_kleines_bild schon vor der Texterkennung aus
+    Image.new("RGB", (1240, 1754), "white").save(img)
     res = process(img, Store(tmp_path / "data"))
     assert res.status == DEFERRED and res.hold_reasons == [ocr.OCR_DISABLED]
     assert [g["art"] for g in human.gruende(res)] == ["ocr"]

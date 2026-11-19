@@ -354,6 +354,37 @@ def _hat_summen_label(text: str) -> bool:
     return summen_aus_kontext(text or "").gefunden
 
 
+# Kleine Bilder (Aaron 19.11.2026: Signatur-Bilder/Logos aus Mails landeten beim
+# Menschen): ist ein Bild-Anhang an seiner LAENGEREN Seite kuerzer als das,
+# kann darauf keine lesbare Rechnung stehen (eine A4-Seite haette dann
+# Schrift von wenigen Pixeln) -- typisch Logo, Signatur, Social-Media-Symbol.
+KLEINES_BILD_PX = 500
+
+
+def pruefe_kleines_bild(path) -> dict | None:
+    """-> ``{"grund", "beschriftung"}`` fuer ein Bild (jpg/png/tif), dessen
+    laengere Seite unter ``KLEINES_BILD_PX`` liegt, sonst ``None``. Laeuft vor
+    der Texterkennung. PDFs, E-Rechnungen und unlesbare Bilder -> ``None``
+    (normaler Weg, im Zweifel zum Menschen)."""
+    from . import ocr
+
+    p = Path(path)
+    if not aktiv() or p.suffix.lower() not in ocr.IMAGE_SUFFIXES:
+        return None
+    try:
+        from PIL import Image
+
+        with Image.open(p) as im:
+            w, h = im.size
+    except Exception:  # noqa: BLE001 -- kaputtes Bild: normaler Weg
+        return None
+    if max(w, h) >= KLEINES_BILD_PX:
+        return None
+    return {"grund": f"Bild nur {w}x{h} Pixel -- zu klein fuer einen lesbaren Beleg "
+                     "(typisch Logo/Signatur aus einer Mail)",
+            "beschriftung": "Kleines Bild"}
+
+
 def pruefe_pipeline(doc, qr) -> dict | None:
     """-> ``{"grund", "beschriftung"}``, wenn dieses Dokument nach
     keine-rechnung/ aussortiert werden soll, sonst ``None``. Nur fuer den

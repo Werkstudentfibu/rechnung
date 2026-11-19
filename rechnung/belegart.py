@@ -90,6 +90,10 @@ ANLAGEN: dict[str, tuple[str, ...]] = {
                "sonderangebot"),
     "Kontoauszug": ("kontoauszug", "bankauszug", "account-statement", "statement-of-account"),
     "Vertrag": ("vertrag", "vertragsunterlagen", "contract", "agreement", "vereinbarung"),
+    # Aaron 19.11.2026 ("Setze alles um"): FAQ-/Hilfe-Dokumente der Lieferanten
+    # landeten beim Menschen statt bei "Keine Rechnung"
+    "FAQ": ("faq", "faqs", "haeufig-gestellte-fragen", "haeufige-fragen",
+            "frequently-asked-questions", "fragen-und-antworten"),
 }
 
 _BEZUG_RE = re.compile(

@@ -1544,6 +1544,15 @@ def _process(path: str | Path, store: Store, use_llm: bool = True,
     if path.suffix.lower() not in (".pdf",) + ocr.IMAGE_SUFFIXES:
         return Result(file=str(path), status=UNSUPPORTED)
 
+    # Kleines Bild (Logo/Signatur aus einer Mail) -> keine Rechnung, ohne erst
+    # die Texterkennung anzuwerfen (keine_rechnung.pruefe_kleines_bild).
+    kr = keine_rechnung.pruefe_kleines_bild(path)
+    if kr is not None:
+        res = Result(file=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                     status=KEINE_RECHNUNG, keine_rechnung=kr)
+        res.stufenzeiten = timer.times
+        return res
+
     # Scans/Bilder: Texterkennung (lokal, Tesseract), danach normal weiter.
     with timer.stage("laden"):
         doc, o = load_document(path, store)
