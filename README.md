@@ -38,6 +38,7 @@ rechnung vorlernen <ordner>          # Altbestand gruppieren, Vorlagen-Vorschlae
 rechnung vorlernen                   # Vorlernen-Gruppen auflisten
 rechnung vorlernen --bestaetigen GRUPPE --operator NAME   # Vorlage einer Gruppe aktivieren
 rechnung testsatz [--json] [--lieferant X] [--variante A] [--ohne-ki]   # bestaetigte Rechnungen neu lesen + messen
+rechnung testsatz --blind [--ohne-ki] [--max N]   # Blindtest: als waere jeder Lieferant neu
 rechnung fehlerstatistik [--json]          # welche Felder bei welchen Lieferanten wie oft korrigiert werden
 ```
 
@@ -657,6 +658,27 @@ das Pseudo-Feld `lieferant` (richtiger Lieferant erkannt). Bericht:
 `data/berichte/testsatz_<datum>_<zeit>.json` mit Vergleich zum letzten Lauf
 gleichen Filters („Schlechter geworden bei: …“). Im Reiter „Qualität“: letzte
 Auswertung + Knopf „Testsatz jetzt prüfen“ (Hintergrund, mit Fortschritt).
+
+**Blindtest** (`rechnung testsatz --blind [--ohne-ki] [--max N]`, Aaron
+19.11.2026): liest jede bestätigte Rechnung so, als wäre ihr Lieferant neu.
+Ausgeblendet sind seine Vorlagen (auch Positionstabelle), sein gelernter
+Kopf-Fingerabdruck, sein Positionsmodus und sein Gedächtnis aus bestätigten
+Rechnungen (`plausi.py`). Stammdaten bleiben; was andere Lieferanten
+beigebracht haben (Layout-Familie, Spaltenwörterbuch, KI), wirkt normal.
+Zusätzlich zur Trefferquote je Feld zeigt der Bericht:
+- Lieferanten im Test, KI an/aus (mit Modell);
+- „komplett richtig“ (Lieferant + Pflichtfelder);
+- wie viele Rechnungen heute ohne Mensch durchgegangen wären;
+- wie viele es ohne den festen KI-Deckel wären, und **davon fehlerhaft**
+  (mit Feldern) – die Grundlage, um über das Lockern zu entscheiden;
+- häufigste Gründe, warum es trotzdem nicht durchging;
+- Trefferquote je Feld nach Herkunft des Werts (KI, Vorlage, E-Rechnung …).
+
+`--ohne-ki` heißt hier „alle Fälle, aber ohne KI“. `--max N` nimmt eine
+Stichprobe reihum über die Lieferanten. Nur gemessen, nichts umgestellt;
+verglichen wird nur mit dem letzten Blindtest. Grenzen: Kopfwörter, die auch
+dieser Lieferant bestätigt hat, bleiben im Spaltenwörterbuch; ein Lieferant,
+der erst aus einer Rechnung als Entwurf entstand, behält deren USt-IdNr/IBAN.
 
 `--variante A|B|C`: Stelle für den geplanten Vergleich A (eine KI-Anfrage,
 heute) / B (Blöcke) / C (Überblick + Blöcke). Gebaut ist nur A; B/C melden

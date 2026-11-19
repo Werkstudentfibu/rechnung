@@ -203,6 +203,10 @@ def _alle(store) -> list[dict]:
 def profil(store, supplier_id: str | None, ausser_sha: str | None = None) -> dict | None:
     if not supplier_id:
         return None
+    # Blindtest (testsatz._BlindStore): dieser Lieferant soll wie neu wirken --
+    # ohne Gedaechtnis aus seinen frueher bestaetigten Rechnungen.
+    if supplier_id in getattr(store, "ohne_gedaechtnis", ()):
+        return None
     recs = [r for r in _alle(store)
             if r.get("supplier_id") == supplier_id and r.get("sha256") != ausser_sha]
     return profil_aus(recs) if recs else None

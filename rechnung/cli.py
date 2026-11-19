@@ -480,7 +480,8 @@ def _cmd_testsatz(args) -> int:
     try:
         b = testsatz.pruefen(store, speichern_=not args.kein_bericht,
                              lieferant=args.lieferant, variante=args.variante,
-                             nur_ohne_ki=args.ohne_ki)
+                             nur_ohne_ki=args.ohne_ki, blind=args.blind,
+                             max_faelle=args.max)
     except (ValueError, NotImplementedError) as e:
         print(f"Fehler: {e}")
         return 2
@@ -863,7 +864,15 @@ def main(argv=None) -> int:
                     help="Extraktionsvariante A (ein Rundum-Prompt) | B (Positionen als "
                          "eigener Block) | C (vorgesehen, noch nicht gebaut)")
     ts.add_argument("--ohne-ki", action="store_true",
-                    help="nur Testfaelle, die ohne KI auskommen (Vorlage/E-Rechnung)")
+                    help="nur Testfaelle, die ohne KI auskommen (Vorlage/E-Rechnung); "
+                         "mit --blind: alle Testfaelle, aber ohne KI lesen")
+    ts.add_argument("--blind", action="store_true",
+                    help="Blindtest: jede Rechnung so lesen, als waere ihr Lieferant neu "
+                         "(eigene Vorlagen/Gedaechtnis ausgeblendet) -- wie gut liest das "
+                         "Programm unbekannte Lieferanten, und waere es ohne Mensch "
+                         "fehlerfrei gewesen?")
+    ts.add_argument("--max", type=int, default=0,
+                    help="hoechstens N Rechnungen, reihum ueber die Lieferanten (0 = alle)")
     ts.add_argument("--kein-bericht", action="store_true",
                     help="Bericht nicht unter <data>/berichte speichern")
     ts.add_argument("--ausgabe", help="Bericht zusaetzlich als JSON in diese Datei schreiben")

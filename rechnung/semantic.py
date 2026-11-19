@@ -205,6 +205,19 @@ Antwort ausschliesslich als JSON-Objekt: {{"feldname": "wert", ...}}. Fehlt ein 
 _avail_cache: tuple[float, bool] | None = None
 _AVAIL_TTL = 30.0
 
+# Fester Konfidenz-Deckel fuer jeden KI-Wert (unter pipeline.CONF_MIN = 0.7):
+# ein Wert, den nur die KI geliefert hat, gilt nie allein als sicher.
+# ``RECHNUNG_LLM_MAX_CONFIDENCE`` kann ihn nur senken, nicht anheben.
+KONFIDENZ_DECKEL = 0.6
+
+
+def ki_konfidenz(cfg=None) -> float:
+    """Konfidenz, die jeder KI-Wert bekommt (eine Stelle fuer ``extract`` und
+    ``extract_full``; der Blindtest im Testsatz erkennt daran Felder, die nur
+    wegen des Deckels als unsicher gelten)."""
+    cfg = cfg or _llm_cfg()
+    return round(min(cfg.max_confidence, KONFIDENZ_DECKEL), 2)
+
 
 def available() -> bool:
     """Ob der Fallback aktiv UND das konfigurierte Ollama erreichbar ist.
@@ -535,8 +548,7 @@ def extract(text: str, field_names: list[str], hints: dict[str, str],
             if rejected is not None:
                 rejected[name] = f"{why}: {val}"
             continue
-        conf = min(cfg.max_confidence, 0.6)
-        out[name] = FieldResult(name, value, str(val), round(conf, 2), "llm")
+        out[name] = FieldResult(name, value, str(val), ki_konfidenz(cfg), "llm")
     return out
 
 
@@ -787,7 +799,7 @@ def _extract_full_once(prompt_text: str, verify_text: str, cfg, schema: dict,
     if parsed is None:
         return res
     data = _validate(parsed, schema, res.rejected)
-    conf = round(min(cfg.max_confidence, 0.6), 2)
+    conf = ki_konfidenz(cfg)
 
     for name, (vtype, _req) in ki_felder().items():
         val = data.get(name)

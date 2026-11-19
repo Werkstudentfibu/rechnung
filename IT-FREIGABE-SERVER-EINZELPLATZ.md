@@ -89,9 +89,11 @@ einer abweichenden Lizenz des Herausgebers. Auf dem Server wird das Modell
 deshalb ausdrücklich in `C:\Rechnung\rechnung.env` gesetzt
 (`RECHNUNG_LLM_ENABLED=1`, `RECHNUNG_LLM_MODEL=…`). Vor der Nutzung prüft die
 IT die Lizenz des gewählten Modells. Ausgewählt wird auf der Test-VM: Für
-jedes Kandidaten-Modell liest `rechnung testsatz` die bereits bestätigten
-Rechnungen neu und vergleicht je Feld, `rechnung messen` misst die Zeit.
-Genommen wird das kleinste Modell, das gut genug liest.
+jedes Kandidaten-Modell liest `rechnung testsatz --blind` die bereits
+bestätigten Rechnungen neu, so als wäre jeder Lieferant neu, und vergleicht
+je Feld; `rechnung messen` misst die Zeit. Genommen wird das kleinste
+Modell, das gut genug liest. Der Test läuft nur lokal und ändert weder
+Rechnungen noch Vorlagen; er legt einen Bericht unter `data\berichte\` ab.
 
 **Alternative:** ein Modellserver der IT im Firmennetz (OpenAI-kompatibel,
 z. B. vLLM, `RECHNUNG_LLM_BACKEND=openai`). Dann gehen Rechnungstexte an

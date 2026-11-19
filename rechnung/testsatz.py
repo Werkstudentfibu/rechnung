@@ -31,13 +31,33 @@ genau das soll gemessen werden.
 Bericht: ``data/berichte/testsatz_<datum>_<zeit>.json`` (mit Uhrzeit, damit
 ein zweiter Lauf am selben Tag den ersten nicht ueberschreibt) und Vergleich
 mit dem letzten Lauf mit gleichem Filter ("schlechter geworden bei: ...").
+
+Blindtest (``blind=True``, Aaron 19.11.2026: "Kann die KI von den angelernten
+Lieferanten auf andere schliessen ... ohne dass ein Mensch drueber schauen
+muss?"): jede Rechnung wird so gelesen, als waere von ihrem Lieferanten noch
+nie eine Rechnung bearbeitet worden (``_BlindStore``): seine Vorlagen samt
+Positionstabelle, sein gelernter Kopf-Fingerabdruck, sein Positionsmodus und
+sein Gedaechtnis aus bestaetigten Rechnungen (plausi.py) sind ausgeblendet.
+Stammdaten (Name, USt-IdNr, IBAN, Rechnungsadressen) bleiben -- sie kaemen bei
+einem neuen Lieferanten aus dem Stammdaten-Import. Was ANDERE Lieferanten
+beigebracht haben, wirkt normal: Layout-Familie, Spaltenwoerterbuch, KI.
+Grenzen: Kopfwoerter, die (auch) bei diesem Lieferanten bestaetigt wurden,
+bleiben im lieferantenuebergreifenden Spaltenwoerterbuch; ein Lieferant, der
+erst aus einer Rechnung als Entwurf entstand, behaelt deren USt-IdNr/IBAN.
+Zusaetzlich je Rechnung: waere sie heute ohne Mensch durchgegangen, und waere
+sie es, wenn KI-Werte nicht gedeckelt waeren (``_ohne_ki_deckel``) -- und war
+sie dann fehlerfrei? Gemessen wird nur, nichts wird umgestellt.
 """
 
 from __future__ import annotations
 
+import copy
+import dataclasses
+import hashlib
 import json
 import re
 import time
+from collections import Counter
 from pathlib import Path
 
 from . import positionen as positionen_mod
@@ -297,6 +317,14 @@ def _wert(res, feld: str):
     return fr.value
 
 
+def _quelle(res, feld: str) -> str | None:
+    """Woher der gelesene Wert kommt (FieldResult.source), None ohne Wert."""
+    fr = (res.fields or {}).get(feld)
+    if fr is None or fr.source == "missing" or fr.value in (None, ""):
+        return None
+    return fr.source
+
+
 def _num(row: dict, key: str) -> float | None:
     return _betrag(row.get(key))
 
@@ -353,7 +381,8 @@ def vergleiche(fall: dict, res) -> dict:
             continue
         ist = _wert(res, feld)
         erg = FEHLT if ist is None else (RICHTIG if gleich(feld, soll, ist) else FALSCH)
-        felder[feld] = {"ergebnis": erg, "soll": soll, "ist": _jsonable(ist)}
+        felder[feld] = {"ergebnis": erg, "soll": soll, "ist": _jsonable(ist),
+                        "quelle": _quelle(res, feld)}
     if fall.get("supplier_id"):
         ist = res.supplier_id
         erg = FEHLT if not ist else (RICHTIG if ist == fall["supplier_id"] else FALSCH)
@@ -377,10 +406,54 @@ class _TrockenStore(Store):
         return {}
 
 
+class _BlindStore(_TrockenStore):
+    """Store fuer den Blindtest: der Lieferant ``verborgen`` wirkt wie einer,
+    von dem noch nie eine Rechnung bearbeitet wurde (siehe Modul-Doku).
+    Liest nur anders, schreibt nichts anderes als ``_TrockenStore``."""
+
+    def __init__(self, root, verborgen: str | None):
+        super().__init__(root)
+        self.verborgen = verborgen
+        # plausi.profil: kein Gedaechtnis aus frueher bestaetigten Rechnungen
+        self.ohne_gedaechtnis = frozenset({verborgen}) if verborgen else frozenset()
+
+    def all_templates(self):
+        return [t for t in super().all_templates() if t.supplier_id != self.verborgen]
+
+    def template(self, tid: str):
+        t = super().template(tid)
+        return None if t is not None and t.supplier_id == self.verborgen else t
+
+    def _alle_lieferanten(self):
+        from .identify import POSITIONSMODUS_EINZELN
+
+        return [dataclasses.replace(s, fingerprint=[], positionsmodus=POSITIONSMODUS_EINZELN,
+                                    positionsmodus_gesetzt=False)
+                if s.id == self.verborgen else s
+                for s in super()._alle_lieferanten()]
+
+
+# sha256 -> Lieferant des Testfalls, je Datenordner (der Arbeitsprozess
+# bekommt nur den Pfad; neu aufgebaut, sobald eine sha fehlt)
+_LIEFERANT_JE_SHA: dict[str, dict[str, str | None]] = {}
+
+
+def _lieferant_des_falls(root, path) -> str | None:
+    sha = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    key = str(root)
+    m = _LIEFERANT_JE_SHA.get(key)
+    if m is None or sha not in m:
+        m = {f["sha256"]: f.get("supplier_id") for f in bestaetigte(Store(root))}
+        _LIEFERANT_JE_SHA[key] = m
+    return m.get(sha)
+
+
 def verarbeiten_trocken(path, store, use_llm: bool = True,
-                        create_draft_supplier: bool = False, variante: str = "A"):
+                        create_draft_supplier: bool = False, variante: str = "A",
+                        blind: bool = False):
     """Guard-Ziel (``guard.Guard(target=...)``): ``pipeline.process`` ohne
-    Korrekturen und nie mit Lieferanten-Entwurf."""
+    Korrekturen und nie mit Lieferanten-Entwurf. ``blind``: ohne das, was
+    das Programm vom Lieferanten dieser Rechnung gelernt hat (Blindtest)."""
     from . import semantic
     from .pipeline import process
 
@@ -389,8 +462,9 @@ def verarbeiten_trocken(path, store, use_llm: bool = True,
     # sich die Anfrage (neuer Prompt, andere Variante), ist es ein neuer
     # Schluessel und das Modell liest neu.
     semantic.set_cache_dir(Path(store.root) / "ki-cache")
-    return process(path, _TrockenStore(store.root), use_llm=use_llm,
-                   create_draft_supplier=False, variante=variante)
+    st = (_BlindStore(store.root, _lieferant_des_falls(store.root, path)) if blind
+          else _TrockenStore(store.root))
+    return process(path, st, use_llm=use_llm, create_draft_supplier=False, variante=variante)
 
 
 TARGET = "rechnung.testsatz:verarbeiten_trocken"
@@ -419,20 +493,45 @@ def _summe(faelle_out: list[dict]) -> tuple[dict, dict, float | None]:
     return dict(sorted(felder.items())), pos, _quote(r_all, n_all)
 
 
+def _verteilt(todo: list[dict], max_faelle: int) -> list[dict]:
+    """Hoechstens ``max_faelle`` Testfaelle, reihum ueber die Lieferanten
+    (erst je Lieferant einer, dann der zweite ...) -- eine Stichprobe soll
+    moeglichst viele verschiedene Lieferanten enthalten."""
+    gruppen: dict[str, list[dict]] = {}
+    for f in todo:
+        gruppen.setdefault(f.get("supplier_id") or "", []).append(f)
+    out: list[dict] = []
+    runde = 0
+    while len(out) < max_faelle and any(len(g) > runde for g in gruppen.values()):
+        for g in gruppen.values():
+            if runde < len(g) and len(out) < max_faelle:
+                out.append(g[runde])
+        runde += 1
+    return out
+
+
 def laufen(store: Store, lieferant: str | None = None, variante: str = "A",
-           nur_ohne_ki: bool = False, fortschritt=None, guard=None) -> dict:
+           nur_ohne_ki: bool = False, fortschritt=None, guard=None,
+           blind: bool = False, max_faelle: int = 0) -> dict:
     """Alle Testfaelle im Trockenlauf verarbeiten und vergleichen.
     ``fortschritt(fertig, gesamt, datei)`` wird je Rechnung aufgerufen
-    (Hintergrundlauf im UI). Speichert nichts -- siehe ``speichern``."""
+    (Hintergrundlauf im UI). Speichert nichts -- siehe ``speichern``.
+
+    ``blind``: Blindtest (siehe Modul-Doku); ``nur_ohne_ki`` heisst dann
+    "alle Testfaelle, aber ohne KI lesen" (misst, was ohne KI von anderen
+    Lieferanten uebertragen wird). ``max_faelle``: Stichprobe reihum ueber
+    die Lieferanten (0 = alle)."""
     from .guard import Guard
     from .semantic import pruefe_variante
 
     variante = pruefe_variante(variante)
-    todo, skip = faelle(store, lieferant, nur_ohne_ki)
+    todo, skip = faelle(store, lieferant, nur_ohne_ki and not blind)
+    if max_faelle and max_faelle > 0:
+        todo = _verteilt(todo, max_faelle)
     t0 = time.monotonic()
     own = guard is None
-    guard = guard or Guard(store.root, target=TARGET, extra={"variante": variante},
-                           protokoll=False)
+    extra = {"variante": variante, **({"blind": True} if blind else {})}
+    guard = guard or Guard(store.root, target=TARGET, extra=extra, protokoll=False)
     out = []
     try:
         for i, fall in enumerate(todo):
@@ -443,7 +542,7 @@ def laufen(store: Store, lieferant: str | None = None, variante: str = "A",
             use_llm = not nur_ohne_ki
             res = guard.process(fall["_pfad"], use_llm=use_llm)
             v = vergleiche(fall, res)
-            out.append({
+            eintrag = {
                 "sha256": fall["sha256"], "datei": fall.get("datei"),
                 "lieferant": fall.get("supplier_id"),
                 "lieferant_name": fall.get("supplier_name") or "",
@@ -452,18 +551,28 @@ def laufen(store: Store, lieferant: str | None = None, variante: str = "A",
                 "hergeleitet": bool(fall.get("hergeleitet")),
                 "dauer_s": res.duration_s, "abgebrochen": res.aborted,
                 **v,
-            })
+            }
+            if blind:
+                eintrag.update(_blind_bewertung(res, v))
+            out.append(eintrag)
     finally:
         if own:
             guard.close()
     if fortschritt:
         fortschritt(len(todo), len(todo), "")
     felder, pos, quote = _summe(out)
-    return {
-        "art": "testsatz",
+    filt = {"lieferant": lieferant or None, "variante": variante,
+            "nur_ohne_ki": bool(nur_ohne_ki)}
+    # nur gesetzt, wenn benutzt -- sonst passt der Filter alter Berichte nicht
+    # mehr und der Vergleich mit dem letzten Lauf ginge verloren
+    if blind:
+        filt["blind"] = True
+    if max_faelle and max_faelle > 0:
+        filt["max"] = int(max_faelle)
+    bericht = {
+        "art": "blindtest" if blind else "testsatz",
         "erstellt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "filter": {"lieferant": lieferant or None, "variante": variante,
-                   "nur_ohne_ki": bool(nur_ohne_ki)},
+        "filter": filt,
         "anzahl": len(out),
         "uebersprungen": skip,
         "trefferquote": quote,
@@ -474,6 +583,136 @@ def laufen(store: Store, lieferant: str | None = None, variante: str = "A",
         "dauer_gesamt_s": round(time.monotonic() - t0, 2),
         "faelle": out,
     }
+    if blind:
+        bericht["blind"] = _blind_summe(out, ki=_ki_stand(use_llm=not nur_ohne_ki))
+    return bericht
+
+
+# ---- Blindtest: waere die Rechnung ohne Mensch durchgegangen? --------------
+
+PFLICHTFELDER = tuple(n for n, (_t, req) in STANDARD_FIELDS.items() if req)
+
+# Anzeige der Herkunft eines Werts (FieldResult.source)
+QUELLEN_TEXT = {"template-anchor": "Vorlage", "template-abs": "Vorlage", "llm": "KI",
+                "xml": "E-Rechnung", "einvoice": "E-Rechnung", "summen": "Betragsherleitung",
+                "tabelle": "Tabelle", "manual": "Hand", "library": "Stammdaten"}
+
+
+def _ki_stand(use_llm: bool) -> dict:
+    """War die KI in diesem Lauf an und erreichbar? (fuer die Deutung)"""
+    from . import semantic
+    from .config import llm
+
+    an = bool(use_llm) and semantic.available()
+    return {"aktiv": an, "modell": llm().model if an else None}
+
+
+def _ohne_ki_deckel(res):
+    """Kopie des Ergebnisses, in der KI-Werte nicht mehr nur wegen des festen
+    Deckels (semantic.ki_konfidenz) als unsicher gelten. Werte, deren
+    Konfidenz aus einem anderen Grund niedriger ist (z.B. unsicher erkannte
+    Woerter im Scan), bleiben unsicher; Pruefungen bleiben, wie sie sind."""
+    from .pipeline import CONF_MIN
+    from .semantic import ki_konfidenz
+
+    deckel = ki_konfidenz()
+    kopie = copy.copy(res)
+    kopie.fields = {
+        n: (dataclasses.replace(fr, confidence=max(fr.confidence, CONF_MIN))
+            if fr.source == "llm" and abs(fr.confidence - deckel) < 1e-6 else fr)
+        for n, fr in (res.fields or {}).items()}
+    return kopie
+
+
+def _blind_bewertung(res, v: dict) -> dict:
+    """Je Rechnung: komplett richtig? waere sie heute / ohne KI-Deckel ohne
+    Mensch durchgegangen? welche Felder waren falsch?"""
+    from . import human
+
+    felder = v["felder"]
+    pflicht = [f for f in (*PFLICHTFELDER, FELD_LIEFERANT) if f in felder]
+    pos = v["positionen"]
+    ok = not res.aborted
+    gruende = [g["grund"] for g in human.gruende(_ohne_ki_deckel(res))] if ok else ["abgebrochen"]
+    return {
+        "komplett_richtig": bool(pflicht) and all(felder[f]["ergebnis"] == RICHTIG
+                                                  for f in pflicht),
+        "falsche_felder": sorted(f for f, x in felder.items() if x["ergebnis"] == FALSCH),
+        "sicher_heute": ok and human.ist_sicher(res),
+        "sicher_ohne_ki_deckel": ok and not gruende,
+        "gruende_ohne_ki_deckel": gruende,
+        "positionen_abweichend": bool(pos["soll"]) and pos["korrekt"] < pos["soll"],
+    }
+
+
+def _blind_summe(out: list[dict], ki: dict) -> dict:
+    n = len(out)
+    komplett = sum(1 for f in out if f["komplett_richtig"])
+    heute = [f for f in out if f["sicher_heute"]]
+    ohne = [f for f in out if f["sicher_ohne_ki_deckel"]]
+    fehlerhaft = [f for f in ohne if f["falsche_felder"]]
+    # Trefferquote je Feld und Herkunft des Werts
+    nach_quelle: dict[str, dict[str, dict]] = {}
+    for f in out:
+        for feld, x in f["felder"].items():
+            q = x.get("quelle")
+            if not q:
+                continue
+            row = nach_quelle.setdefault(feld, {}).setdefault(q, {RICHTIG: 0, FALSCH: 0})
+            if x["ergebnis"] in row:
+                row[x["ergebnis"]] += 1
+    for feld in nach_quelle.values():
+        for row in feld.values():
+            row["quote"] = _quote(row[RICHTIG], row[RICHTIG] + row[FALSCH])
+    # Warum ging es trotz fehlendem Deckel nicht durch? (haeufigste Gruende)
+    gruende = Counter(re.sub(r"\s*\(.*$", "", g) for f in out if not f["sicher_ohne_ki_deckel"]
+                      for g in f.get("gruende_ohne_ki_deckel") or [])
+    return {
+        "ki": ki,
+        "lieferanten": len({f["lieferant"] for f in out if f.get("lieferant")}),
+        "komplett_richtig": komplett,
+        "komplett_quote": _quote(komplett, n),
+        "sicher_heute": len(heute),
+        "sicher_heute_fehlerhaft": sum(1 for f in heute if f["falsche_felder"]),
+        "sicher_ohne_ki_deckel": len(ohne),
+        "davon_fehlerhaft": len(fehlerhaft),
+        "fehler_felder": dict(Counter(x for f in fehlerhaft
+                                      for x in f["falsche_felder"]).most_common()),
+        "davon_positionen_abweichend": sum(1 for f in ohne if f["positionen_abweichend"]),
+        "nicht_durch_gruende": dict(gruende.most_common(8)),
+        "nach_quelle": dict(sorted(nach_quelle.items())),
+    }
+
+
+def _blind_text(bl: dict, n: int) -> list[str]:
+    ki = bl.get("ki") or {}
+    lines = [f"  Lieferanten im Test: {bl['lieferanten']}",
+             (f"  KI: an ({ki.get('modell')})" if ki.get("aktiv") else
+              "  KI: aus -- gemessen wird nur, was ohne KI von anderen Lieferanten "
+              "uebertragen wird")]
+    q = bl.get("komplett_quote")
+    lines.append(f"  Komplett richtig (Lieferant + Pflichtfelder): {bl['komplett_richtig']} von {n}"
+                 + (f" ({q:.1f} %)" if q is not None else ""))
+    lines.append(f"  Waeren heute ohne Mensch durchgegangen: {bl['sicher_heute']}"
+                 f" (davon fehlerhaft: {bl['sicher_heute_fehlerhaft']})")
+    fehl = ", ".join(f"{k} {v}" for k, v in bl["fehler_felder"].items())
+    lines.append(f"  Waeren ohne KI-Deckel durchgegangen: {bl['sicher_ohne_ki_deckel']}, "
+                 f"davon fehlerhaft: {bl['davon_fehlerhaft']}" + (f" ({fehl})" if fehl else ""))
+    if bl.get("davon_positionen_abweichend"):
+        lines.append(f"    davon mit abweichenden Positionen: {bl['davon_positionen_abweichend']}")
+    if bl.get("nicht_durch_gruende"):
+        lines.append("  Haeufigste Gruende, warum es trotzdem nicht durchging:")
+        lines.extend(f"    {anz:4d}  {g}" for g, anz in bl["nicht_durch_gruende"].items())
+    if bl.get("nach_quelle"):
+        lines.append("  Trefferquote nach Herkunft des Werts:")
+        for feld, quellen in bl["nach_quelle"].items():
+            teile = []
+            for qn, row in sorted(quellen.items(), key=lambda kv: -(kv[1][RICHTIG] + kv[1][FALSCH])):
+                ges = row[RICHTIG] + row[FALSCH]
+                teile.append(f"{QUELLEN_TEXT.get(qn, qn)} {row[RICHTIG]}/{ges}"
+                             + (f" ({row['quote']:.0f} %)" if row["quote"] is not None else ""))
+            lines.append(f"    {feld:18s} " + ", ".join(teile))
+    return lines
 
 
 # ---- Berichte speichern/vergleichen ----------------------------------------
@@ -484,10 +723,14 @@ def _berichte(root: Path) -> list[Path]:
 
 
 def letzter_bericht(root: str | Path, filter_: dict | None = None) -> dict | None:
-    """Juengster gespeicherter Lauf (mit gleichem Filter, falls angegeben)."""
+    """Juengster gespeicherter Lauf (mit gleichem Filter, falls angegeben).
+    Ohne Filter (Anzeige "letzter Testsatz" im Programm) zaehlen Blindtests
+    nicht -- sie messen etwas anderes und haben eine eigene Trefferquote."""
     for p in reversed(_berichte(Path(root))):
         b = _read_json_safe(p, None)
         if not isinstance(b, dict):
+            continue
+        if filter_ is None and (b.get("filter") or {}).get("blind"):
             continue
         if filter_ is not None and b.get("filter") != filter_:
             continue
@@ -553,12 +796,16 @@ def text(b: dict) -> str:
     """Kurzbericht fuer die Kommandozeile."""
     lines = []
     flt = b.get("filter") or {}
+    blind = bool(flt.get("blind"))
     tag = ", ".join(x for x in (
         f"Lieferant {flt['lieferant']}" if flt.get("lieferant") else "",
         f"Variante {flt.get('variante')}",
-        "nur ohne KI" if flt.get("nur_ohne_ki") else "") if x)
+        ("ohne KI" if blind else "nur ohne KI") if flt.get("nur_ohne_ki") else "",
+        f"Stichprobe {flt['max']}" if flt.get("max") else "") if x)
     q = b.get("trefferquote")
-    lines.append(f"Testsatz ({tag}): {b['anzahl']} Rechnung(en), Trefferquote "
+    titel = ("Blindtest -- jeder Lieferant so gelesen, als waere er neu" if blind
+             else "Testsatz")
+    lines.append(f"{titel} ({tag}): {b['anzahl']} Rechnung(en), Trefferquote "
                  + (f"{q:.1f} %" if q is not None else "-"))
     for feld, r in b.get("felder", {}).items():
         lines.append(f"  {feld:18s} richtig {r[RICHTIG]:3d}  falsch {r[FALSCH]:3d}  "
@@ -574,6 +821,8 @@ def text(b: dict) -> str:
                      f"Max {z['max']:.1f} s")
     if b.get("abgebrochen"):
         lines.append(f"  {b['abgebrochen']} Rechnung(en) abgebrochen (Zeitgrenze/Fehler)")
+    if b.get("blind"):
+        lines.extend(_blind_text(b["blind"], b["anzahl"]))
     for s in b.get("uebersprungen") or []:
         lines.append(f"  uebersprungen {s.get('datei')}: {s['grund']}")
     v = b.get("vergleich") or {}
