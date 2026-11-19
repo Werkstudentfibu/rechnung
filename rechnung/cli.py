@@ -24,6 +24,59 @@ def _cmd_link_mails(args) -> int:
     return 0
 
 
+def _cmd_link_abruf(args) -> int:
+    """Rechnungen hinter Links holen (linkabruf.py). Schalter
+    RECHNUNG_LINK_ABRUF=aus (Standard): nur zeigen, was geholt wuerde --
+    kein Link wird geoeffnet."""
+    from . import linkabruf
+
+    store = Store(args.data)
+    ziel = Path(args.ziel or args.samples)
+    r = linkabruf.lauf(store, ziel, max_je_lauf=args.max)
+    if args.json:
+        print(json.dumps(r, indent=2, ensure_ascii=False))
+        return 0
+    an = r["modus"] == linkabruf.MODUS_AN
+    print(f"Link-Abruf: {'AN' if an else 'AUS (nur Probelauf, kein Link wird geoeffnet)'}")
+    print(f"Mails ohne Rechnungsanhang: {r['mails']}")
+    for grund, n in sorted(r["uebersprungen"].items(), key=lambda kv: -kv[1]):
+        print(f"  nicht geholt: {grund}: {n}")
+    print(f"ausgewaehlt: {r['kandidaten']}" if an else f"wuerde geholt: {r['kandidaten']}")
+    for k in r["liste"]:
+        print(f"  {k['lieferant']}  ({k['domain']})  {k['datei']}")
+    if an:
+        print(f"geholt: {r['geholt']}, schon im Eingang: {r['schon_da']}")
+        for grund, n in r["fehler"].items():
+            print(f"  Fehler: {grund}: {n}")
+    else:
+        print("Einschalten erst nach Freigabe durch die IT (RECHNUNG_LINK_ABRUF=an, siehe "
+              "IT-FREIGABE-AENDERUNG-LINKABRUF.md).")
+    return 0
+
+
+def _cmd_link_freigabe(args) -> int:
+    """Link-Domains je Lieferant freigeben/entziehen/anzeigen."""
+    from . import linkabruf
+
+    store = Store(args.data)
+    if args.lieferant and args.domain:
+        try:
+            linkabruf.freigeben(store, args.lieferant, args.domain, entfernen=args.entfernen)
+        except ValueError as e:
+            print(f"Fehler: {e}")
+            return 2
+    elif args.lieferant or args.domain:
+        print("Bitte --lieferant UND --domain angeben.")
+        return 2
+    alle = linkabruf.freigaben(store)
+    if not alle:
+        print("Keine Link-Freigaben.")
+    for lid, domains in sorted(alle.items()):
+        s = store.supplier(lid)
+        print(f"{lid}  {s.name if s else '(Lieferant fehlt)'}: {', '.join(domains)}")
+    return 0
+
+
 def _cmd_lernmaterial(args) -> int:
     """Lernmaterial gezielt aus den Postfaechern holen (lernmaterial.py).
     Gibt nur Anzahlen aus, keine Absender oder Inhalte."""
@@ -706,6 +759,21 @@ def main(argv=None) -> int:
                     help="Link-Domains erst ab so vielen Mails einzeln zeigen")
     lk.add_argument("--json", action="store_true")
     lk.set_defaults(func=_cmd_link_mails)
+
+    la = sub.add_parser("link-abruf",
+                        help="Rechnungen hinter Links holen -- solange RECHNUNG_LINK_ABRUF nicht "
+                             "'an' ist, nur Probelauf (kein Link wird geoeffnet)")
+    la.add_argument("--ziel", help="Eingangsordner (Standard: --samples)")
+    la.add_argument("--max", type=int, default=20, help="hoechstens so viele Abrufe je Lauf")
+    la.add_argument("--json", action="store_true")
+    la.set_defaults(func=_cmd_link_abruf)
+
+    lf = sub.add_parser("link-freigabe",
+                        help="Link-Domain fuer einen Lieferanten freigeben (ohne Angaben: anzeigen)")
+    lf.add_argument("--lieferant", help="Lieferanten-ID (siehe 'rechnung suppliers')")
+    lf.add_argument("--domain", help="z.B. rechnung.lieferant.de")
+    lf.add_argument("--entfernen", action="store_true", help="Freigabe entziehen")
+    lf.set_defaults(func=_cmd_link_freigabe)
 
     vb = sub.add_parser("vorbereiten",
                         help="Eingang vorab auslesen (Postfach abholen, falls eingerichtet) -- "
