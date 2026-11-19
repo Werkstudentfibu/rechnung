@@ -137,6 +137,31 @@ Training-UI, bevor sie archiviert, geloggt oder an JobRouter weitergereicht
 wird. Automatisch ist nur die Vorbefüllung/Kategorie-Vorschläge – der Mensch
 drückt immer noch den Knopf und kann davor jederzeit korrigieren.
 
+## Vorbereiten und Leerlauf-Arbeit
+
+`rechnung vorbereiten` (geplante Aufgabe, tagsüber alle 30 Minuten, nachts
+stündlich) holt die Postfächer ab und liest neue Rechnungen vorab
+(Texterkennung, KI) – nichts wird bestätigt, gesendet oder gelernt.
+
+Wartet danach nichts mehr, folgt die **Leerlauf-Arbeit** (`leerlauf.py`,
+Aaron 19.11.2026), standardmäßig nur nachts:
+1. **Offene Rechnungen neu lesen**, wenn sich der Lernstand seit ihrer
+   Vorbereitung geändert hat (Vorlagen, Spaltenwörterbuch, Stammdaten,
+   Rechnungsadressen, bestätigte Rechnungen) – morgens zeigt die Liste, was
+   die Bestätigungen vom Vortag gebracht haben.
+2. **Blindtest in Etappen**, wenn der letzte vollständige älter als 7 Tage
+   ist: Stand nach jeder Rechnung in `data/leerlauf/`, der nächste
+   Durchgang macht weiter; fertig ergibt das einen normalen Blindtest-Bericht.
+   Der Nachtbericht (`rechnung nacht`) zeigt das Ergebnis samt Vergleich.
+
+Nur lesen und messen – nie bestätigen, senden, freigeben oder lernen. Neue
+Rechnungen haben Vorrang: vor jeder Rechnung wird geprüft, ob im Eingang
+etwas Neues wartet. Einstellungen: `RECHNUNG_LEERLAUF` (Stunden `20-6`,
+`immer` oder `aus`), `RECHNUNG_LEERLAUF_MINUTEN` (Zeitfenster je Durchgang,
+Standard 40 – kürzer als der Takt der Aufgabe), `RECHNUNG_LEERLAUF_BLINDTEST_TAGE`
+(Standard 7, `0` = aus), `RECHNUNG_LEERLAUF_BLINDTEST_MAX` (Stichprobe, Standard
+alle). `rechnung vorbereiten --ohne-leerlauf` lässt sie weg.
+
 ## Betriebsmodus: Testphase → Autonomie
 
 Programmweit, bewusst schlank – jede Rechnung wird in JobRouter ohnehin noch

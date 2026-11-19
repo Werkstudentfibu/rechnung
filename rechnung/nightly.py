@@ -182,6 +182,15 @@ def betrieb(store) -> dict:
                 keine_rechnung_offen=len(keine_rechnung.offen(store)))
 
 
+def _leerlauf_bericht(store) -> dict:
+    from . import leerlauf
+
+    try:
+        return leerlauf.bericht(store)
+    except Exception as e:  # noqa: BLE001 -- der Nachtbericht darf daran nicht scheitern
+        return {"fehler": f"{type(e).__name__}: {e}"}
+
+
 def _write_report(store, bericht: dict) -> Path:
     out_dir = store.root / "berichte"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -219,6 +228,8 @@ def run_nightly(store, samples: str | Path | None = None,
             "tagesbericht": tagesbericht(store, samples),
             "betrieb": betrieb(store),
             "gesundheit": health_checks(store),
+            # Leerlauf-Arbeit (leerlauf.py): Neu-Lesen, Blindtest in Etappen
+            "leerlauf": _leerlauf_bericht(store),
         }
         bericht["dauer_s"] = round(time.monotonic() - t0, 2)
         out = _write_report(store, bericht)

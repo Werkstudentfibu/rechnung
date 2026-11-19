@@ -473,13 +473,16 @@ ZEITGRENZE_S = 600
 
 
 def vorbereiten_lauf(store, samples, *, abholen: bool = True, zeitgrenze: float = ZEITGRENZE_S,
-                     erneut: bool = False, max_dateien: int = 0, melde=lambda text: None) -> dict:
+                     erneut: bool = False, max_dateien: int = 0, melde=lambda text: None,
+                     leerlauf: bool = True) -> dict:
     """Alles im Eingang vorab auslesen -- ohne offenes Programmfenster. Gleicher
     Codepfad und gleiche Caches wie der Hintergrund-Thread (``vorbereite_datei``),
     eine Datei nach der anderen, Zeitgrenze je Datei. Ein zweiter Lauf
     (Aufgabenplanung alle 30 Minuten) bricht sofort ab, solange einer arbeitet;
     Dateien, die das Fenster gerade vorbereitet, werden uebersprungen.
-    Es wird nichts bestaetigt, gesendet oder gelernt."""
+    Es wird nichts bestaetigt, gesendet oder gelernt. ``leerlauf``: danach,
+    wenn nichts mehr wartet, die Leerlauf-Arbeit (leerlauf.py: offene
+    Rechnungen mit neuem Lernstand neu lesen, Blindtest in Etappen)."""
     from . import semantic, split
     from .guard import Guard
     from .pipeline import invoice_files
@@ -487,7 +490,7 @@ def vorbereiten_lauf(store, samples, *, abholen: bool = True, zeitgrenze: float 
     samples = Path(samples)
     root = store.root
     bericht = {"abgeholt": 0, "abhol_fehler": "", "bereit": 0, "schon_fertig": 0, "belegt": 0,
-               "fehler": [], "dateien": 0, "uebersprungen_laeuft": False}
+               "fehler": [], "dateien": 0, "uebersprungen_laeuft": False, "leerlauf": None}
     with datei_sperre(root, LAUF_SPERRE, alt_nach_s=SPERRE_ALT_S) as frei:
         if not frei:
             bericht["uebersprungen_laeuft"] = True
@@ -536,5 +539,14 @@ def vorbereiten_lauf(store, samples, *, abholen: bool = True, zeitgrenze: float 
                 bericht["fehler"].append(f"{p.name}: {r['fehler']}")
                 gemacht += 1
                 melde(f"{p.name}: FEHLER {r['fehler']}")
+        if leerlauf:
+            from . import leerlauf as leerlauf_mod
+
+            try:
+                bericht["leerlauf"] = leerlauf_mod.laufen(store, samples, melde=melde,
+                                                         guard=guard)
+            except Exception as e:  # noqa: BLE001 -- Leerlauf darf das Vorbereiten nie stoeren
+                bericht["leerlauf"] = {"gelaufen": False, "grund": f"Fehler: {e}"}
+                melde(f"Leerlauf: Fehler {type(e).__name__}: {e}")
         aufraeumen(root)
     return bericht

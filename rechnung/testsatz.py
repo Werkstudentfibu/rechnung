@@ -510,6 +510,61 @@ def _verteilt(todo: list[dict], max_faelle: int) -> list[dict]:
     return out
 
 
+def _eintrag(fall: dict, res, blind: bool) -> dict:
+    """Ergebnis EINES Testfalls (Vergleich + bei Blindtest die Bewertung)."""
+    v = vergleiche(fall, res)
+    eintrag = {
+        "sha256": fall["sha256"], "datei": fall.get("datei"),
+        "lieferant": fall.get("supplier_id"),
+        "lieferant_name": fall.get("supplier_name") or "",
+        "extraktion_soll": fall.get("extraktion"),
+        "extraktion_ist": res.extraction,
+        "hergeleitet": bool(fall.get("hergeleitet")),
+        "dauer_s": res.duration_s, "abgebrochen": res.aborted,
+        **v,
+    }
+    if blind:
+        eintrag.update(_blind_bewertung(res, v))
+    return eintrag
+
+
+def _filter(lieferant, variante: str, nur_ohne_ki: bool, blind: bool, max_faelle: int,
+            ki_aktiv: bool | None = None) -> dict:
+    filt = {"lieferant": lieferant or None, "variante": variante,
+            "nur_ohne_ki": bool(nur_ohne_ki)}
+    # nur gesetzt, wenn benutzt -- sonst passt der Filter alter Berichte nicht
+    # mehr und der Vergleich mit dem letzten Lauf ginge verloren
+    if blind:
+        filt["blind"] = True
+        # Blindtest mit und ohne KI sind nicht vergleichbar
+        filt["ki"] = bool(ki_aktiv)
+    if max_faelle and max_faelle > 0:
+        filt["max"] = int(max_faelle)
+    return filt
+
+
+def _bericht_bauen(out: list[dict], skip: list[dict], filt: dict, blind: bool,
+                   dauer_s: float, ki: dict | None = None) -> dict:
+    felder, pos, quote = _summe(out)
+    bericht = {
+        "art": "blindtest" if blind else "testsatz",
+        "erstellt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "filter": filt,
+        "anzahl": len(out),
+        "uebersprungen": skip,
+        "trefferquote": quote,
+        "felder": felder,
+        "positionen": pos,
+        "zeit_s": distribution([f["dauer_s"] for f in out]),
+        "abgebrochen": sum(1 for f in out if f["abgebrochen"]),
+        "dauer_gesamt_s": round(dauer_s, 2),
+        "faelle": out,
+    }
+    if blind:
+        bericht["blind"] = _blind_summe(out, ki=ki or {"aktiv": False, "modell": None})
+    return bericht
+
+
 def laufen(store: Store, lieferant: str | None = None, variante: str = "A",
            nur_ohne_ki: bool = False, fortschritt=None, guard=None,
            blind: bool = False, max_faelle: int = 0) -> dict:
@@ -539,53 +594,90 @@ def laufen(store: Store, lieferant: str | None = None, variante: str = "A",
                 fortschritt(i, len(todo), fall.get("datei") or "")
             # ohne KI: Faelle, die beim Bestaetigen ohne KI auskamen, auch
             # ohne KI nachlesen (schnell, und genau das wird dort gemessen)
-            use_llm = not nur_ohne_ki
-            res = guard.process(fall["_pfad"], use_llm=use_llm)
-            v = vergleiche(fall, res)
-            eintrag = {
-                "sha256": fall["sha256"], "datei": fall.get("datei"),
-                "lieferant": fall.get("supplier_id"),
-                "lieferant_name": fall.get("supplier_name") or "",
-                "extraktion_soll": fall.get("extraktion"),
-                "extraktion_ist": res.extraction,
-                "hergeleitet": bool(fall.get("hergeleitet")),
-                "dauer_s": res.duration_s, "abgebrochen": res.aborted,
-                **v,
-            }
-            if blind:
-                eintrag.update(_blind_bewertung(res, v))
-            out.append(eintrag)
+            res = guard.process(fall["_pfad"], use_llm=not nur_ohne_ki)
+            out.append(_eintrag(fall, res, blind))
     finally:
         if own:
             guard.close()
     if fortschritt:
         fortschritt(len(todo), len(todo), "")
-    felder, pos, quote = _summe(out)
-    filt = {"lieferant": lieferant or None, "variante": variante,
-            "nur_ohne_ki": bool(nur_ohne_ki)}
-    # nur gesetzt, wenn benutzt -- sonst passt der Filter alter Berichte nicht
-    # mehr und der Vergleich mit dem letzten Lauf ginge verloren
-    if blind:
-        filt["blind"] = True
-    if max_faelle and max_faelle > 0:
-        filt["max"] = int(max_faelle)
-    bericht = {
-        "art": "blindtest" if blind else "testsatz",
-        "erstellt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "filter": filt,
-        "anzahl": len(out),
-        "uebersprungen": skip,
-        "trefferquote": quote,
-        "felder": felder,
-        "positionen": pos,
-        "zeit_s": distribution([f["dauer_s"] for f in out]),
-        "abgebrochen": sum(1 for f in out if f["abgebrochen"]),
-        "dauer_gesamt_s": round(time.monotonic() - t0, 2),
-        "faelle": out,
-    }
-    if blind:
-        bericht["blind"] = _blind_summe(out, ki=_ki_stand(use_llm=not nur_ohne_ki))
-    return bericht
+    ki = _ki_stand(use_llm=not nur_ohne_ki) if blind else None
+    filt = _filter(lieferant, variante, nur_ohne_ki, blind, max_faelle,
+                   ki["aktiv"] if ki else None)
+    return _bericht_bauen(out, skip, filt, blind, time.monotonic() - t0, ki)
+
+
+# ---- Blindtest in Etappen (Leerlauf, leerlauf.py) ---------------------------
+# Der Leerlauf hat je Durchgang nur ein begrenztes Zeitfenster und muss fuer
+# neue Rechnungen sofort Platz machen -- der Blindtest laeuft deshalb in
+# Etappen: Stand nach JEDER Rechnung in data/leerlauf/blindtest-laufend.json,
+# der naechste Durchgang macht dort weiter. Erst wenn alle Faelle durch sind,
+# entsteht ein normaler Blindtest-Bericht (mit Vergleich zum letzten).
+
+LAUFEND_DATEI = "blindtest-laufend.json"
+
+
+def _laufend_pfad(root) -> Path:
+    return Path(root) / "leerlauf" / LAUFEND_DATEI
+
+
+def blind_laufend(root) -> dict | None:
+    if not _laufend_pfad(root).exists():
+        return None
+    d = _read_json_safe(_laufend_pfad(root), None)
+    return d if isinstance(d, dict) and isinstance(d.get("offen"), list) else None
+
+
+def blind_etappe(store: Store, *, bis: float, abbrechen=lambda: False,
+                 max_faelle: int = 0, guard=None) -> dict:
+    """Einen Teil des Blindtests rechnen, bis ``bis`` (time.monotonic) oder
+    ``abbrechen()`` wahr ist. -> {"fertig", "erledigt", "offen", "bericht"}"""
+    from .guard import Guard
+
+    root = Path(store.root)
+    stand = blind_laufend(root)
+    alle, skip = faelle(store)
+    by_sha = {f["sha256"]: f for f in alle}
+    if stand is None:
+        todo = _verteilt(alle, max_faelle) if max_faelle and max_faelle > 0 else alle
+        stand = {"gestartet": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                 "max": int(max_faelle or 0),
+                 "offen": [f["sha256"] for f in todo], "fertig": [],
+                 "uebersprungen": skip, "dauer_s": 0.0}
+    _laufend_pfad(root).parent.mkdir(parents=True, exist_ok=True)
+    own = guard is None
+    guard = guard or Guard(root, target=TARGET, extra={"variante": "A", "blind": True},
+                           protokoll=False)
+    t0 = time.monotonic()
+    try:
+        while stand["offen"] and time.monotonic() < bis and not abbrechen():
+            sha = stand["offen"].pop(0)
+            fall = by_sha.get(sha)
+            if fall is not None:
+                res = guard.process(fall["_pfad"], use_llm=True)
+                stand["fertig"].append(_eintrag(fall, res, blind=True))
+            _atomic_write(_laufend_pfad(root), json.dumps(stand, ensure_ascii=False))
+    finally:
+        if own:
+            guard.close()
+    stand["dauer_s"] = round(float(stand.get("dauer_s") or 0) + time.monotonic() - t0, 2)
+    if stand["offen"]:
+        _atomic_write(_laufend_pfad(root), json.dumps(stand, ensure_ascii=False))
+        return {"fertig": False, "erledigt": len(stand["fertig"]), "offen": len(stand["offen"]),
+                "bericht": None}
+    ki = _ki_stand(use_llm=True)
+    filt = _filter(None, "A", False, True, stand.get("max") or 0, ki["aktiv"])
+    bericht = _bericht_bauen(stand["fertig"], stand.get("uebersprungen") or [], filt, True,
+                             stand["dauer_s"], ki)
+    bericht["leerlauf"] = {"gestartet": stand.get("gestartet")}
+    bericht["vergleich"] = vergleich(letzter_bericht(root, filt), bericht)
+    bericht["datei"] = str(speichern(root, bericht))
+    _laufend_pfad(root).unlink(missing_ok=True)
+    # die Sicherungskopie von _atomic_write mit -- sonst holt _read_json_safe
+    # den abgeschlossenen Lauf daraus zurueck
+    _laufend_pfad(root).with_name(LAUFEND_DATEI + ".bak").unlink(missing_ok=True)
+    return {"fertig": True, "erledigt": len(stand["fertig"]), "offen": 0,
+            "bericht": bericht["datei"]}
 
 
 # ---- Blindtest: waere die Rechnung ohne Mensch durchgegangen? --------------

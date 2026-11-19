@@ -133,3 +133,12 @@ def _logo_texterkennung_aus(request, monkeypatch):
     Testlauf dauerte doppelt so lang). Geprueft wird sie in test_logo_name.py."""
     if request.node.module.__name__ != "test_logo_name":
         monkeypatch.setenv("RECHNUNG_LOGO_TEXTERKENNUNG", "0")
+
+
+@pytest.fixture(autouse=True)
+def _leerlauf_aus(request, monkeypatch):
+    """Die Leerlauf-Arbeit (leerlauf.py) haengt an der Uhrzeit (Standard nachts)
+    -- Tests sollen nicht davon abhaengen, wann sie laufen. Geprueft wird sie
+    in test_leerlauf.py."""
+    if request.node.module.__name__ != "test_leerlauf":
+        monkeypatch.setenv("RECHNUNG_LEERLAUF", "aus")

@@ -143,7 +143,8 @@ def _cmd_vorbereiten(args) -> int:
     store = Store(args.data)
     b = vorbereiten_lauf(store, args.samples, abholen=not args.ohne_abholen,
                          zeitgrenze=args.zeit, erneut=args.erneut, max_dateien=args.max,
-                         melde=(lambda t: None) if args.json else print)
+                         melde=(lambda t: None) if args.json else print,
+                         leerlauf=not args.ohne_leerlauf)
     if args.json:
         print(json.dumps(b, indent=2, ensure_ascii=False))
         return 0
@@ -683,6 +684,20 @@ def _cmd_nacht(args) -> int:
     print(f"  veraltete Vorlagen: {len(bericht['layoutwechsel']['veraltete_vorlagen'])}")
     for r in (bericht.get("fehlerstatistik") or {}).get("lohnend", [])[:5]:
         print(f"  lohnend: {r['text']}")
+    ll = bericht.get("leerlauf") or {}
+    if (lauf := ll.get("blindtest_laufend")):
+        print(f"  Blindtest im Leerlauf: {lauf['erledigt']} erledigt, {lauf['offen']} offen")
+    if (bt := ll.get("blindtest")):
+        q, qv = bt.get("trefferquote"), bt.get("trefferquote_vorher")
+        print(f"  Letzter Blindtest ({(bt.get('erstellt') or '')[:10]}, {bt.get('anzahl')} Rechnungen): "
+              f"Trefferquote {q if q is not None else '-'} %"
+              + (f" (vorher {qv} %)" if qv is not None else "")
+              + f", komplett richtig {bt.get('komplett_quote')} %, ohne KI-Deckel "
+              f"{bt.get('sicher_ohne_ki_deckel')} durch / {bt.get('davon_fehlerhaft')} fehlerhaft, "
+              f"mit Gegenpruefung {bt.get('sicher_mit_gegenpruefung')} / "
+              f"{bt.get('gegenpruefung_fehlerhaft')}")
+        for s in bt.get("schlechter") or []:
+            print(f"    schlechter: {s}")
     for name, h in bericht["gesundheit"].items():
         mark = {True: "ok", False: "FAIL", None: "-"}[h["ok"]]
         print(f"  [{mark:4s}] {name}: {h['detail']}")
@@ -860,6 +875,8 @@ def main(argv=None) -> int:
                     help="Zeitgrenze je Datei in Sekunden (Standard 600)")
     vb.add_argument("--max", type=int, default=0, help="hoechstens N Dateien pro Lauf (0 = alle)")
     vb.add_argument("--erneut", action="store_true", help="auch schon vorbereitete Dateien neu auslesen")
+    vb.add_argument("--ohne-leerlauf", action="store_true",
+                    help="danach keine Leerlauf-Arbeit (Neu-Lesen nach Lernstand, Blindtest)")
     vb.add_argument("--json", action="store_true")
     vb.set_defaults(func=_cmd_vorbereiten)
 
