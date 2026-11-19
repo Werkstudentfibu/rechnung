@@ -1,5 +1,10 @@
 # Änderung IT-Freigabe – Anlernphase mit Claude (Cloud-KI)
 
+> **Überholt (2026-11-19):** Die Anlernphase mit Claude ist beendet. Die
+> Anbindung (Langdock, Anthropic-API, Claude Code) ist aus dem Programm
+> entfernt, es gehen keine Rechnungen mehr an einen Cloud-KI-Anbieter. Das
+> Dokument bleibt nur zur Nachvollziehbarkeit des Zeitraums 06.–19.11.2026.
+
 *Stand: 2026-11-06 · ergänzt `IT-FREIGABE-ENTWURF-v2.md` (Abschnitte 2, 4, 6, 7, 13)
 und ersetzt die Aussage „keine Cloud-KI“ in `IT-FREIGABE.md`.*
 

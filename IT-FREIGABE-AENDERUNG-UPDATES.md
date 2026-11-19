@@ -4,8 +4,9 @@
 Erst nach Aarons Freigabe übernehmen.
 
 *Hinweis 2026-11-06: Der unter Punkt 2 vorgeschlagene Satz „keine Verbindung zu
-Cloud-KI-Anbietern“ ist überholt – seit der Anlernphase mit Claude gibt es eine
-solche Verbindung, siehe `IT-FREIGABE-AENDERUNG-CLAUDE.md`.*
+Cloud-KI-Anbietern“ war vom 06.11. bis 19.11.2026 überholt (Anlernphase mit
+Claude, siehe `IT-FREIGABE-AENDERUNG-CLAUDE.md`); seit dem 19.11.2026 gilt er
+wieder – die Anbindung ist entfernt.*
 
 ## 1. Abschnitt 6, Tabelle – neue Zeile
 

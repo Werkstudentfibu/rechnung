@@ -18,7 +18,6 @@ Remote-Sitzung.
 Im Hintergrund laufen geplante Aufgaben, auch ohne angemeldeten Benutzer:
 - Vorbereiten: Postfächer abholen, Rechnungen vorab lesen
 - Nachtlauf: Rückmeldungen, Berichte, Sicherung
-- optional Anlernen
 
 ## 2. Gegenüber dem Laptop bereits umgesetzt
 
@@ -59,8 +58,7 @@ lesen.** Deshalb muss das Konto-Modell vor der Einrichtung feststehen:
   für jedes Konto auf diesem Server) oder im Geheimnisspeicher der IT
   liegen.
 
-Weitere Zugangsdaten (JobRouter-Token, Langdock-Schlüssel, Mail für den
-Lernbericht) stehen heute im Klartext in `C:\Rechnung\rechnung.env`.
+Weitere Zugangsdaten (JobRouter-Token, Mail für den Lernbericht) stehen heute im Klartext in `C:\Rechnung\rechnung.env`.
 Mindestens nötig sind NTFS-Rechte nur für das Programmkonto. Besser ist der
 Geheimnisspeicher der IT, falls gewünscht.
 
@@ -75,10 +73,9 @@ Konto feststeht.
 | IONOS-Postfächer | `imap.ionos.de:993` (IMAP/TLS) | Vorbereiten-Aufgabe, Abholung im Programm | an |
 | JobRouter | JobRouter-Server der Firma (HTTPS) | Übergabe, Rückmeldungen im Nachtlauf | aus, bis angeschlossen |
 | Programm-Updates | `ssh.github.com:443` (nur lesend) | nur bei Selbst-Update (siehe 6.) | – |
-| Claude-Lehrer (Anlernphase) | Langdock (HTTPS) | Aufgabe „Rechnung Anlernen“ | nur falls auf dem Server weitergeführt |
 | Rechnungen hinter Links | freigegebene Lieferanten-Domains `:443` | nur auf Befehl | **aus**, eigene Freigabe: `IT-FREIGABE-AENDERUNG-LINKABRUF.md` |
 
-Eingehend: keine.
+Eingehend: keine. Eine Verbindung zu Cloud-KI-Anbietern gibt es nicht.
 
 ## 6. Updates (Entscheidung der IT)
 
