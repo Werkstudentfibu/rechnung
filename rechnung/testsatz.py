@@ -624,6 +624,21 @@ def _ohne_ki_deckel(res):
     return kopie
 
 
+def _mit_gegenpruefung(res):
+    """Kopie des Ergebnisses, als waere die Gegenpruefung (gegenpruefung.py)
+    eingeschaltet -- None, wenn sie bei dieser Rechnung nicht greifen wuerde
+    (Lieferant nicht hart erkannt oder nicht alle Pflichtfelder belegt)."""
+    from . import gegenpruefung
+
+    g = getattr(res, "gegenpruefung", None) or {}
+    if not (g.get("hart_erkannt") and g.get("vollstaendig")):
+        return None
+    kopie = copy.copy(res)
+    kopie.fields = dict(res.fields or {})
+    gegenpruefung.heben(kopie, g.get("belegt") or [])
+    return kopie
+
+
 def _blind_bewertung(res, v: dict) -> dict:
     """Je Rechnung: komplett richtig? waere sie heute / ohne KI-Deckel ohne
     Mensch durchgegangen? welche Felder waren falsch?"""
@@ -641,6 +656,8 @@ def _blind_bewertung(res, v: dict) -> dict:
         "sicher_heute": ok and human.ist_sicher(res),
         "sicher_ohne_ki_deckel": ok and not gruende,
         "gruende_ohne_ki_deckel": gruende,
+        "sicher_mit_gegenpruefung": ok and (gp := _mit_gegenpruefung(res)) is not None
+                                    and human.ist_sicher(gp),
         "positionen_abweichend": bool(pos["soll"]) and pos["korrekt"] < pos["soll"],
     }
 
@@ -651,6 +668,8 @@ def _blind_summe(out: list[dict], ki: dict) -> dict:
     heute = [f for f in out if f["sicher_heute"]]
     ohne = [f for f in out if f["sicher_ohne_ki_deckel"]]
     fehlerhaft = [f for f in ohne if f["falsche_felder"]]
+    gegen = [f for f in out if f.get("sicher_mit_gegenpruefung")]
+    gegen_fehler = [f for f in gegen if f["falsche_felder"]]
     # Trefferquote je Feld und Herkunft des Werts
     nach_quelle: dict[str, dict[str, dict]] = {}
     for f in out:
@@ -679,6 +698,10 @@ def _blind_summe(out: list[dict], ki: dict) -> dict:
         "fehler_felder": dict(Counter(x for f in fehlerhaft
                                       for x in f["falsche_felder"]).most_common()),
         "davon_positionen_abweichend": sum(1 for f in ohne if f["positionen_abweichend"]),
+        "sicher_mit_gegenpruefung": len(gegen),
+        "gegenpruefung_fehlerhaft": len(gegen_fehler),
+        "gegenpruefung_fehler_felder": dict(Counter(x for f in gegen_fehler
+                                                    for x in f["falsche_felder"]).most_common()),
         "nicht_durch_gruende": dict(gruende.most_common(8)),
         "nach_quelle": dict(sorted(nach_quelle.items())),
     }
@@ -700,6 +723,10 @@ def _blind_text(bl: dict, n: int) -> list[str]:
                  f"davon fehlerhaft: {bl['davon_fehlerhaft']}" + (f" ({fehl})" if fehl else ""))
     if bl.get("davon_positionen_abweichend"):
         lines.append(f"    davon mit abweichenden Positionen: {bl['davon_positionen_abweichend']}")
+    gfehl = ", ".join(f"{k} {v}" for k, v in (bl.get("gegenpruefung_fehler_felder") or {}).items())
+    lines.append(f"  Waeren mit Gegenpruefung durchgegangen: {bl.get('sicher_mit_gegenpruefung', 0)}, "
+                 f"davon fehlerhaft: {bl.get('gegenpruefung_fehlerhaft', 0)}"
+                 + (f" ({gfehl})" if gfehl else ""))
     if bl.get("nicht_durch_gruende"):
         lines.append("  Haeufigste Gruende, warum es trotzdem nicht durchging:")
         lines.extend(f"    {anz:4d}  {g}" for g, anz in bl["nicht_durch_gruende"].items())

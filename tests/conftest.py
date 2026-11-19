@@ -123,3 +123,13 @@ def _clear_llm_cache():
     yield
     semantic._resp_cache.clear()
     semantic.set_cache_dir(None)
+
+
+@pytest.fixture(autouse=True)
+def _logo_texterkennung_aus(request, monkeypatch):
+    """Die Logo-Texterkennung (pipeline._lieferant_aus_logo) startet bei jeder
+    Rechnung ohne erkannten Lieferanten einmal Tesseract -- in den vielen
+    Tests mit absichtlich unbekanntem Lieferanten kostet das nur Zeit (der
+    Testlauf dauerte doppelt so lang). Geprueft wird sie in test_logo_name.py."""
+    if request.node.module.__name__ != "test_logo_name":
+        monkeypatch.setenv("RECHNUNG_LOGO_TEXTERKENNUNG", "0")

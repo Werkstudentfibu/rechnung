@@ -189,6 +189,9 @@ class Result:
     # Nicht-Rechnung (keine_rechnung.py, Entscheidung Aaron 14.10.2026):
     # {"grund", "beschriftung"}, gesetzt nur bei status == KEINE_RECHNUNG
     keine_rechnung: dict | None = None
+    # Gegenpruefung fuer KI-Werte ohne Vorlage (gegenpruefung.py, Aaron
+    # 19.11.2026): {lesung, belegt, hart_erkannt, vollstaendig, angewendet}
+    gegenpruefung: dict | None = None
     # Rechnungstext fuer die Nachlauf-Pruefungen in ``process`` -- wird dort
     # wieder geleert (nicht mit dem Ergebnis herumtragen)
     _pruef_text: str = field(default="", repr=False)
@@ -1295,6 +1298,12 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
         # Deterministisch gefundene Tabelle gewinnt gegen einen KI-Vorschlag
         # (der bei ``skip_items`` ohnehin nicht mehr erfragt wurde).
         res.line_items = positionen.normalize_columns(tbl_items)
+    if any(f.source == "llm" for f in res.fields.values()):
+        # zweite, unabhaengige Lesung der KI-Pflichtfelder (Standard: nur
+        # vermerken; mit RECHNUNG_KI_GEGENPRUEFUNG=1 werden belegte Werte sicher)
+        from . import gegenpruefung
+
+        gegenpruefung.anwenden(res, doc.text)
     machine = dict(res.fields)
     corrections = store.corrections(doc.sha256)
     _apply_corrections(res.fields, corrections)
@@ -1311,8 +1320,11 @@ def _finish_untemplated(res: Result, doc, supplier, store: Store, use_llm: bool,
     swissqr.apply(res.fields, qr, res.hinweise)
     swissqr.parteien(res.ki_lieferant, res.ki_empfaenger, qr)
     with timer.stage("pruefungen"):
+        g = res.gegenpruefung or {}
         res.shadow = shadow.decide(machine, _all_checks(machine, supplier, store, machine_items,
-                                                        doc, extra, qr), new_supplier=True)
+                                                        doc, extra, qr), new_supplier=True,
+                                   ki_belegt=set(g.get("belegt") or []) if g.get("angewendet")
+                                   else None)
         # nur Stammdaten bzw. Zahlungsbedingungen per Textregel: noch nichts
         # Pruefbares extrahiert
         if not any(f.source not in ("library", zahlung.SOURCE) for f in res.fields.values()):

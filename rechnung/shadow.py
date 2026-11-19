@@ -26,7 +26,8 @@ REQUIRED = tuple(n for n, (_t, req) in STANDARD_FIELDS.items() if req)
 UNSURE_BELOW = 0.7
 
 
-def decide(fields: dict[str, FieldResult], checks: list, new_supplier: bool) -> dict:
+def decide(fields: dict[str, FieldResult], checks: list, new_supplier: bool,
+           ki_belegt: set[str] | None = None) -> dict:
     """Wuerde die Maschine allein durchlassen? Alle vier Bedingungen:
     1. alle Pflichtfelder vorhanden,
     2. keine Pruefung rot (``ok is False``; "nicht pruefbar" zaehlt nicht rot),
@@ -48,7 +49,10 @@ def decide(fields: dict[str, FieldResult], checks: list, new_supplier: bool) -> 
     red = [c.name for c in checks if c.ok is False and c.name not in ignored]
     if red:
         reasons.append("Pruefung rot: " + ", ".join(red))
-    llm_only = [n for n in REQUIRED if n in present and present[n].source == "llm"]
+    # nur KI und NICHT durch die (eingeschaltete) Gegenpruefung belegt
+    # (gegenpruefung.py, ``ki_belegt``)
+    llm_only = [n for n in REQUIRED if n in present and present[n].source == "llm"
+                and n not in (ki_belegt or ())]
     if new_supplier and llm_only:
         reasons.append("neuer Lieferant, nur KI: " + ", ".join(llm_only))
     # 4. kein gelesenes Pflichtfeld unter der Mindestkonfidenz -- dieselbe

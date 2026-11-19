@@ -686,6 +686,16 @@ Zusätzlich zur Trefferquote je Feld zeigt der Bericht:
 - häufigste Gründe, warum es trotzdem nicht durchging;
 - Trefferquote je Feld nach Herkunft des Werts (KI, Vorlage, E-Rechnung …).
 
+**Gegenprüfung für neue Lieferanten** (`gegenpruefung.py`, Aaron
+19.11.2026, Standard **aus**): Bei einer Rechnung ohne Vorlage liest das
+Programm die Pflichtfelder ein zweites Mal ohne KI – Rechnungsnummer und
+Rechnungsdatum nur hinter eindeutigen Labels, Beträge über die
+Betragsherleitung. Stimmen alle Pflichtfelder mit der KI überein und wurde der
+Lieferant über USt-IdNr/IBAN erkannt, gelten die KI-Werte mit
+`RECHNUNG_KI_GEGENPRUEFUNG=1` als sicher; alle anderen Prüfungen bleiben. Das
+Ergebnis steht immer in `res.gegenpruefung`; der Blindtest zeigt „Wären mit
+Gegenprüfung durchgegangen, davon fehlerhaft“ – erst danach einschalten.
+
 `--ohne-ki` heißt hier „alle Fälle, aber ohne KI“. `--max N` nimmt eine
 Stichprobe reihum über die Lieferanten. Unter Windows:
 `app\windows\blindtest.cmd C:\Rechnung [--max 30] [--ohne-ki]`. Nur gemessen, nichts umgestellt;
