@@ -183,6 +183,14 @@ def gruendlich() -> bool:
     return _b("RECHNUNG_GRUENDLICH", True)
 
 
+def logo_texterkennung() -> bool:
+    """Lieferantenname aus dem Logo (Aaron 19.11.2026): wird ein Lieferant
+    nicht erkannt, liest die Texterkennung einmal den Kopfbereich der ersten
+    Seite (PDFs mit Textebene, ``ocr.kopf_text``) und sucht dort den Namen.
+    Standard AN, ``RECHNUNG_LOGO_TEXTERKENNUNG=0`` schaltet ab."""
+    return _b("RECHNUNG_LOGO_TEXTERKENNUNG", True)
+
+
 def namenserkennung() -> float | None:
     """Lieferanten-Erkennung ueber den Namen (identify.py, Aaron 09.11.2026):
     Lieferanten aus dem Excel-Import haben weder USt-IdNr noch IBAN. Steht

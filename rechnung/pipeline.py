@@ -1509,6 +1509,60 @@ def process(path: str | Path, store: Store, use_llm: bool = True,
     return res
 
 
+LOGO_HINWEIS = ("Lieferant ueber den Namen im Logo erkannt (Texterkennung des Kopfbereichs) "
+                "-- bitte beim Bestaetigen pruefen")
+
+
+class _DocMitKopf:
+    """Document-Ersatz fuer ``identify_with_reason``: Text um die erkannte
+    Kopfzeile (Logo) ergaenzt, Seiten/Woerter unveraendert."""
+
+    def __init__(self, doc, kopf: str):
+        self._doc, self._kopf = doc, kopf
+        self.pages, self.sha256, self.path = doc.pages, doc.sha256, doc.path
+
+    @property
+    def text(self) -> str:
+        return self._doc.text + "\n" + self._kopf
+
+    def all_words(self):
+        return self._doc.all_words()
+
+
+def _lieferant_aus_logo(path: Path, doc, store: Store, res: "Result", has_addr: bool,
+                        empfaenger: set[str], nur_cache: bool = False):
+    """Zweiter Versuch, wenn kein Lieferant erkannt wurde und das PDF eine
+    eigene Textebene hat (Aaron 19.11.2026: der Name steht oft nur im Logo).
+    Nur die Namens-Erkennung zaehlt: bringt die Kopf-Erkennung eine USt-IdNr/
+    IBAN mit, die nicht schon im Text steht, wird sie verworfen (keine harte
+    Kennung aus einem Bild). ``nur_cache``: schnelle Listen-Verarbeitung --
+    keine neue Texterkennung, nur ein schon vorhandenes Ergebnis."""
+    from .config import logo_texterkennung
+    from .textnorm import find_ibans, find_ustids
+
+    if path.suffix.lower() != ".pdf" or not logo_texterkennung() or _namenserkennung() is None:
+        return None
+    cache = store.root / "ocr"
+    if nur_cache and not (cache / f"{doc.sha256}.kopf.txt").exists():
+        return None
+    kopf = ocr.kopf_text(path, cache, doc.sha256)
+    if not kopf.strip():
+        return None
+    text = doc.text
+    if (set(find_ustids(kopf)) - set(find_ustids(text))) or \
+            (set(find_ibans(kopf)) - set(find_ibans(text))):
+        return None
+    match, _why = identify_with_reason(
+        _DocMitKopf(doc, kopf), store.suppliers(),
+        index=store.supplier_index(res.billing_address_id),
+        address_id=res.billing_address_id, has_addresses=has_addr,
+        address_name=res.billing_address_name or "",
+        einzelkandidat_namensschwelle=_namenserkennung(), empfaenger=empfaenger)
+    if match is not None:
+        res.hinweise.append(LOGO_HINWEIS)
+    return match
+
+
 def _process(path: str | Path, store: Store, use_llm: bool = True,
              create_draft_supplier: bool = False,
              variante: str = semantic.VARIANTE_A) -> Result:
@@ -1622,6 +1676,9 @@ def _process(path: str | Path, store: Store, use_llm: bool = True,
             address_id=res.billing_address_id, has_addresses=has_addr,
             address_name=res.billing_address_name or "",
             einzelkandidat_namensschwelle=_namenserkennung(), empfaenger=empfaenger)
+        if not match and o is None:
+            match = _lieferant_aus_logo(path, doc, store, res, has_addr, empfaenger,
+                                        nur_cache=not use_llm)
         if not match and create_draft_supplier:
             match = _auto_draft_pdf(res, doc, store, use_llm, timer)
     if not match:

@@ -345,6 +345,48 @@ def _run_tesseract(image: Path, out_base: Path, timeout: float | None,
           "--dpi", str(DPI), "pdf", "tsv"], timeout, niedrig=niedrig, check=True)
 
 
+KOPF_ANTEIL = 0.3
+
+
+def kopf_text(path: str | Path, cache_dir: str | Path, sha: str,
+              timeout: float | None = 30) -> str:
+    """Texterkennung NUR fuer den Kopfbereich (oberes ``KOPF_ANTEIL``) der
+    ersten Seite eines PDFs mit eigener Textebene (Aaron 19.11.2026: der
+    Lieferantenname steht oft nur im Logo, also als Bild -- die Textebene
+    kennt ihn nicht). Ergebnis je sha gecacht (``<sha>.kopf.txt``, auch ein
+    leeres), damit jede Rechnung hoechstens einmal erkannt wird. Ohne
+    Tesseract/bei einem Fehler: leerer Text."""
+    cache = Path(cache_dir) / f"{sha}.kopf.txt"
+    if cache.exists():
+        try:
+            return cache.read_text("utf-8")
+        except OSError:
+            return ""
+    if not enabled() or not available():
+        return ""
+    text = ""
+    try:
+        with tempfile.TemporaryDirectory(prefix="rechnung-kopf-") as td:
+            bild = _page_images(Path(path), [0])[0]
+            if bild is None:
+                return ""
+            w, h = bild.size
+            png = Path(td) / "kopf.png"
+            bild.crop((0, 0, w, max(1, int(h * KOPF_ANTEIL)))).save(png)
+            out = Path(td) / "kopf"
+            _run([tesseract_cmd(), str(png), str(out), "-l", sprache(),
+                  "--dpi", str(DPI), "txt"], timeout, niedrig=True, check=True)
+            text = (out.with_suffix(".txt")).read_text("utf-8", "replace").strip()
+    except Exception:  # noqa: BLE001 -- Kopf-Erkennung ist nur eine Zusatzchance
+        return ""
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(text, "utf-8")
+    except OSError:
+        pass
+    return text
+
+
 def _parse_tsv(text: str, word_min: float) -> tuple[list[float], list[str]]:
     confs, low = [], []
     lines = text.splitlines()
