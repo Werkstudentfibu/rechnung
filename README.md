@@ -44,6 +44,13 @@ rechnung testsatz --blind [--ohne-ki] [--max N]   # Blindtest: als waere jeder L
 rechnung fehlerstatistik [--json]          # welche Felder bei welchen Lieferanten wie oft korrigiert werden
 ```
 
+Unter Windows gibt es für einige Befehle Startdateien, die die Einstellungen
+des Programmordners laden und weitere Optionen durchreichen, z. B.
+`app\windows\nachlernen.cmd C:\Rechnung [--ausfuehren --operator NAME]`,
+`app\windows\autonomie.cmd C:\Rechnung [--alle-bereiten --operator NAME]`,
+`app\windows\blindtest.cmd C:\Rechnung [--max 30]`, `vorlagen.cmd`,
+`link-mails.cmd`.
+
 `app` und `web` sind dieselbe Oberfläche (gleicher FastAPI-Code) – `app`
 zeigt sie über `pywebview` in einem eigenständigen Fenster statt in einem
 Browser-Tab. Für den produktiven Einsatz auf dem Firmen-Laptop ist `app`
