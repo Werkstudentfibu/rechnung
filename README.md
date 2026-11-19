@@ -675,7 +675,8 @@ Zusätzlich zur Trefferquote je Feld zeigt der Bericht:
 - Trefferquote je Feld nach Herkunft des Werts (KI, Vorlage, E-Rechnung …).
 
 `--ohne-ki` heißt hier „alle Fälle, aber ohne KI“. `--max N` nimmt eine
-Stichprobe reihum über die Lieferanten. Nur gemessen, nichts umgestellt;
+Stichprobe reihum über die Lieferanten. Unter Windows:
+`app\windows\blindtest.cmd C:\Rechnung [--max 30] [--ohne-ki]`. Nur gemessen, nichts umgestellt;
 verglichen wird nur mit dem letzten Blindtest. Grenzen: Kopfwörter, die auch
 dieser Lieferant bestätigt hat, bleiben im Spaltenwörterbuch; ein Lieferant,
 der erst aus einer Rechnung als Entwurf entstand, behält deren USt-IdNr/IBAN.
