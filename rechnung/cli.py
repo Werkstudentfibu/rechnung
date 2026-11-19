@@ -470,6 +470,27 @@ def _cmd_fehlerbericht(args) -> int:
     return 0
 
 
+def _cmd_nachlernen(args) -> int:
+    """Vorlagen aus bereits bestaetigten Rechnungen neu lernen (nachlernen.py);
+    ohne --ausfuehren nur anzeigen."""
+    from . import nachlernen
+
+    try:
+        b = nachlernen.laufen(Store(args.data), ausfuehren=args.ausfuehren,
+                              operator=args.operator or "", lieferant=args.lieferant)
+    except ValueError as e:
+        print(f"Fehler: {e}")
+        return 2
+    if args.json:
+        print(json.dumps(b, indent=2, ensure_ascii=False))
+        return 0
+    if not b["rechnungen"] and not b["uebersprungen"]:
+        print("Noch keine bestaetigten Rechnungen.")
+        return 0
+    print(nachlernen.text(b))
+    return 0
+
+
 def _cmd_testsatz(args) -> int:
     """Testsatz aus bestaetigten Rechnungen im Trockenlauf pruefen
     (testsatz.py): je Feld richtig/falsch/fehlt, Positionen, Zeit, Vergleich
@@ -855,6 +876,15 @@ def main(argv=None) -> int:
     fb.add_argument("--seit", help="nur Ereignisse ab diesem Datum (YYYY-MM-DD)")
     fb.add_argument("--json", action="store_true")
     fb.set_defaults(func=_cmd_fehlerbericht)
+
+    nl = sub.add_parser("nachlernen",
+                        help="Vorlagen aus bereits bestaetigten Rechnungen neu lernen "
+                             "(ohne --ausfuehren nur anzeigen)")
+    nl.add_argument("--ausfuehren", action="store_true", help="gelernte Vorlagen speichern")
+    nl.add_argument("--operator", help="wer nachlernt (Pflicht bei --ausfuehren, Audit)")
+    nl.add_argument("--lieferant", help="nur dieser Lieferant (ID oder Teil des Namens)")
+    nl.add_argument("--json", action="store_true")
+    nl.set_defaults(func=_cmd_nachlernen)
 
     ts = sub.add_parser("testsatz",
                         help="Bestaetigte Rechnungen im Trockenlauf neu lesen und je Feld "
