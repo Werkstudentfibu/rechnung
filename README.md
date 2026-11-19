@@ -30,6 +30,8 @@ rechnung fehlerbericht              # haeufigste wiederkehrende Fehler/Korrektur
 rechnung menschlich                 # Ordner "Menschliche Bearbeitung": was wartet und warum
 rechnung modus                      # Betriebsmodus + Fortschritt Testphase -> Autonomie
 rechnung modus autonom --operator NAME   # ausdruecklich umschalten (Audit-Eintrag)
+rechnung autonomie [--alle-bereiten --operator NAME]   # Autonomie je Lieferant
+rechnung nachlernen [--ausfuehren --operator NAME]     # Vorlagen aus bestaetigten Rechnungen neu lernen
 rechnung nacht                      # Nachtlauf: JobRouter, Layoutwechsel, Berichte, Gesundheit
 rechnung imap-test                  # IONOS: Anmeldung/Ordner/ungelesen pruefen, ohne abzuholen
 rechnung jobrouter-test              # JobRouter: Erreichbarkeit/Anmeldung pruefen, ohne anzulegen
@@ -159,6 +161,16 @@ einmal von einem Menschen freigegeben.
   Prozent sicherer Rechnungen, die trotzdem zum Menschen gehen) und
   automatischer Rückfall in die Testphase bei einer JobRouter-Korrektur
   (`RECHNUNG_AUTONOM_RUECKFALL=1`).
+- **Autonomie je Lieferant** (Aaron 19.11.2026): `rechnung autonomie` zeigt
+  je Lieferant die sicheren Rechnungen in Folge ohne Korrektur (Richtwert
+  `RECHNUNG_AUTONOM_JE_LIEFERANT`, Standard 10). Bereite Lieferanten gibt
+  ein Mensch frei (`--freigeben ID` bzw. `--alle-bereiten`, Pflicht
+  `--operator NAME`, Audit `autonomie_lieferant`); ihre sicheren Rechnungen
+  laufen dann ohne Klick wie im Modus `autonom`, alle anderen bleiben in der
+  Testphase. Eine Fehlentscheidung bei diesem Lieferanten entzieht die
+  Freigabe automatisch (`--entziehen ID` von Hand). Kopfzeile und
+  `rechnung modus` zeigen die Zahlen. Gespeichert in
+  `data/autonomie-lieferanten.json`.
 - **IBAN-Abweichung** von den Stammdaten: `RECHNUNG_IBAN_ABWEICHUNG=mensch`
   (Standard: zurückgestellt → Ordner) oder `warnen` (geht durch, aber mit
   deutlichem Feld `warnung` „ACHTUNG IBAN weicht von den Stammdaten ab …“ im

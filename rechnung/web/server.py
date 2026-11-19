@@ -2321,7 +2321,12 @@ def create_app(store: Store, samples: Path) -> FastAPI:
         from .. import modus
 
         fp = modus.fortschritt(store)
-        return JSONResponse(dict(fp, text=modus.text(fp)))
+        rows = modus.lieferanten_fortschritt(store)
+        return JSONResponse(dict(
+            fp, text=modus.text(fp),
+            lieferanten_frei=sum(1 for r in rows if r["frei"]),
+            lieferanten_bereit=sum(1 for r in rows if r["bereit"] and not r["frei"]),
+            ziel_je_lieferant=modus.ziel_je_lieferant()))
 
     # ---- Selbst-Update (Laptop-Testphase, selbstupdate.py) ----------
     @app.get("/api/version")

@@ -108,6 +108,15 @@ Abschnitt 11.
   standardmäßig aus: eine Stichprobe (Anteil sicherer Rechnungen, die
   trotzdem zum Menschen gehen) und ein automatischer Rückfall in die
   Testphase bei einer Korrektur aus JobRouter.
+- **Autonomie je Lieferant** (ergänzt 2026-11-19): Statt das ganze Programm
+  umzuschalten, kann ein einzelner Lieferant ohne Klick laufen, sobald er
+  sich bewährt hat (Richtwert: 10 sichere Rechnungen in Folge ohne
+  Korrektur, einstellbar). Freigegeben wird wie beim Modus nur per Befehl
+  mit Namensangabe (`rechnung autonomie --freigeben ID --operator NAME`,
+  Audit). Jede Fehlentscheidung bei diesem Lieferanten (der Mensch oder
+  JobRouter musste eine durchgelassene Rechnung korrigieren) nimmt die
+  Freigabe automatisch zurück. Alle übrigen Lieferanten bleiben in der
+  Testphase; die Freigabe in JobRouter bleibt in jedem Fall.
 - **Abweichende IBAN** (Rechnung nennt eine IBAN, die nicht in den
   Stammdaten steht): Standard ist „zum Menschen“. Alternativ einstellbar:
   durchlassen mit deutlichem Warnfeld im JobRouter-Datensatz; als

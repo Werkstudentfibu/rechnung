@@ -1064,7 +1064,7 @@ def _gegencheck_active(tpl: Template, store: Store) -> bool:
 
     from .config import gruendlich
 
-    if modus.is_autonomous(store):
+    if modus.autonom_fuer(store, tpl.supplier_id):
         return gegencheck_autonom() and (gruendlich() or tpl.confirmations < gegencheck_min())
     # Lernphase: im gruendlichen Modus (Aaron 05.11.2026) wird die Vorlage
     # IMMER gegen eine unabhaengige KI-Lesung gehalten, nicht nur bis zur
@@ -1937,7 +1937,7 @@ def dispatch(res: Result, store: Store) -> dict:
     elif gruende := human.gruende(res):
         human.ablegen(store, res, gruende)
         out = {"aktion": "mensch", "gruende": gruende}
-    elif not modus.is_autonomous(store):
+    elif not modus.autonom_fuer(store, res.supplier_id):
         out = {"aktion": "bestaetigung"}
     elif modus.stichprobe(res.sha256):
         stich = [{"art": "stichprobe", "felder": [],
@@ -2005,7 +2005,7 @@ def finalize(res: Result, store: Store, *, operator: str | None = None,
     if not store.is_confirmed(res.sha256):
         if not autonomous:
             return {"finalized": False, "error": "not_confirmed", "status": res.status}
-        if not modus.is_autonomous(store):
+        if not modus.autonom_fuer(store, res.supplier_id):
             return {"finalized": False, "error": "not_autonomous", "status": res.status}
         if human.gruende(res):
             return {"finalized": False, "error": "unsicher", "status": res.status}

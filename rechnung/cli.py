@@ -576,7 +576,51 @@ def _cmd_modus(args) -> int:
         lf = fp["letzte_fehlentscheidung"]
         print(f"  letzte Fehlentscheidung: {lf['datei']} ({lf['lieferant']}), "
               f"korrigiert: {', '.join(lf['korrigiert'])}")
+    rows = modus.lieferanten_fortschritt(store)
+    frei = sum(1 for r in rows if r["frei"])
+    bereit = sum(1 for r in rows if r["bereit"] and not r["frei"])
+    if frei or bereit:
+        print(f"  Lieferanten ohne Klick: {frei}, bereit zur Freigabe: {bereit} "
+              f"(Einzelheiten: rechnung autonomie)")
     return 0
+
+
+def _cmd_autonomie(args) -> int:
+    """Autonomie je Lieferant anzeigen, freigeben, entziehen (modus.py)."""
+    from . import modus
+
+    store = Store(args.data)
+    aendern = args.freigeben or args.entziehen or args.alle_bereiten
+    if aendern and not args.operator:
+        print("Fehler: Freigeben/Entziehen nur mit --operator NAME (wird im Audit-Log vermerkt).")
+        return 2
+    meldungen, fehler = [], 0
+    ids = list(args.freigeben or [])
+    if args.alle_bereiten:
+        ids += [r["lieferant"] for r in modus.lieferanten_fortschritt(store)
+                if r["bereit"] and not r["frei"] and r["lieferant"] not in ids]
+    for sid in ids:
+        try:
+            modus.lieferant_freigeben(store, sid, args.operator, args.grund or "")
+            meldungen.append(f"freigegeben: {sid}")
+        except ValueError as e:
+            meldungen.append(f"Fehler: {e}")
+            fehler += 1
+    for sid in args.entziehen or []:
+        ok = modus.lieferant_entziehen(store, sid, args.operator, args.grund or "von Hand")
+        meldungen.append(f"entzogen: {sid}" if ok else f"war nicht freigegeben: {sid}")
+    rows = modus.lieferanten_fortschritt(store)
+    if args.json:
+        print(json.dumps({"meldungen": meldungen, "lieferanten": rows}, indent=2,
+                         ensure_ascii=False))
+        return 2 if fehler else 0
+    for m in meldungen:
+        print(m)
+    if modus.is_autonomous(store):
+        print("Hinweis: der Modus 'autonom' gilt programmweit -- alle Lieferanten laufen "
+              "ohne Klick.")
+    print(modus.lieferanten_text(rows))
+    return 2 if fehler else 0
 
 
 def _cmd_menschlich(args) -> int:
@@ -923,6 +967,20 @@ def main(argv=None) -> int:
     mo.add_argument("--grund", help="optionaler Vermerk fuer das Audit-Log")
     mo.add_argument("--json", action="store_true")
     mo.set_defaults(func=_cmd_modus)
+
+    au = sub.add_parser("autonomie",
+                        help="Autonomie je Lieferant: anzeigen, bewaehrte Lieferanten ohne "
+                             "Klick freigeben, Freigabe entziehen")
+    au.add_argument("--freigeben", action="append", metavar="ID",
+                    help="diesen (bereiten) Lieferanten freigeben, mehrfach moeglich")
+    au.add_argument("--alle-bereiten", action="store_true",
+                    help="alle Lieferanten freigeben, die den Richtwert erreicht haben")
+    au.add_argument("--entziehen", action="append", metavar="ID",
+                    help="Freigabe zuruecknehmen, mehrfach moeglich")
+    au.add_argument("--operator", help="wer gibt frei/entzieht (Pflicht, Audit)")
+    au.add_argument("--grund", help="optionaler Vermerk fuer das Audit-Log")
+    au.add_argument("--json", action="store_true")
+    au.set_defaults(func=_cmd_autonomie)
 
     me = sub.add_parser("menschlich",
                         help="Ordner 'Menschliche Bearbeitung': offene Rechnungen mit Gruenden")

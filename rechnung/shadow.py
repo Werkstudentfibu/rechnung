@@ -123,7 +123,21 @@ def record(store, res, operator: str = "") -> dict:
         "operator": operator or "?",
     }
     store.shadow_append(rec)
+    _entziehen_bei_fehler(store, rec)
     return rec
+
+
+def _entziehen_bei_fehler(store, rec: dict) -> None:
+    """Autonomie je Lieferant (modus.py): eine Fehlentscheidung nimmt dem
+    Lieferanten die Freigabe sofort wieder (zurueck in die Testphase)."""
+    if not rec.get("wrong") or not rec.get("supplier_id"):
+        return
+    from . import modus
+
+    modus.lieferant_entziehen(
+        store, rec["supplier_id"], modus.AUTOMATISCH,
+        grund=f"Fehlentscheidung {rec.get('file') or rec.get('sha256', '')[:12]}: "
+              f"korrigiert {', '.join(rec.get('corrected') or [])}")
 
 
 def record_feedback_correction(store, sha256: str, corrected_fields: list[str],
@@ -143,6 +157,7 @@ def record_feedback_correction(store, sha256: str, corrected_fields: list[str],
               wrong=bool(prev.get("would_pass")) and bool(merged),
               ts=time.strftime("%Y-%m-%dT%H:%M:%S%z"), operator=operator or "?")
     store.shadow_append(rec)
+    _entziehen_bei_fehler(store, rec)
     return rec
 
 

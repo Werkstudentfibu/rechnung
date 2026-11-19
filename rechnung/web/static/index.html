@@ -3280,9 +3280,15 @@ async function loadModus() {
   const prog = `${m.in_folge}/${m.ziel_in_folge} sicher in Folge · ` +
     `${m.lieferanten_in_folge}/${m.ziel_lieferanten} Lieferanten` +
     (m.erreicht ? ' · Richtwert erreicht' : '');
+  // Autonomie je Lieferant (Aaron 19.11.2026): freigegeben wird per Befehl
+  // "rechnung autonomie", hier nur die Zahlen
+  const je = (m.lieferanten_frei || m.lieferanten_bereit)
+    ? ` · Lieferanten ohne Klick: ${m.lieferanten_frei || 0}` +
+      (m.lieferanten_bereit ? ` (+${m.lieferanten_bereit} bereit)` : '')
+    : '';
   $('#modus').textContent = m.modus === 'autonom'
     ? `AUTONOM (sichere Rechnungen ohne Klick an JobRouter) · ${prog}`
-    : `Testphase · ${prog}`;
+    : `Testphase · ${prog}${je}`;
 }
 
 /* ================= Selbst-Update ================= */
